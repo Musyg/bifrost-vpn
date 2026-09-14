@@ -1,0 +1,35 @@
+[package]
+name = "bifrost-temoin-svchost"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Temoin de DIAGNOSTIC heberge dans svchost.exe. Ne protege rien."
+
+[lib]
+name = "bifrost_temoin_svchost"
+# `cdylib` parce que le gestionnaire de services charge une DLL et y cherche
+# un export; `rlib` parce que sans lui les recettes de ce crate ne se
+# compileraient pas, et une garde qui ne s'execute pas ne garde rien.
+crate-type = ["cdylib", "rlib"]
+
+[target.'cfg(windows)'.dependencies]
+# La sonde. Elle n'est PAS reecrite ici: le temoin appelle
+# `bifrost_daemon::wfp_identity::rafale`, celle-la meme que `--connect-probe`
+# execute. Une seconde implementation rendrait les deux mesures incomparables.
+bifrost-daemon.workspace = true
+windows-sys = { version = "0.61", features = [
+    # ERROR_SUCCESS et ERROR_SERVICE_SPECIFIC_ERROR.
+    "Win32_Foundation",
+    # RegGetValueW: la cible et la duree de rafale vivent sous Parameters.
+    "Win32_System_Registry",
+    # RegisterServiceCtrlHandlerW, SetServiceStatus, et les etats de service.
+    "Win32_System_Services",
+    # GetCommandLineW: c'est la ligne de commande de svchost qui dit si le
+    # drapeau -p est actif, et ce drapeau est la limite connue de la mesure.
+    "Win32_System_Environment",
+] }
+
+[lints]
+workspace = true

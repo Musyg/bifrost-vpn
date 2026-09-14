@@ -1,0 +1,118 @@
+# Unite systemd du daemon Bifrost.
+#
+# Installer avec packaging/install-linux.sh, qui cree aussi les comptes. Puis
+# donner le droit de pilotage a un humain:
+#   usermod -aG bifrost <utilisateur>
+#   systemctl enable --now bifrost-daemon
+#
+# Verifier le durcissement: systemd-analyze security bifrost-daemon.service
+
+[Unit]
+Description=Daemon Bifrost, tunnel WireGuard et kill switch
+Documentation=https://github.com/Musyg/bifrost-vpn
+After=network-pre.target
+Wants=network-pre.target
+# Le compte du coeur doit exister avant le demarrage: sans lui le daemon
+# refuse de demarrer, ce qui est voulu. L'ordre est deja garanti par
+# sysinit.target, on l'ecrit pour que la dependance soit lisible ici plutot que
+# devinee depuis un message d'erreur.
+After=systemd-sysusers.service
+
+[Service]
+Type=simple
+# --coeur-utilisateur nomme le compte declare dans packaging/sysusers.d. Les
+# deux fichiers doivent nommer le MEME compte, et une recette le verifie: s'ils
+# divergeaient, le daemon refuserait de demarrer avec un message parfaitement
+# clair mais sur un fichier que personne ne penserait a relire.
+# --resolveur-utilisateur nomme le compte du resolveur chiffre. Il ne l'exempte
+# de rien, au contraire du precedent: il ferme le :53 a tout le monde sauf a
+# lui. Le declarer ici est sans danger pour les profils ordinaires parce que la
+# restriction ne s'applique QUE si le profil actif demande `embarque`; un
+# profil qui route le DNS vers ses amonts garde son :53 ouvert dans le tunnel.
+# --resolveur-binaire designe le resolveur par un chemin en dur, jamais par le
+# PATH. Le binaire peut ne pas etre installe: un profil qui demande `embarque`
+# echoue alors avec un message clair, ce qui est le comportement voulu.
+ExecStart=/usr/bin/bifrost-daemon --group bifrost --coeur-utilisateur bifrost-coeur \
+          --resolveur-utilisateur bifrost-resolveur \
+          --resolveur-binaire /usr/lib/bifrost/dnscrypt-proxy \
+          --resolveur-configuration /run/bifrost/resolveur/dnscrypt-proxy.toml
+# AUCUN retrait du pare-feu dans le cycle de vie, et c'est le point entier de
+# cette unite. Il y avait ici, jusqu'au 23/08/2026:
+#
+#   ExecStopPost=-/usr/bin/bifrost-daemon --cleanup-firewall
+#
+# sous un commentaire qui annoncait l'invariant que cette ligne cassait.
+# `ExecStopPost=` s'execute sur TOUS les chemins d'arret - man systemd.service:
+# << This includes cases where [...] the service exited unexpectedly >> - et un
+# redemarrage est un arret suivi d'un demarrage, donc il s'execute aussi
+# dedans. Avec `Restart=on-failure` et `RestartSec=2` ci-dessous, chaque
+# plantage demontait donc le kill switch puis laissait la machine nue jusqu'au
+# retour du daemon. Mesure sur la machine d'essai le 23/08/2026, unite reelle
+# confinee dans un namespace: 16 paquets sortants en clair sur l'interface
+# physique apres un SIGKILL, contre 0 daemon vivant, et le journal montre
+# `Main process exited, code=killed, status=9/KILL` puis, une seconde plus
+# tard, `kill switch desarme`.
+#
+# Le desarmement est donc EXPLICITE et n'a que deux portes, toutes deux hors du
+# cycle de vie systemd:
+#   - `bifrost-cli disconnect`, authentifie par SO_PEERCRED sur le socket;
+#   - `bifrost-cli emergency-disarm --je-sais-ce-que-je-fais`, pour la machine
+#     coupee du reseau dont le daemon ne repond plus.
+# La desinstallation appelle `--cleanup-firewall`, ce qui reste juste: elle est
+# demandee par un humain, pas par une fin de processus.
+Restart=on-failure
+RestartSec=2
+RuntimeDirectory=bifrost
+RuntimeDirectoryMode=0755
+StateDirectory=bifrost
+
+# --- Durcissement ---
+# CAP_NET_ADMIN pour nftables, les routes et l'interface du tunnel.
+# CAP_NET_RAW pour les sondes du harnais de fuite.
+# CAP_SYS_ADMIN pour les namespaces reseau que ce meme harnais cree.
+# CAP_CHOWN pour donner au resolveur son repertoire de travail.
+# CAP_SETUID, CAP_SETGID et CAP_NET_BIND_SERVICE pour le resolveur chiffre
+# embarque: le daemon prend les identifiants de son compte AVANT l'exec, puis
+# ne lui laisse que de quoi se lier au :53. Sans ces trois-la, la bascule
+# echoue et le resolveur ne demarre pas -- ce qui, mesure le 17/08/2026, etait
+# le cas de cette unite avant qu'on ne l'exerce.
+# CAP_KILL pour ARRETER le resolveur. Contre-intuitif et pourtant decisif:
+# root n'a pas le droit de signaler un processus d'un autre UID sans cette
+# capacite. Le daemon tourne en root, le resolveur sous son compte dedie; sans
+# CAP_KILL le daemon peut le lancer et jamais l'arreter. Mesure sous ce
+# durcissement le 17/08/2026: le daemon restait bloque a l'arret, et le
+# resolveur gardait le :53. Ce que `sudo` ne montrait pas, parce que root y
+# garde toutes ses capacites.
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN CAP_CHOWN CAP_SETUID CAP_SETGID CAP_NET_BIND_SERVICE CAP_KILL
+# L'ambiant, lui, est HERITE par les enfants. CAP_KILL n'y figure pas: le
+# daemon tourne en root et tire ses capacites du bounding set, alors que le
+# resolveur n'a aucune raison de pouvoir signaler qui que ce soit.
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN CAP_CHOWN CAP_SETUID CAP_SETGID CAP_NET_BIND_SERVICE
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/bifrost /run/bifrost /etc/resolv.conf
+ProtectHome=yes
+PrivateTmp=no
+ProtectKernelTunables=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+# AF_NETLINK est indispensable: sans lui le daemon ne peut programmer ni
+# nftables ni les routes, et echoue au premier connect.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK AF_PACKET
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service @module
+SystemCallFilter=~@keyring @swap
+UMask=0077
+
+# ProtectKernelModules et RestrictNamespaces sont volontairement absents: le
+# daemon charge le module wireguard a la creation de la premiere interface, et
+# le harnais de fuite cree des namespaces reseau.
+
+[Install]
+WantedBy=multi-user.target

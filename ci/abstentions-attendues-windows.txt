@@ -1,0 +1,45 @@
+# Budget d'abstention du job de tests Windows (<< lint et tests (Windows) >>) de
+# la CI. Une ligne = une recette qui, SUR LE RUNNER, imprime SKIPPED et ne
+# mesure rien: c'est un AVEU a faire tomber, pas un acquis. Le but est que ce
+# fichier finisse vide.
+#
+# Vers --strict: quand CE fichier ET ci/abstentions-attendues-linux.txt seront
+# tous deux vides, la CI remplacera le couple recettes-strict.sh (sans --strict)
+# + abstentions-budget.sh par recettes-strict.sh --strict, qui refuse toute
+# abstention. Voir .github/workflows/ci.yml.
+#
+# Forme stable: les raisons sont comparees apres avoir remplace tout chemin
+# absolu par <CHEMIN> et toute suite de chiffres (uid, pid, compteur) par <N>,
+# car ils varient d'un run a l'autre. Une ligne portant un chemin ou un nombre
+# brut fait rougir la garde de forme.
+#
+# Releve fondateur (2026-09-05): les abstentions n'etaient PAS visibles dans la
+# CI d'alors, car << cargo test --workspace >> sans --nocapture capture la sortie
+# des tests verts (dernier run vert de cette forme, run 33978299199, commit
+# ed9366f: 0 ligne SKIPPED visible, 1183 tests << passed >>). La liste avait
+# ete SEMEE depuis dev-windows (commit 0062fb0, 19 abstentions) plus minisign,
+# absent du runner.
+# Releve MESURE (2026-09-14): run 34870873349, commit 7c687ab (5w'), job
+# << lint et tests (Windows) >>: 51 binaires, 1223 vertes, 23 abstentions,
+# 0 rouge; budget tenu, aucune abstention nouvelle, aucune ligne absente. Les
+# 23 sont les 19 de dev-windows plus les 4 recettes minisign, comme prevu. Les
+# huit runs precedents (05/09 au 13/09) n'avaient jamais atteint ce budget:
+# voir ETAT.md, << La CI rouge neuf jours >>.
+# Correction 5m' (2026-09-14): la troisieme recette de vitalite.rs,
+# la_bascule_change_vraiment_de_sortie_et_le_dit, imprimait sa raison de
+# SKIPPED sur stderr et SANS son nom (eprintln!("SKIPPED: ...")), a l'inverse
+# de ses deux soeurs (println!, nommees). La forme anonyme sur stderr etait
+# capturee de facon instable sous --nocapture: presente sur le run 34878706275
+# (depot public, commit 19b9b42, job Linux) et absente du run 34870873349
+# (5w', Linux), d'ou un budget rouge quand 5l' l'avait retiree de la seule
+# liste Linux. 5m' aligne la recette sur ses soeurs (println, nommee); la
+# forme nommee remplace l'anonyme. Confirme au run de CI de 5m', cite par
+# son numero dans ETAT.md.
+SKIPPED la_bascule_change_vraiment_de_sortie_et_le_dit: BIFROST_COEURS ne designe aucun repertoire: cette recette veut un vrai sing-box, que le depot ne distribue pas
+SKIPPED la_poignee_rend_un_verdict_sans_jamais_faire_attendre_le_superviseur: BIFROST_COEURS ne designe aucun repertoire: cette recette veut un vrai sing-box, que le depot ne distribue pas
+SKIPPED les_quatre_issues_de_la_sonde_tiennent_face_a_un_vrai_coeur: BIFROST_COEURS ne designe aucun repertoire: cette recette veut un vrai sing-box, que le depot ne distribue pas
+SKIPPED un_chemin_etroit_est_vu_comme_tel: BIFROST_CHEMIN_ETROIT absent, aucune interface a MTU reduit a viser
+SKIPPED: <CHEMIN> absente: le depot ne distribue aucun binaire tiers, la recuperer avec 'bifrost pilote recuperer'
+SKIPPED: l'enrobage qui fait passer la doublure pour sing-box est un script shell
+SKIPPED: le binaire minisign n'est pas installe sur cette machine
+SKIPPED: wintun.dll absente a cote du binaire: le depot ne distribue aucun binaire tiers, la recuperer avec 'bifrost pilote recuperer'

@@ -1,0 +1,19 @@
+[package]
+name = "bifrost-evasion"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Choix du protocole de contournement: politique pure, sans reseau ni processus"
+
+[dependencies]
+serde = { workspace = true }
+
+[dev-dependencies]
+# Uniquement pour lire la sortie de `cargo metadata` dans la recette de
+# frontiere de licence. Le crate lui-meme ne depend de rien d'autre que serde.
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

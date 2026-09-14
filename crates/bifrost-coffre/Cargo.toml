@@ -1,0 +1,31 @@
+[package]
+name = "bifrost-coffre"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Rangement des profils au repos"
+
+[dependencies]
+anyhow.workspace = true
+minisign-verify = "0.2"
+
+[dev-dependencies]
+minisign = "0.9"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    # CryptProtectData / CryptUnprotectData et le CRYPT_INTEGER_BLOB qu'ils
+    # echangent, c'est-a-dire DPAPI.
+    "Win32_Security_Cryptography",
+    # Le proprietaire d'un fichier: GetNamedSecurityInfoW et le SID du jeton du
+    # processus, pour refuser un repertoire de profil qui appartient a un tiers.
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Threading",
+] }
+
+[lints]
+workspace = true

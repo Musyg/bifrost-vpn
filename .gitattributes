@@ -1,0 +1,15 @@
+# Normalisation par defaut des fichiers texte.
+* text=auto eol=lf
+
+# Un script shell en CRLF ne demarre pas: /bin/bash^M n'existe pas. Ces
+# fichiers doivent rester en LF meme sur une machine de developpement Windows.
+*.sh text eol=lf
+*.service text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# Binaires eventuels.
+*.png binary
+*.pcap binary
+*.dll binary
+*.exe binary

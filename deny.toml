@@ -1,0 +1,130 @@
+# Ce que le depot accepte de tirer, et ce qu'il refuse.
+#
+# Ecrit le 22 aout 2026 d'apres le document 07 partie 2.2, qui donnait deja ce
+# fichier. Trois ecarts avec ce qu'il proposait, tous mesures et non supposes:
+# `db-path` a saute, la liste des licences a ete RELEVEE sur l'arbre reel par
+# `cargo deny list` au lieu d'etre recopiee, et `cargo-vet` n'est pas cable -
+# le document lui-meme le reserve aux exigences supply-chain strictes et dit
+# que cargo-deny suffit comme baseline.
+#
+# Schema verifie contre cargo-deny 0.20.2, publie le 9 juillet 2026: aucun des
+# champs employes ici ne fait partie de ceux qui ont ete retires. Le sont
+# `[advisories] vulnerability`, `notice` et `severity-threshold` - tous les avis
+# emettent desormais une erreur - ainsi que `[licenses] unlicensed`, `deny`,
+# `copyleft`, `allow-osi-fsf-free` et `default`.
+#
+# # Ce fichier ne remplace pas `frontiere_licence.rs`
+#
+# `crates/bifrost-evasion/tests/frontiere_licence.rs` garde la frontiere du
+# PRODUIT: Bifrost est sous MPL-2.0, lier du GPL lui imposerait sa licence,
+# donc sing-box et AmneziaWG restent derriere une frontiere de processus. Cette
+# recette-la refuse toute dependance GPL ou AGPL, toute LGPL hors d'une liste
+# nommee, et tout paquet sans licence declaree.
+#
+# Ce fichier-ci garde autre chose: qu'aucune licence INCONNUE n'entre sans que
+# quelqu'un l'ait regardee. Les deux se recouvrent sur les licences et ne
+# posent pas la meme question. Leur seul point de contact a tenir a la main est
+# la liste LGPL, qui doit rester la meme des deux cotes: aujourd'hui
+# `wireguard-control` et lui seul.
+
+[advisories]
+# Pas de `db-path` ici, contrairement au document 07 qui ecrivait
+# `~/.cargo/advisory-db`: le tilde n'est pas developpe par cargo-deny, il serait
+# pris pour un repertoire nomme `~`. Le defaut vit deja dans CARGO_HOME.
+db-urls = ["https://github.com/rustsec/advisory-db"]
+
+# Une version yankee est un paquet que son auteur a retire de la circulation,
+# souvent parce qu'il etait casse ou dangereux. La garder au verrou est une
+# dette silencieuse.
+yanked = "deny"
+
+# `all` est le defaut et on l'ecrit pour que le choix se voie: un crate non
+# maintenu dans l'arbre est un crate dont personne ne corrigera la prochaine
+# faille. Le restreindre a `workspace` masquerait exactement les dependances
+# transitives qu'on ne choisit pas.
+unmaintained = "all"
+
+# Le SEUL avis de l'arbre au 22 aout 2026, et il est nomme plutot que couvert
+# par une regle plus lache. Abaisser `unmaintained` a `workspace` l'aurait fait
+# taire, et aurait fait taire du meme coup tous ceux qui viendront apres.
+#
+# RUSTSEC-2024-0436, emis le 7 mars 2025: `paste` est archive par son auteur.
+# Type INFO, non maintenu - ce n'est pas une vulnerabilite, aucune version
+# corrigee n'existe et l'avis lui-meme n'en annonce pas.
+#
+# Trois faits qui portent la decision, tous verifies et non supposes:
+#
+# 1. `paste` est un **proc-macro** - `cargo metadata` donne `kind: proc-macro`.
+#    Il s'execute a la CONSTRUCTION et emet du code; il n'expose aucune surface
+#    dans le binaire livre. Un proc-macro non maintenu n'est pas de meme nature
+#    qu'une bibliotheque non maintenue qui parle au reseau.
+# 2. Il est **transitif et non choisi**: netlink-packet-utils le tire, sous
+#    `wireguard-control`, dont la presence a ete tranchee le 16 aout 2026.
+# 3. Il n'arrive que par la pile netlink, donc **cote Linux seulement**.
+#
+# Ce qu'il faudrait pour le retirer: changer de plan de controle WireGuard.
+# `defguard_wireguard_rs` est cite comme candidat depuis juillet, mais sa
+# licence n'a jamais ete verifiee - le document d'etat le dit et interdit de la
+# citer sans le faire. Ce n'est donc pas une porte de sortie tant que personne
+# ne l'a ouverte.
+#
+# Le jour ou la pile netlink cessera de tirer `paste`, cette ligne deviendra
+# inutile et `unused-ignored-advisory`, laisse a son defaut, le dira.
+ignore = [
+    { id = "RUSTSEC-2024-0436", reason = "paste archive, proc-macro donc absent du binaire livre, transitif sous wireguard-control, aucune version corrigee" },
+]
+
+[licenses]
+# Relevee sur l'arbre REEL le 22 aout 2026 par `cargo deny list`, et reduite
+# jusqu'a ce que `unused-allowed-license` ne dise plus rien: une liste plus
+# large qu'il ne faut n'interdit rien.
+#
+# Le produit est sous MPL-2.0. Toutes celles-ci sont permissives et se
+# distribuent avec lui sans lui imposer de conditions.
+allow = [
+    "MPL-2.0",
+    "Apache-2.0",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+]
+
+# En TOML, tout ce qui suit `[[licenses.exceptions]]` appartient a CETTE
+# table: les cles de `[licenses]` doivent donc toutes venir avant. Ecrit apres
+# coup, `confidence-threshold` s'est retrouve dans l'exception et cargo-deny a
+# refuse le fichier entier.
+# 0.9 plutot que le defaut 0.8: cargo-deny lit les fichiers LICENSE avec
+# askalono et rend un score de ressemblance. Plus le seuil est bas, plus il
+# accepte une correspondance approximative, c'est-a-dire plus il risque de
+# prendre une licence pour une autre.
+confidence-threshold = 0.9
+
+# La LGPL n'est PAS dans la liste ci-dessus, et c'est le point. L'y mettre
+# laisserait entrer n'importe quelle LGPL future en silence. Ici l'exception est
+# nominative, comme la liste de `frontiere_licence.rs`: une dependance LGPL de
+# plus fera tomber la recette, ce qui est la reaction voulue.
+#
+# `wireguard-control` a ete tranche le 16 aout 2026 - le client reste ouvert,
+# la dependance LGPL-2.1 reste, et l'exception est nominative. A revoir si la
+# licence de cette dependance change.
+[[licenses.exceptions]]
+crate = "wireguard-control"
+allow = ["LGPL-2.1-or-later"]
+
+[bans]
+# `warn` et non `deny`, sur la recommandation explicite du document 07: eviter
+# la fatigue d'alerte. Plusieurs versions d'un meme crate dans l'arbre est un
+# fait de la vie d'un projet Rust, pas un defaut de securite. Ce qui doit rester
+# a zero, c'est le nombre d'avis non traites, et c'est `cargo audit -D warnings`
+# qui le tient.
+multiple-versions = "warn"
+deny = []
+
+[sources]
+# Un crate venu d'ailleurs que de crates.io, ou d'un depot git non declare, est
+# exactement la forme que prend une attaque sur la chaine d'approvisionnement.
+unknown-registry = "deny"
+unknown-git = "deny"

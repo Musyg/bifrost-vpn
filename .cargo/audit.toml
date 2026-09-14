@@ -1,0 +1,18 @@
+# Exceptions de `cargo audit`.
+#
+# cargo-audit et cargo-deny lisent la MEME base RustSec mais chacun sa liste
+# d'exceptions, dans son propre fichier et sous sa propre forme: une table
+# `{ id, reason }` cote cargo-deny, une simple chaine ici. Deux endroits pour
+# un seul reglage, c'est-a-dire la forme exacte du defaut qu'on a trouve trois
+# fois ce mois-ci en portant le produit sur Windows.
+#
+# `crates/bifrost-evasion/tests/avis_ignores.rs` les compare et tombe si elles
+# divergent. Ne rien ajouter ici sans l'ajouter aussi dans `deny.toml`, ou la
+# recette dira pourquoi.
+#
+# Le RAISONNEMENT vit dans `deny.toml`, a cote de son entree: cargo-audit
+# n'ayant pas de champ `reason`, l'ecrire ici en commentaire le condamnerait a
+# diverger de l'autre.
+
+[advisories]
+ignore = ["RUSTSEC-2024-0436"]

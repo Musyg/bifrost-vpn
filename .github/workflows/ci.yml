@@ -1,0 +1,350 @@
+name: ci
+
+# `mvp` a disparu du declencheur le 16 aout 2026: depuis l'avance rapide, les
+# deux tetes sont identiques et chaque commit declenchait deux fois la meme
+# recette. `main` est la branche produit, c'est elle qui doit etre verifiee.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Toute action tierce est epinglee par SHA: un tag est mutable, et un tag
+# deplace suffit a executer du code arbitraire dans un job qui compile un
+# produit de securite.
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  controles:
+    name: format, lint et tests (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Outillage
+        run: rustup component add rustfmt clippy
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      # `cargo test --workspace` nu CAPTURE la sortie des tests qui passent: une
+      # recette qui s'abstient imprime SKIPPED et rend Ok, donc cargo la compte
+      # verte et son motif reste INVISIBLE. Mesure sur le runner, run 33978299199
+      # commit ed9366f, job Linux: 0 ligne SKIPPED dans le journal, alors que la
+      # meme suite en compte plusieurs. `recettes-strict.sh` relance la MEME
+      # suite avec --nocapture: il rend donc les abstentions visibles, et echoue
+      # toujours sur une recette rouge ou une suite qui n'a pas tourne. Il
+      # englobe et remplace `cargo test --workspace`.
+      #
+      # Le journal complet de cargo est garde a cote (RECETTES_JOURNAL_BRUT) et
+      # depose en artefact si l'etape echoue: huit runs du 05/09 au 13/09 ont
+      # rendu 101 sans qu'une ligne du log ne nomme la recette en cause, le
+      # script effacant son journal a la sortie. Ce que le script imprime
+      # (tee) reste le compte lisible; l'artefact est la preuve complete.
+      - name: Recettes (compte honnete, sans --strict)
+        env:
+          RECETTES_JOURNAL_BRUT: recettes-brut.txt
+        run: ./scripts/recettes-strict.sh | tee recettes-journal.txt
+
+      - name: Journal complet des recettes, en cas d'echec
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: recettes-brut-linux
+          path: recettes-brut.txt
+          if-no-files-found: ignore
+
+      # Le budget: chaque abstention du journal doit etre attendue. Rouge sur une
+      # abstention nouvelle ou une raison de forme inconnue; avertit sans rougir
+      # sur une ligne de la liste qui n'apparait plus (progres a retirer).
+      # Palier vers --strict: quand ci/abstentions-attendues-linux.txt ET
+      # -windows.txt seront tous deux vides, ces deux etapes cederont la place a
+      # `recettes-strict.sh --strict`, qui refuse toute abstention.
+      - name: Budget d'abstention
+        run: ./scripts/abstentions-budget.sh --liste ci/abstentions-attendues-linux.txt --journal recettes-journal.txt
+
+      # L'empaquetage est du texte, donc il derive sans que rien ne compile en
+      # erreur. La recette applique le fichier de comptes dans une racine
+      # jetable et verifie ce qu'il produit reellement, sans creer de compte
+      # sur le runner.
+      - name: Empaquetage Linux
+        run: sudo ./scripts/packaging-linux.sh
+
+      # Le runner n'a pas dnscrypt-proxy: la confrontation au binaire s'y
+      # declare SKIPPED. Ce qui tourne quand meme, et qui justifie l'etape,
+      # c'est la generation de la configuration et la relecture de ses
+      # proprietes de securite. dnscrypt-proxy 2.1.18 accepte sans un mot une
+      # ecoute sur 0.0.0.0:53 ou l'absence d'ignore_system_dns: ces
+      # proprietes-la, personne ne les juge a notre place.
+      - name: Configuration du resolveur chiffre
+        run: ./scripts/resolveur-linux.sh
+
+  windows:
+    name: lint et tests (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Outillage
+        run: rustup component add clippy
+      # Seul endroit ou le code WFP est reellement compile et lie: la machine de
+      # developpement n'a pas de linker MSVC. Sans ce job, la moitie Windows du
+      # produit ne serait jamais verifiee par un compilateur.
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      # Comme le job Linux: la suite passe par `recettes-strict.sh` (--nocapture)
+      # au lieu de `cargo test --workspace` nu, pour que les abstentions soient
+      # visibles, puis par le budget. Le runner Windows execute par defaut sous
+      # PowerShell; ces deux scripts sont du bash (recettes-strict.sh l'est
+      # deja), donc les etapes sont forcees `shell: bash` - le runner Windows de
+      # GitHub embarque Git Bash, et c'est ainsi que dev-windows les lance.
+      # Aucune elevation n'est ajoutee: le runner Windows est deja eleve, on n'y
+      # touche pas.
+      #
+      # Un `bash` nu lance depuis un test Rust n'est PAS celui de cette etape:
+      # CreateProcess cherche dans System32 avant le PATH, et le runner y a le
+      # lanceur du sous-systeme Linux sous ce nom. C'est ce qui a rougi cette
+      # etape du 05/09 au 13/09; la recette `abstentions_budget.rs` resout
+      # Git Bash elle-meme depuis, voir son en-tete.
+      - name: Recettes (compte honnete, sans --strict)
+        shell: bash
+        env:
+          RECETTES_JOURNAL_BRUT: recettes-brut.txt
+        run: ./scripts/recettes-strict.sh | tee recettes-journal.txt
+
+      - name: Journal complet des recettes, en cas d'echec
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: recettes-brut-windows
+          path: recettes-brut.txt
+          if-no-files-found: ignore
+
+      # Palier vers --strict: voir le commentaire du job Linux et les en-tetes
+      # des deux listes ci/abstentions-attendues-*.txt.
+      - name: Budget d'abstention
+        shell: bash
+        run: ./scripts/abstentions-budget.sh --liste ci/abstentions-attendues-windows.txt --journal recettes-journal.txt
+
+      - name: Compilation
+        run: cargo build --workspace --locked
+
+      # L'autotest du kill switch (--wfp-selftest) n'est PAS execute ici, et ce
+      # n'est pas un oubli. Il a ete essaye: il fonctionne, et c'est justement
+      # le probleme. Le block-all coupe tout le reseau de la machine, donc la
+      # liaison entre le runner et GitHub. Le job est reste bloque jusqu'a son
+      # echeance. Verifier un kill switch sur la machine meme qui doit rapporter
+      # le resultat n'a pas de sens: la recette Windows se fait sur une machine
+      # dediee, voir la section correspondante du README.
+
+  fuite:
+    name: suite de fuite
+    runs-on: ubuntu-latest
+    # Le harnais lance des daemons et des captures: si l'un d'eux survit a son
+    # script, le job reste ouvert bien apres que ses etapes ont reussi. Cette
+    # borne evite d'immobiliser un runner pendant des heures.
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Dependances du harnais
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends nftables tcpdump iproute2 jq
+      - name: Environnement
+        run: |
+          uname -r
+          nft --version
+          # Le harnais etablit un vrai tunnel: sans le module, trois vecteurs
+          # se declarent SKIPPED et l'etape stricte plus bas echouera.
+          sudo modprobe wireguard && echo "module wireguard charge"
+      - name: Compilation
+        run: cargo build --workspace --locked
+
+      # Les DEUX BRAS de `doh-bypass`, que ce vecteur n'avait pas.
+      #
+      # Tous les autres vecteurs de la suite mesurent un ECART: un cas sans
+      # protection ou la fuite se voit, un cas avec protection ou elle
+      # disparait. `doh-bypass`, lui, lisait un ETAT et s'arretait la. Sur la
+      # machine d'essai il rendait vert parce qu'une politique y trainait
+      # depuis deux jours et que deux navigateurs sur quatre n'y sont pas
+      # installes: le vert ne mesurait pas une protection, il mesurait un
+      # reste.
+      #
+      # Sur un runner neuf, avec les quatre navigateurs et aucune politique, le
+      # meme code rend rouge - et il a raison. Ces deux etapes en font une
+      # mesure au lieu d'un constat: on exige de le voir ECHOUER avant, puis
+      # REUSSIR apres avoir pose la politique. Sans le premier bras, un vecteur
+      # qui rendrait PASSED quoi qu'il arrive franchirait la suite stricte
+      # aussi bien qu'un vecteur qui regarde vraiment.
+      #
+      # `--doh-policy constater` et non `--run-checks`: il ne fait que LIRE des
+      # politiques, il passe donc avant le controle de privileges et n'exige
+      # pas root, et surtout il ne monte ni banc, ni namespace, ni capture. Il
+      # sort en erreur exactement quand le vecteur est FAILED.
+      - name: doh-bypass doit ECHOUER tant qu'aucune politique n'est posee
+        run: |
+          if ./target/debug/bifrost-daemon --doh-policy constater; then
+            echo "un runner sans politique DoH doit rendre FAILED: sans ce bras, le vecteur ne mesure rien"
+            exit 1
+          fi
+
+      # Le bras AVEC. La politique est deposee par la commande du PRODUIT, pas
+      # par un fixture: cette etape eprouve donc aussi `doh_pose_fichiers`, qui
+      # n'est execute nulle part ailleurs. Et elle ne peut rien ecraser -
+      # `firefox_fusionner` refuse net un `policies.json` portant deja une
+      # politique DoH contraire, ce qui ferait echouer cette etape au lieu de
+      # verdir le vecteur en silence.
+      - name: Pose des politiques qui coupent le DoH
+        run: sudo ./target/debug/bifrost-daemon --doh-policy poser
+
+      # Le meme constat, apres. PASSED exige nommement: `rapporter_constat`
+      # rend 0 sur SKIPPED comme sur PASSED, et un SKIPPED ici voudrait dire
+      # qu'aucun navigateur n'a ete trouve, donc que la pose n'a rien pince.
+      - name: Le meme constat doit maintenant PASSER
+        run: |
+          ./target/debug/bifrost-daemon --doh-policy constater | tee doh-apres.txt
+          grep -q '^PASSED  doh-bypass' doh-apres.txt
+
+      # scripts/e2e-linux.sh n'est PAS execute ici. Il passe, et ce n'est pas
+      # un probleme de test mais de runner: il lance un daemon et une capture
+      # en root, dans des namespaces reseau, et quelque chose dans cet arbre
+      # empeche le runner, qui tourne en utilisateur ordinaire, de clore son
+      # job. Toutes les etapes reussissaient puis le job restait bloque sur
+      # "Cleaning up orphan processes" jusqu'a son echeance. Mesure faite: sans
+      # cette etape, le meme job se termine en cent secondes.
+      #
+      # Ce qu'elle verifie, la montee du tunnel et l'etancheite quand
+      # l'interface est detruite, est couvert par les vecteurs exit-ip et
+      # kill-switch-on-drop de l'etape suivante. La recette complete reste
+      # lancable a la main, voir le README.
+
+      # `check` seul ne suffit pas comme critere de CI: il renvoie 0 quand tout
+      # est SKIPPED, ce qui est correct pour un utilisateur mais serait un
+      # blanc-seing en integration continue. Le script passe par
+      # --run-checks, qui tourne au premier plan sans daemon en tache de fond.
+      - name: Tous les vecteurs doivent etre PASSED
+        run: sudo RAPPORT="$PWD/rapport-fuite.json" ./scripts/check-strict.sh
+
+      - name: Preuves en cas d'echec
+        if: failure()
+        run: |
+          jq . rapport-fuite.json || cat rapport-fuite.json || true
+          cat /tmp/bifrost-check-strict.log || true
+          ls -la /tmp/bifrost-check-*.pcap || true
+
+      # Le harnais lance des daemons et des captures en root. Un seul survivant
+      # que le runner, qui tourne en utilisateur ordinaire, ne peut pas tuer,
+      # et le job reste bloque sur "Cleaning up orphan processes" alors que
+      # toutes ses etapes ont reussi. On nettoie donc explicitement.
+      #
+      # pkill -x et non -f: avec -f, le motif matcherait la ligne de commande de
+      # cette etape elle-meme, qui se suiciderait.
+      - name: Nettoyage des processus residuels
+        if: always()
+        run: |
+          # Le resume d'etape est consultable meme si le job ne se termine pas,
+          # contrairement aux logs. C'est le seul moyen de diagnostiquer un
+          # blocage sur "Cleaning up orphan processes".
+          {
+            echo '## Processus residuels du harnais'
+            echo '```'
+            ps -eo user,pid,comm,args | grep -E 'bifrost|tcpdump|netns' | grep -v grep || echo 'aucun'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          sudo pkill -x bifrost-daemon || true
+          sudo pkill -x tcpdump || true
+          sudo pkill -x ip || true
+          sudo ip -all netns delete || true
+          sleep 1
+          {
+            echo '### Apres nettoyage'
+            echo '```'
+            ps -eo user,pid,comm | grep -E 'bifrost|tcpdump' | grep -v grep || echo 'aucun'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  dependances:
+    name: audit des dependances et SBOM
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # `cargo cyclonedx` recoit l'horodatage du dernier commit pour que le
+          # SBOM soit reproductible; un clone superficiel a bien ce commit-la.
+          fetch-depth: 1
+
+      # Des binaires publies, pas une compilation: `cargo install cargo-deny`
+      # sur un runner prend plusieurs minutes a chaque execution, pour un outil
+      # dont on ne modifie jamais le code.
+      - name: Outillage
+        uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518 # v2.86.5
+        with:
+          tool: cargo-audit,cargo-deny,cargo-cyclonedx
+
+      # Les deux outils lisent la MEME base RustSec, et c'est voulu de garder
+      # les deux. cargo-audit est l'implementation de reference de RustSec;
+      # cargo-deny en refait la correspondance et y ajoute les licences, les
+      # sources et les versions multiples. Un desaccord entre eux serait
+      # lui-meme un signal.
+      #
+      # Le prix de ce doublon est qu'ils ont chacun leur liste d'exceptions,
+      # dans deux fichiers et sous deux syntaxes. C'est exactement la forme du
+      # defaut trouve trois fois en aout 2026 en portant le produit sur
+      # Windows, donc il est garde par une recette:
+      # `crates/bifrost-evasion/tests/avis_ignores.rs` tombe si les deux listes
+      # divergent. Elle tourne dans le job `controles`, pas ici.
+      #
+      # `-D warnings` sur la recommandation explicite du document 07: un avis
+      # "unmaintained" est un simple avertissement pour cargo-audit, donc sans
+      # ce drapeau la CI resterait verte en le signalant. Ce qui doit rester a
+      # zero, c'est le nombre d'avis NON TRAITES; un avis ignore nommement dans
+      # `deny.toml`, avec sa raison et sa date, est un avis traite.
+      - name: Avis RustSec
+        run: cargo audit -D warnings
+
+      # Les quatre controles: advisories, bans, licenses, sources. La
+      # configuration et le raisonnement de chaque choix vivent dans
+      # `deny.toml`.
+      - name: Licences, sources, doublons et avis
+        run: cargo deny check
+
+      # Le CRA impose un SBOM lisible par machine dans la documentation
+      # technique (Annexe I partie II), et le document 07 le veut a chaque
+      # build. C'est le premier pas: il est PRODUIT et depose. L'attacher aux
+      # releases et a la documentation technique appartient a la tranche
+      # signature.
+      #
+      # `--describe binaries`: un SBOM par binaire livre, et non un par crate.
+      # C'est ce que quelqu'un recoit qui compte.
+      #
+      # `--target all`: les arbres de dependances DIFFERENT reellement entre
+      # les plateformes - `wireguard-control` et sa pile netlink n'existent que
+      # sous Linux. N'engendrer le SBOM que sur ce runner-ci sans ce drapeau
+      # decrirait le binaire Linux en pretendant decrire le produit. L'union
+      # sur toutes les cibles est un sur-ensemble honnete; le SBOM d'une
+      # construction precise ira avec la tranche signature.
+      #
+      # `--spec-version 1.5`: c'est le maximum que cargo-cyclonedx 0.5.9 sait
+      # ecrire, verifie a son `--help` le 22 aout 2026. La specification
+      # CycloneDX courante est la 1.7, publiee le 21 octobre 2025 et normalisee
+      # ECMA-424 le 10 decembre 2025. On ecrit donc 1.5 par limite d'outil, pas
+      # par choix.
+      #
+      # `SOURCE_DATE_EPOCH`: sans lui le SBOM porte l'heure de sa generation et
+      # deux executions sur le meme code rendent deux fichiers differents.
+      - name: SBOM CycloneDX
+        run: |
+          SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)" \
+            cargo cyclonedx --describe binaries --target all \
+              --format json --spec-version 1.5 --quiet
+
+      - name: Depot du SBOM
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbom-cyclonedx
+          path: crates/*/*.cdx.json
+          # Un SBOM absent doit faire echouer le job. Sans cela, une commande
+          # qui cesserait d'ecrire ou qui changerait de nom de fichier
+          # laisserait un job vert et un depot vide.
+          if-no-files-found: error

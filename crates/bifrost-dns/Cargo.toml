@@ -1,0 +1,21 @@
+[package]
+name = "bifrost-dns"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Gestion du resolveur local pendant la duree du tunnel"
+
+[dependencies]
+bifrost-core.workspace = true
+tracing.workspace = true
+
+# Deux usages, tous deux sur Unix seulement: reconnaitre EBUSY quand
+# resolv.conf est monte en bind, et poser un umask restrictif dans un test pour
+# verifier que le mode du fichier n'en depend pas.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[lints]
+workspace = true

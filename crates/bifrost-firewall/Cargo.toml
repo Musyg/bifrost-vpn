@@ -1,0 +1,31 @@
+[package]
+name = "bifrost-firewall"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Kill switch Bifrost: nftables (Linux) et WFP user-mode (Windows)"
+
+[dependencies]
+bifrost-core.workspace = true
+sha1.workspace = true
+tracing.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    # NET_LUID_LH vit dans Ndis, et ConvertInterfaceAliasToLuid est gate dessus.
+    "Win32_NetworkManagement_Ndis",
+    "Win32_NetworkManagement_WindowsFilteringPlatform",
+    "Win32_Security",
+    # ConvertStringSecurityDescriptorToSecurityDescriptorW et
+    # ConvertSidToStringSidW, pour la condition ALE_USER_ID.
+    "Win32_Security_Authorization",
+    "Win32_System_Rpc",
+    "Win32_System_Threading",
+] }
+
+[lints]
+workspace = true

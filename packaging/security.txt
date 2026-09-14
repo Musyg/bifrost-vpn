@@ -1,0 +1,23 @@
+# security.txt de Bifrost, conforme a la RFC 9116.
+#
+# Ce fichier est la source versionnee. Le site de l'editeur (Inaricom) en sert
+# une copie a https://inaricom.com/.well-known/security.txt, en HTTPS, avec un
+# Content-Type text/plain; charset=utf-8 (mise en ligne hors depot, a la main).
+#
+# Le champ Policy ci-dessous pointe sur le SECURITY.md publie dans le depot du
+# code. Le marqueur Musyg/bifrost-vpn est remplace par le nom du depot public.
+#
+# Pas de champ Encryption: aucune cle PGP n'est publiee pour l'instant. Le jour
+# ou une cle existera, ajouter ici une ligne Encryption pointant sur la cle et
+# basculer le statut de cle dans SECURITY.md; la garde security_txt_a_jour.rs
+# exige alors les deux fichiers coherents.
+#
+# Le champ Expires ci-dessous est fixe a environ dix mois (echeance 2027-07-01)
+# pour rester sous la limite d'un an recommandee par la RFC 9116 et forcer un
+# renouvellement annuel. La garde de source rougit si la date tombe a moins de
+# 30 jours ou a plus de 365 jours de maintenant.
+Contact: mailto:security@inaricom.com
+Expires: 2027-07-01T00:00:00Z
+Preferred-Languages: fr, en
+Canonical: https://inaricom.com/.well-known/security.txt
+Policy: https://github.com/Musyg/bifrost-vpn/blob/main/SECURITY.md

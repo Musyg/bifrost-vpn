@@ -1,0 +1,60 @@
+# Secrets et configuration locale
+.env
+.env.*
+*.key
+*.pem
+*.pfx
+*.p12
+secrets/
+credentials/
+
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# Node / Tauri
+node_modules/
+dist/
+.tauri/
+
+# Build et artefacts
+*.msi
+*.deb
+*.rpm
+*.exe
+*.dll
+*.so
+build/
+out/
+
+# Systeme
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Editeurs
+.vscode/
+.idea/
+*.swp
+*~
+
+# Logs et captures
+*.log
+*.pcap
+*.pcapng
+*.etl
+*.dmp
+
+# Cache de bytecode Python, produit par une simple verification de syntaxe
+# sur les scripts de diagnostic.
+__pycache__/
+*.pyc
+
+# Rapport produit par check-strict.sh, regenere a chaque passage.
+rapport-fuite.json
+
+# SBOM engendre par `cargo cyclonedx`. Il se refabrique a chaque fois et porte
+# l'horodatage du commit: le versionner ferait un diff a chaque construction
+# pour un fichier derive. La CI le depose comme artefact.
+*.cdx.json

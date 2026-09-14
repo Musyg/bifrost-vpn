@@ -1,0 +1,23 @@
+[package]
+name = "bifrost-telemetrie"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Couche 1 anti-telemetrie: le catalogue des reglages et le journal qui les defait"
+
+# Aucune dependance systeme, volontairement. Ce crate ne touche ni au registre,
+# ni aux services, ni aux taches planifiees: il dit CE QU'IL FAUT poser et
+# COMMENT le defaire. La pose vit dans `bifrost_daemon::telemetrie`, du cote
+# impur, exactement comme `bifrost_evasion::carnet` et
+# `bifrost_daemon::carnet`. Consequence directe: tout ce qui est ici se teste
+# sur essai-linux comme sur dev-windows, donc les recettes du catalogue et de
+# la reversibilite ne s'abstiennent jamais.
+[dependencies]
+bifrost-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

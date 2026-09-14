@@ -1,0 +1,49 @@
+[package]
+name = "bifrost-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Client non privilegie Bifrost"
+
+[[bin]]
+name = "bifrost-cli"
+path = "src/main.rs"
+
+[dependencies]
+bifrost-amorce.workspace = true
+bifrost-coffre.workspace = true
+bifrost-core.workspace = true
+bifrost-ipc.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+toml = "0.9"
+# L'empreinte epinglee du pilote TUN de Windows. Deja dans l'arbre par age.
+sha2 = "0.10"
+bifrost-evasion.workspace = true
+# La sonde d'inspection TLS. En TLS 1.3 le message Certificate est chiffre sous
+# les clefs de poignee de main, donc illisible en comptant des octets: il faut
+# une vraie pile. Elle est ICI et pas dans le daemon parce que celui-ci tourne
+# en root et que `bifrost-daemon/tests/frontiere_reseau.rs` le lui interdit,
+# avec ses raisons. Memes reglages que bifrost-amorce, meme fournisseur, et le
+# jeu de racines de Mozilla EMBARQUE - surtout pas celui du systeme, ou une
+# interception d'entreprise s'installe.
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std", "tls12"] }
+webpki-roots = "1"
+
+[dev-dependencies]
+# Engendre le certificat auto-signe du TEMOIN POSITIF de la sonde: elle doit
+# montrer qu'elle voit une interception quand il y en a une. Jamais compile
+# dans le produit.
+#
+# Sans defauts pour ecarter `ring`, que rcgen prend sinon comme fournisseur: le
+# depot l'evite ailleurs (RUSTSEC-2025-0007, non maintenu), et une dependance
+# de developpement n'est pas une raison de relacher la regle.
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "aws_lc_rs", "pem"] }
+
+[lints]
+workspace = true

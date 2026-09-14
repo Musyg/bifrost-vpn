@@ -1,0 +1,97 @@
+[package]
+name = "bifrost-daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Daemon privilegie Bifrost"
+
+[lib]
+name = "bifrost_daemon"
+path = "src/lib.rs"
+
+[[bin]]
+name = "bifrost-daemon"
+path = "src/main.rs"
+
+[dependencies]
+bifrost-coffre.workspace = true
+bifrost-core.workspace = true
+bifrost-evasion.workspace = true
+bifrost-firewall.workspace = true
+bifrost-dns.workspace = true
+bifrost-telemetrie.workspace = true
+bifrost-ipc.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+toml = "0.9"
+# Pile TCP/IP en espace utilisateur, pour le chemin par coeur: le TUN rend des
+# paquets IP, le coeur attend un SOCKS5. Voir l'en-tete de coeurs/passeur.rs
+# pour la mesure qui a fait ecarter les autres candidats - mesure faite pour les
+# DEUX plateformes, le chemin par coeur existant desormais des deux cotes.
+ipstack = "1.0"
+# La sonde QUIC fabrique un paquet Initial version 1 valide: HKDF-SHA256 pour
+# les secrets, AES-128-GCM pour la charge, AES-128 en bloc nu pour la
+# protection d'en-tete. Les quatre etaient DEJA dans le verrou par transitivite
+# (age, via bifrost-coffre et bifrost-amorce): rien de nouveau n'entre dans le
+# depot, seules des dependances directes sont declarees. RustCrypto plutot
+# qu'aws-lc-rs pour un seul point: la protection d'en-tete demande un
+# chiffrement de bloc AES NU, que `aes::Aes128::encrypt_block` expose et que les
+# facades AEAD ne donnent pas.
+hkdf = "0.12"
+sha2 = "0.10"
+aes = "0.8"
+aes-gcm = "0.10"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+wireguard-control = "2.0"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    # Adresses, routes et MTU de l'interface du tunnel.
+    "Win32_NetworkManagement_IpHelper",
+    # NET_LUID_LH, rendu par WireGuardGetAdapterLUID.
+    "Win32_NetworkManagement_Ndis",
+    # SOCKADDR_INET et les constantes de famille d'adresse.
+    "Win32_Networking_WinSock",
+    # LogonUserW (compte de service du resolveur, 11b-1) et Get/SetUserObjectSecurity
+    # (ACE de window-station/desktop) vivent dans ce module.
+    "Win32_Security",
+    # ConvertSidToStringSidW, et Get/SetNamedSecurityInfoW pour ouvrir au compte
+    # de service le repertoire d'etat du resolveur (11b-1, selftest).
+    "Win32_Security_Authorization",
+    # GetProcessWindowStation, GetThreadDesktop, Get/SetUserObjectSecurity:
+    # ACE de window-station/desktop de la session 0 (11b-1, sinon 0xC0000142).
+    "Win32_System_StationsAndDesktops",
+    # RegGetValueW: politiques DoH des navigateurs et du client DNS.
+    "Win32_System_Registry",
+    # BCryptGenRandom, pour le secret de l'API de controle des coeurs.
+    "Win32_Security_Cryptography",
+    # Objet Job: garantit qu'un coeur ne survit pas au daemon.
+    "Win32_System_JobObjects",
+    # LoadLibraryExW et GetProcAddress, pour wireguard.dll.
+    "Win32_System_LibraryLoader",
+    # OpenSCManagerW, CreateServiceW, StartServiceCtrlDispatcherW.
+    "Win32_System_Services",
+    # CreateWaitableTimerW et SetWaitableTimer, qui programment le reveil.
+    "Win32_System_Threading",
+    # SetSuspendState et la notification de reprise, pour le vecteur veille.
+    "Win32_System_Power",
+    # DEVICE_NOTIFY_CALLBACK et les PBT_APM*, que windows-sys range du cote
+    # interface graphique alors qu'ils n'en demandent aucune: la notification
+    # de reprise passe par un rappel, sans fenetre ni boucle de messages.
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[lints]
+workspace = true

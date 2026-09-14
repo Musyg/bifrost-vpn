@@ -1,0 +1,68 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/bifrost-core",
+    "crates/bifrost-coffre",
+    "crates/bifrost-amorce",
+    "crates/bifrost-evasion",
+    "crates/bifrost-firewall",
+    "crates/bifrost-dns",
+    "crates/bifrost-telemetrie",
+    "crates/bifrost-ipc",
+    "crates/bifrost-daemon",
+    "crates/bifrost-cli",
+    "crates/bifrost-temoin-svchost",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+license = "MPL-2.0"
+repository = "https://github.com/Musyg/bifrost-vpn"
+
+[workspace.dependencies]
+anyhow = "1.0"
+thiserror = "2.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "signal", "process"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4.6", features = ["derive"] }
+# simd-unsafe est active par defaut. On decode 44 caracteres a la connexion:
+# le gain est nul et l'unsafe supplementaire n'a pas sa place dans un produit
+# de securite.
+base64 = { version = "0.23", default-features = false, features = ["std"] }
+
+# Uniquement pour deriver le SID d'un service de son nom: Windows y emploie
+# SHA-1 comme fonction de nommage, pas comme primitive de securite. Le calcul
+# est verifie contre deux SID releves sur machine, pas contre une intuition.
+sha1 = "0.10"
+
+bifrost-core = { path = "crates/bifrost-core" }
+bifrost-coffre = { path = "crates/bifrost-coffre" }
+bifrost-amorce = { path = "crates/bifrost-amorce" }
+bifrost-evasion = { path = "crates/bifrost-evasion" }
+bifrost-firewall = { path = "crates/bifrost-firewall" }
+bifrost-dns = { path = "crates/bifrost-dns" }
+bifrost-telemetrie = { path = "crates/bifrost-telemetrie" }
+bifrost-ipc = { path = "crates/bifrost-ipc" }
+# Le daemon est declare ici pour une seule raison: le temoin heberge dans
+# svchost REUTILISE sa sonde `--connect-probe` au lieu d'en ecrire une seconde.
+# Deux implementations qui divergeraient rendraient deux mesures incomparables.
+bifrost-daemon = { path = "crates/bifrost-daemon" }
+
+[workspace.lints.clippy]
+# Tout bloc `unsafe` doit porter un commentaire `// SAFETY:` juste au-dessus,
+# sinon clippy le refuse sous `-D warnings`, en CI comme en local. La contrainte
+# est tenue par l'outil, pas par la relecture. Couvre aussi les `unsafe impl`.
+undocumented_unsafe_blocks = "deny"
+# Toute `pub unsafe fn` doit documenter dans une section `# Safety` ce que
+# l'appelant doit garantir. Ne couvre que les fonctions publiques.
+missing_safety_doc = "deny"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"

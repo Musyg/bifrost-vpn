@@ -1,0 +1,91 @@
+# Profil de tunnel Bifrost.
+#
+# Copier vers /etc/bifrost/tunnel.toml (Linux) ou
+# C:\ProgramData\Bifrost\tunnel.toml (Windows), puis chmod 600: ce fichier
+# contient une cle privee.
+#
+# Generer une paire de cles: bifrost-daemon --genkey
+
+# Nom de l'interface creee. 15 caracteres au maximum.
+interface = "wg0"
+
+# Cle privee du client, 44 caracteres base64.
+private_key = "REMPLACER-PAR-VOTRE-CLE-PRIVEE-44-CARACTERES"
+
+# Adresses portees par l'interface du tunnel.
+addresses = ["10.2.0.2/32"]
+
+# 1420 = 1500 moins l'overhead WireGuard sur IPv6. Facultatif.
+mtu = 1420
+
+# Marque appliquee par le noyau au trafic deja chiffre. C'est elle que le kill
+# switch reconnait pour laisser sortir le tunnel, et rien d'autre. La valeur par
+# defaut est celle de wg-quick. Ne pas mettre 0.
+fwmark = 51820
+
+# Table de routage dediee. Facultatif.
+routing_table = 51820
+
+# Autoriser le trafic vers les prefixes prives hors tunnel. Faux par defaut:
+# c'est un trou volontaire dans l'etancheite, a n'ouvrir qu'en connaissance de
+# cause (imprimante, NAS).
+allow_lan = false
+
+[peer]
+# Cle publique du serveur.
+public_key = "REMPLACER-PAR-LA-CLE-PUBLIQUE-DU-SERVEUR-44"
+
+# Endpoint sous forme d'adresse IP et de port. Un nom de domaine doit etre
+# resolu AVANT le demarrage: une fois le kill switch arme, plus aucune
+# resolution ne sort.
+endpoint = { addr = "203.0.113.7:51820" }
+
+# Route par defaut des deux familles: tout passe par le tunnel. Sans ::/0,
+# l'IPv6 sortirait par l'interface physique.
+allowed_ips = ["0.0.0.0/0", "::/0"]
+
+# Maintient la session ouverte a travers un NAT. Facultatif.
+persistent_keepalive = 25
+
+# --- Variante: tunnel par coeur anti-censure --------------------------------
+#
+# Un profil decrit SOIT un pair WireGuard (tout ce qui precede), SOIT un coeur.
+# Les deux a la fois sont refuses: un profil ambigu ferait monter un tunnel que
+# son auteur n'a pas demande.
+#
+# Pour un coeur, retirer `private_key`, `fwmark`, `routing_table` et la section
+# [peer], puis decrire le serveur ici. Le plus simple est de partir d'un lien de
+# partage (`vless://...` ou `hysteria2://...`) tel que le rend un panneau
+# d'administration: `bifrost-cli` sait le lire et ecrire cette section.
+#
+# [coeur]
+# etiquette = "Suisse"
+#
+# [coeur.transport.hysteria2]
+# serveur = "203.0.113.8"
+# port = 8443
+# mot_de_passe = "..."
+# nom_de_serveur = "exemple.test"
+
+[dns]
+# Adresse de loopback du resolveur local. C'est la SEULE destination :53
+# autorisee hors tunnel par le kill switch, et elle doit etre sur loopback.
+# Sur une Ubuntu avec systemd-resolved, c'est le stub 127.0.0.53.
+local_resolver = "127.0.0.53"
+
+# Resolveurs amont, joignables uniquement a l'interieur du tunnel.
+upstream = ["10.2.0.1"]
+
+# Un resolveur chiffre tourne-t-il sur `local_resolver`.
+#
+# Faux, le systeme interroge directement les resolveurs amont: les requetes
+# traversent le tunnel chiffrees, puis en RESSORTENT EN CLAIR, lisibles et
+# falsifiables par qui exploite la sortie. Vrai, le systeme interroge la
+# boucle locale, ou un dnscrypt-proxy les rechiffre jusqu'au resolveur public.
+#
+# Ne le passer a vrai que si un resolveur ecoute reellement sur
+# `local_resolver`. Sans quoi le systeme pointerait vers un port muet, ce qui
+# n'est pas un durcissement mais une machine sans resolution de noms. Le
+# daemon doit alors recevoir --resolveur-utilisateur, qui ferme le :53 pour
+# tous les autres, y compris a l'interieur du tunnel.
+# embarque = false

@@ -1,0 +1,27 @@
+[package]
+name = "bifrost-amorce"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Recuperation multi-canal des profils signes"
+
+[dependencies]
+age = "0.12"
+base64.workspace = true
+getrandom = "0.4"
+bifrost-coffre.workspace = true
+ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots"] }
+# aws-lc-rs plutot que ring: ring porte RUSTSEC-2025-0007 (non maintenu, repris
+# par l'equipe rustls pour la seule securite), et aws-lc-rs est le fournisseur
+# par defaut de rustls. Mesure le 19 aout 2026: il se construit sur dev-windows
+# SANS cmake ni nasm, contrairement a ce que le handoff affirmait.
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std", "tls12"] }
+aws-lc-rs = { version = "1", features = ["prebuilt-nasm"] }
+
+[dev-dependencies]
+minisign = "0.9"
+
+[lints]
+workspace = true

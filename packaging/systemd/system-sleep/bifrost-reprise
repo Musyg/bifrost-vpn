@@ -1,0 +1,51 @@
+#!/bin/sh
+# Previent le daemon Bifrost qu'une veille vient de se terminer.
+#
+# Depose par packaging/install-linux.sh dans /usr/lib/systemd/system-sleep/,
+# d'ou systemd le lance avec deux arguments: "pre" ou "post", puis l'operation
+# de veille. Retire en supprimant le fichier: ces hooks ne sont pas des unites,
+# rien a recharger, rien a desactiver.
+#
+# CE SCRIPT NE DECIDE RIEN. Il transmet les deux arguments tels quels au client,
+# qui les juge. C'est voulu: la regle "seul le reveil compte, et une invocation
+# hors contrat ne fait rien" est falsifiable par cargo dans
+# crates/bifrost-cli/src/reprise_linux.rs, et elle ne le serait pas ici.
+#
+# /bin/sh et non bash: systemd n'a pas fini de reveiller la machine quand il
+# lance ceci, et il ne poursuit qu'une fois tous les hooks termines. Ce n'est
+# pas l'endroit pour charger un interprete de plus.
+#
+# Les deux variables d'environnement ci-dessous existent POUR LA RECETTE, qui
+# fait tourner le client construit dans target/ contre un socket jetable. En
+# production systemd n'en pose aucune et les defauts s'appliquent.
+
+set -u
+
+CLI="${BIFROST_CLI:-/usr/bin/bifrost-cli}"
+
+# Le hook BLOQUE la reprise de la machine tant qu'il n'a pas rendu la main
+# (man systemd-sleep: "execution of the action is not continued until all
+# executables have finished"). Or le client n'a pas de delai propre sur le
+# dialogue IPC: sans cette borne, un daemon fige tiendrait le reveil sans fin.
+# Le depassement rend 124, donc un echec visible dans le journal, ce qui est
+# exactement ce qu'on veut savoir.
+DELAI=5
+
+PHASE="${1:-}"
+OPERATION="${2:-}"
+
+if [ ! -x "$CLI" ]; then
+  echo "bifrost: $CLI absent, reprise apres veille non signalee" >&2
+  exit 0
+fi
+
+# `set --` remplace les arguments: PHASE et OPERATION sont deja lus au-dessus.
+set -- reprise --phase "$PHASE" --operation "$OPERATION"
+if [ -n "${BIFROST_SOCKET:-}" ]; then
+  set -- "$@" --socket "$BIFROST_SOCKET"
+fi
+
+if command -v timeout >/dev/null 2>&1; then
+  exec timeout "$DELAI" "$CLI" "$@"
+fi
+exec "$CLI" "$@"
