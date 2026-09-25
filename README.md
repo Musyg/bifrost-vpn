@@ -1,5 +1,10 @@
 # Bifrost
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Musyg/Musyg/308e2616361e5e3b06cf4725e4598ffbcef7d39e/assets/bifrost/bifrost-fond-sombre.png">
+  <img src="https://raw.githubusercontent.com/Musyg/Musyg/308e2616361e5e3b06cf4725e4598ffbcef7d39e/assets/bifrost/bifrost-couleur.png" alt="Bifrost - pont de lumiere" width="360">
+</picture>
+
 VPN auto-heberge pour Windows 11 et Linux. Trois objectifs, dans cet ordre de priorite :
 
 1. **Ne pas fuir.** Kill switch de niveau noyau, fail-closed, sans fenetre de fuite au boot, au reveil, ni pendant la reconnexion.
