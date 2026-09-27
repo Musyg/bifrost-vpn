@@ -189,6 +189,28 @@ la provenance des releases et les autres axes sont specifies dans
 
 ## Tester
 
+### Quota de CI et validation Windows
+
+Les PR et les push sur `main` lancent les controles Linux, la suite de fuite
+et l'audit des dependances. Windows est **uniquement manuel**: aucune execution
+automatique sur une PR ou sa fusion. Une nouvelle revision annule le run
+automatique obsolete de la meme PR ou branche.
+
+Avant une livraison Windows, lancer explicitement cette validation sur la
+revision a livrer (Actions > ci > Run workflow > cocher `windows`), ou:
+
+```bash
+gh workflow run ci.yml --repo Musyg/bifrost-vpn --ref main -f windows=true
+```
+
+Ce lancement ne fait tourner que le job Windows, avec une limite de 20 minutes
+et un seul job Windows actif a la fois. Sans la case `windows`, un lancement
+manuel execute les controles Linux habituels. Un job Windows `skipped` n'est
+pas une validation Windows; ne pas presenter le vert Linux comme tel. La
+derniere validation Windows doit nommer le SHA effectivement controle.
+
+### Recettes locales
+
 ```bash
 cargo test --workspace                 # tests unitaires et d'integration
 sudo ./scripts/e2e-linux.sh            # recette de bout en bout, en namespaces

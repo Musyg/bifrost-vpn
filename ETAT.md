@@ -20,6 +20,11 @@ role: `dev-windows` (Windows 10 build 19045, ou vit et compile le depot),
 
 ## Comptes de recettes
 
+La CI automatique couvre Linux; Windows est lance uniquement sur demande
+(`workflow_dispatch`, option `windows=true`) pour maitriser le quota. Un job
+Windows saute n'atteste rien sur cette plateforme. Voir le README pour le
+lancement avant une livraison Windows et la revision effectivement mesuree.
+
 Les comptes ci-dessous sont ceux de la reference anterieure a D1a; ils ne
 comptent pas les nouvelles recettes de `prove`. Ne pas les presenter comme un
 releve du 27 septembre. Les resultats de la tranche figurent dans sa CI.

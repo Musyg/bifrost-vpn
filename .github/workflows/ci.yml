@@ -8,6 +8,18 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      windows:
+        description: 'Executer Windows uniquement (consomme du quota)'
+        type: boolean
+        default: false
+
+# Une nouvelle revision remplace la precedente sur la meme PR ou branche.
+# Un lancement manuel ne doit pas annuler la validation automatique.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 # Toute action tierce est epinglee par SHA: un tag est mutable, et un tag
 # deplace suffit a executer du code arbitraire dans un job qui compile un
@@ -18,6 +30,7 @@ env:
 jobs:
   controles:
     name: format, lint et tests (Linux)
+    if: github.event_name != 'workflow_dispatch' || !inputs.windows
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -81,15 +94,21 @@ jobs:
 
   windows:
     name: lint et tests (Windows)
+    # Le quota Windows est reserve aux validations demandees explicitement.
+    # Ni une PR, ni sa fusion, ni une relance de leur CI ne l'active.
+    if: github.event_name == 'workflow_dispatch' && inputs.windows
     runs-on: windows-latest
     timeout-minutes: 20
+    concurrency:
+      group: ${{ github.workflow }}-windows
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Outillage
         run: rustup component add clippy
-      # Seul endroit ou le code WFP est reellement compile et lie: la machine de
-      # developpement n'a pas de linker MSVC. Sans ce job, la moitie Windows du
-      # produit ne serait jamais verifiee par un compilateur.
+      # Validation Windows explicite: une CI automatique verte ne signifie
+      # plus que WFP a ete compile et lie sur cette revision. Demander ce job
+      # avant de publier un binaire Windows.
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       # Comme le job Linux: la suite passe par `recettes-strict.sh` (--nocapture)
@@ -139,6 +158,7 @@ jobs:
 
   fuite:
     name: suite de fuite
+    if: github.event_name != 'workflow_dispatch' || !inputs.windows
     runs-on: ubuntu-latest
     # Le harnais lance des daemons et des captures: si l'un d'eux survit a son
     # script, le job reste ouvert bien apres que ses etapes ont reussi. Cette
@@ -265,6 +285,7 @@ jobs:
 
   dependances:
     name: audit des dependances et SBOM
+    if: github.event_name != 'workflow_dispatch' || !inputs.windows
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
