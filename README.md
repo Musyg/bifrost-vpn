@@ -203,8 +203,23 @@ Codes: MATCH/0, MISMATCH/1, UNMEASURED/2. Fichiers reguliers de 2 Mio maximum.
 Les captures invalides ou les objets hors perimetre (dont sets/maps/flowtables)
 restent non mesures. **MATCH ne certifie ni le pare-feu actif ni sa surete**:
 la reference et l'observation sont deux fichiers fournis, potentiellement
-anciens ou incomplets. La collecte noyau et sa generation restent a implementer;
-voir [D1b dans les specifications](docs/09-souverainete-verifiable.md#d1b---politique-pare-feu-effective-en-cours).
+anciens ou incomplets.
+
+Sous Linux, `--actif` remplace `--observe` pour lire le pare-feu du namespace
+reseau courant et verifier que sa generation reste stable pendant la collecte:
+
+```bash
+bifrost-cli --json prove nft --attendu reference.json --actif
+```
+
+Cette lecture ne modifie aucune regle et n'eleve pas les privileges. Faute de
+droits de lecture, de nft, de generation stable ou de format pris en charge,
+elle rend UNMEASURED/2. Elle ne contourne pas le refus. Le rapport distingue
+`nft-kernel-comparison` des captures fournies et dit si la collecte et la
+generation ont ete verifiees. La reference reste fournie par l'utilisateur:
+une politique permissive peut correspondre, sans prouver l'etancheite du VPN.
+WFP, routes, DNS et autres mecanismes de filtrage restent hors de cette mesure.
+Voir [D1b dans les specifications](docs/09-souverainete-verifiable.md#d1b---politique-pare-feu-effective-en-cours).
 
 ## Tester
 

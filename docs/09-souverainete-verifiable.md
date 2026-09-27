@@ -110,7 +110,43 @@ drop remplacee, priorite/hook/interface/destination/operateur modifies, regle ou
 compteur supprime, table dormant, capture vide, invalide et hors perimetre.
 Les fixtures sont synthetiques: elles ne prouvent pas une observation du noyau.
 
-#### D1b.2 - Collecte noyau et politique attendue (a faire)
+#### D1b.2 - Collecte passive Linux livree
+
+`bifrost-cli --json prove nft --attendu reference.json --actif`
+
+Lire et valider la reference AVANT tout acces noyau. Envoyer uniquement
+NFT_MSG_GETGEN sur NETLINK_NETFILTER, lancer le nft systeme avec les arguments
+fixes `--json --numeric list ruleset`, puis relire GETGEN. Les generations
+doivent etre identiques. La source netlink doit etre le noyau; sequence,
+destination, type, longueur et attribut d'identifiant sont controles. Troncature,
+generation absente/dupliquee, refus d'acces et changement rendent UNMEASURED.
+
+Pas de shell, pas de recherche dans PATH, pas de sudo, pas d'IPC privilegie.
+L'environnement du sous-processus est vide sauf LC_ALL=C. La sortie est bornee
+a 2 Mio; lecture et attente de nft sont limitees a 5 secondes apres lancement.
+Chaque GETGEN attend au maximum une seconde. En cas d'erreur, seul l'enfant
+cree est tue et une seconde est accordee a sa recuperation. Les blocages d'I/O
+du stockage ou du noyau ne sont pas couverts par une garantie temps reel.
+
+Perimetre `nft-kernel-comparison`, source `kernel-netlink-and-system-nft`.
+`live_kernel` et `generation_verified` ne deviennent vrais qu'apres une collecte
+complete avec generation stable. Une capture ensuite hors format peut encore
+etre NON MESUREE. Les generations numeriques et le contenu brut ne sont pas
+exportes. Aucun resultat Windows n'est revendique; hors Linux le mode est
+indisponible. Aucun priviliege ou service persistant n'est installe.
+
+Limites: namespace courant, confiance dans le noyau et le binaire nft systeme,
+reference non authentifiee, generation 32 bits, etat ponctuel. Conntrack, eBPF,
+iptables legacy, interfaces physiques, routes et DNS ne sont pas prouves par
+cette comparaison. Les objets hors perimetre D1b.1 restent NON MESURES.
+
+Acceptation: frames netlink invalides, generation changee ou seconde lecture
+refusee, enfant trop lent/trop bavard/en echec. Le banc `preuve-nft-linux.sh`
+cree son propre namespace sans lien externe sur runner Linux jetable: MATCH,
+regle ajoutee -> MISMATCH, droits retires -> UNMEASURED, table retiree ->
+MISMATCH. La capture avant/apres le controle doit rester identique.
+
+#### D1b.3 - Politique attendue versionnee et WFP (a faire)
 
 Collecteurs dedies en lecture seule: nftables/netlink sur Linux, enumeration
 WFP sur Windows. Comparer famille, couches/hooks, priorites, filtres, exceptions,
@@ -124,10 +160,10 @@ interface remplacee, donnees tronquees, acces refuse, generation modifiee.
 Chaque alteration doit supprimer la conformite, avec le controle en cause.
 Eprouver sur machines jetables; ne pas couper le reseau du poste de travail.
 
-La collecte Linux devra notamment encadrer le dump par la generation nftables
-(`getgen`/`id`), pas par deux horodatages. Deux captures identiques ne prouvent
-pas l'absence d'un changement transitoire. La comparaison D1b.1 ne satisfait
-donc pas encore le contrat de preuve effective D1b.
+La collecte Linux D1b.2 encadre le dump par la generation nftables (`getgen`/`id`),
+pas par deux horodatages. Deux captures identiques seules ne prouvent pas
+l'absence d'un changement transitoire. D1b reste incomplet tant que la politique
+attendue ne vient pas du plan du produit et que la couverture WFP manque.
 
 ### D1c - Routes, DNS et provenance
 
@@ -232,4 +268,4 @@ effacees par ce plan. Chaque tranche met a jour ETAT.md et ses limites.
 - [nft, manuel officiel](https://netfilter.org/projects/nftables/manpage.html):
   sorties JSON, compteurs variables, handles, politiques et priorites.
 - [Noyau Linux, nftables netlink](https://docs.kernel.org/netlink/specs/nftables.html):
-  operation getgen et identifiant de generation pour la future collecte D1b.2.
+  operation getgen et identifiant de generation pour la collecte D1b.2.

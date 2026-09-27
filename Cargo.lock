@@ -313,6 +313,7 @@ dependencies = [
  "bifrost-evasion",
  "bifrost-ipc",
  "clap",
+ "netlink-sys",
  "rcgen",
  "rustls",
  "serde",

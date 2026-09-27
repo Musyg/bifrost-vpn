@@ -180,6 +180,9 @@ jobs:
       - name: Compilation
         run: cargo build --workspace --locked
 
+      - name: Preuve nft passive dans un namespace jetable
+        run: sudo bash ./scripts/preuve-nft-linux.sh
+
       # Les DEUX BRAS de `doh-bypass`, que ce vecteur n'avait pas.
       #
       # Tous les autres vecteurs de la suite mesurent un ECART: un cas sans

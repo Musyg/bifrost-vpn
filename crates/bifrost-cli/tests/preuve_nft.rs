@@ -267,3 +267,31 @@ fn capture_absente_ou_non_reguliere_reste_non_mesuree() {
         assert!(r["observed_counts"].is_null());
     }
 }
+
+#[test]
+fn mode_actif_explicite_et_exclusif_sans_collecte_sur_reference_invalide() {
+    let b = Bac::nouveau();
+    let absent = b.0.join("absent");
+    for arguments in [vec![], vec!["--observe", "capture", "--actif"]] {
+        let sortie = Command::new(env!("CARGO_BIN_EXE_bifrost-cli"))
+            .args(["--json", "prove", "nft", "--attendu"])
+            .arg(&absent)
+            .args(arguments)
+            .output()
+            .unwrap();
+        assert_eq!(sortie.status.code(), Some(2));
+        assert!(sortie.stdout.is_empty());
+    }
+    let sortie = Command::new(env!("CARGO_BIN_EXE_bifrost-cli"))
+        .args(["--json", "prove", "nft", "--actif", "--attendu"])
+        .arg(absent)
+        .output()
+        .unwrap();
+    assert_eq!(sortie.status.code(), Some(2));
+    let r: Value = serde_json::from_slice(&sortie.stdout).unwrap();
+    assert_eq!(r["scope"], "nft-kernel-comparison");
+    assert_eq!(r["verdict"], "UNMEASURED");
+    assert_eq!(r["failed_input"], "expected");
+    assert_eq!(r["live_kernel"], false);
+    assert_eq!(r["generation_verified"], false);
+}
