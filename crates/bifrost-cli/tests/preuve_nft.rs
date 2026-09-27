@@ -115,6 +115,20 @@ fn politique_invalide_refusee_avant_toute_collecte() {
     assert!(sortie.stdout.is_empty());
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn reference_confrontee_a_la_capture_reelle_nft_1_0_9() {
+    let b = Bac::nouveau();
+    let mut p = politique();
+    for cle in ["tunnel_interface", "fwmark", "coeur_uid", "resolveur_uid"] {
+        p[cle] = Value::Null;
+    }
+    let capture: Value =
+        serde_json::from_slice(include_bytes!("fixtures/nft-1.0.9-minimal.json")).unwrap();
+    let sortie = lancer_politique(&b, p.to_string().as_bytes(), Some(&capture));
+    assert_eq!(sortie.status.code(), Some(0), "{sortie:?}");
+}
+
 struct Bac(PathBuf);
 impl Bac {
     fn nouveau() -> Self {

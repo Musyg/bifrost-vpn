@@ -108,6 +108,10 @@ impl Politique {
                 json!({"chain":{"family":"inet","table":"bifrost","name":chaine,
                 "type":"filter","hook":chaine,"prio":0,"policy":"drop"}}),
             );
+        }
+        // nft liste toutes les chaines avant leurs regles, meme si le script
+        // texte les declare entrelacees. Conserver cet ordre dans la reference.
+        for chaine in ["output", "input", "forward"] {
             let mut regles: Vec<Vec<Value>> = Vec::new();
             match chaine {
                 "output" => {
@@ -169,7 +173,10 @@ impl Politique {
                 }
                 "input" => {
                     regles.push(accepter(vec![meta("iifname", json!("lo"))]));
-                    regles.push(accepter(vec![json!({"match":{"op":"in","left":{"ct":{"key":"state"}},"right":["established","related"]}})]));
+                    // --numeric rend les bits established=2, related=4.
+                    regles.push(accepter(vec![
+                        json!({"match":{"op":"in","left":{"ct":{"key":"state"}},"right":[2,4]}}),
+                    ]));
                     if let Some(i) = &p.tunnel_interface {
                         regles.push(accepter(vec![meta("iifname", json!(i))]));
                     }
@@ -230,7 +237,7 @@ fn ndp() -> Vec<Value> {
     )])
 }
 fn lan(regles: &mut Vec<Vec<Value>>, champ: &str) {
-    regles.push(accepter(vec![charge("ip", champ, json!({"set":[prefixe("10.0.0.0",8),prefixe("172.16.0.0",12),prefixe("192.168.0.0",16),prefixe("169.254.0.0",16)]}))]));
+    regles.push(accepter(vec![charge("ip", champ, json!({"set":[prefixe("10.0.0.0",8),prefixe("169.254.0.0",16),prefixe("172.16.0.0",12),prefixe("192.168.0.0",16)]}))]));
     regles.push(accepter(vec![charge(
         "ip6",
         champ,
