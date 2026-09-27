@@ -68,7 +68,49 @@ Acceptation: vecteur SHA-256 connu, un octet modifie, reference mal formee,
 fichier absent, repertoire, lien, fichier trop grand, erreur apres lecture
 partielle, JSON sans chemin, execution sans daemon, fichier laisse intact.
 
-### D1b - Politique pare-feu effective (prochaine tranche)
+### D1b - Politique pare-feu effective (en cours)
+
+#### D1b.1 - Comparateur hors ligne livre
+
+`bifrost-cli --json prove nft --attendu reference.json --observe capture.json`
+
+Cette tranche compare deux fichiers au format de sortie `nft -j list ruleset`;
+elle ne lance PAS nft, ne lit pas le noyau et n'applique aucune regle. Le
+perimetre `nft-json-comparison` porte `source=user-supplied-snapshots`,
+`live_kernel=false`, `generation_verified=false`, `network_security=not-evaluated`.
+MATCH/0 signifie correspondance structurelle des captures, MISMATCH/1 un ecart,
+UNMEASURED/2 une comparaison impossible. Meme une reference permissive peut
+correspondre: la commande n'evalue pas sa surete. Les fichiers peuvent etre
+anciens, incomplets ou falsifies; leur collecte n'est pas attestee.
+
+Schema nft JSON 1 avec metainfo initiale obligatoire. Tables, chaines et regles
+sont comparees, y compris familles, priorites, hooks, politiques, flags,
+expressions, commentaires, regles supplementaires et ordre global. Les cles
+d'un objet JSON peuvent etre reordonnees, pas les elements d'un tableau.
+Seuls les handles d'objets et les deux valeurs `packets`/`bytes` des compteurs
+anonymes sont ignores; la presence et la position du compteur restent comparees.
+Les informations de version du producteur dans metainfo ne sont pas comparees.
+Les expressions sont comparees structurellement, sans interpreteur nft: ce
+controle n'est ni un validateur complet de la grammaire nft, ni un simulateur.
+
+Objets autonomes set/map/flowtable/counter et autres types non pris en charge:
+UNMEASURED, jamais omis. Meme refus pour un schema inconnu, une cle JSON
+dupliquee, une table/chaine dupliquee, un parent absent, un nombre non entier,
+un fichier tronque ou inaccessible. Une reference sans chaine de base est
+refusee; une capture observee valide mais vide constitue un ecart.
+
+Deux fichiers reguliers immuables, 2 Mio maximum chacun, lecture bornee, liens
+detectes au controle initial refuses. Les limites de concurrence et de stockage
+de D1a s'appliquent aussi ici. Rapport sans noms, adresses, expressions ni chemins:
+seuls les comptes et les categories d'ecart sont exportes. L'intervalle est celui
+de la comparaison locale, PAS celui de la collecte des captures.
+
+Acceptation hors ligne: ordre de regles inverse, chaine tierce ajoutee, politique
+drop remplacee, priorite/hook/interface/destination/operateur modifies, regle ou
+compteur supprime, table dormant, capture vide, invalide et hors perimetre.
+Les fixtures sont synthetiques: elles ne prouvent pas une observation du noyau.
+
+#### D1b.2 - Collecte noyau et politique attendue (a faire)
 
 Collecteurs dedies en lecture seule: nftables/netlink sur Linux, enumeration
 WFP sur Windows. Comparer famille, couches/hooks, priorites, filtres, exceptions,
@@ -81,6 +123,11 @@ Acceptation: regle retiree, exception trop large, filtre tiers prioritaire,
 interface remplacee, donnees tronquees, acces refuse, generation modifiee.
 Chaque alteration doit supprimer la conformite, avec le controle en cause.
 Eprouver sur machines jetables; ne pas couper le reseau du poste de travail.
+
+La collecte Linux devra notamment encadrer le dump par la generation nftables
+(`getgen`/`id`), pas par deux horodatages. Deux captures identiques ne prouvent
+pas l'absence d'un changement transitoire. La comparaison D1b.1 ne satisfait
+donc pas encore le contrat de preuve effective D1b.
 
 ### D1c - Routes, DNS et provenance
 
@@ -182,3 +229,7 @@ effacees par ce plan. Chaque tranche met a jour ETAT.md et ses limites.
   roles, racines, expiration, resistance au rollback et au gel.
 - [RFC 9230](https://www.rfc-editor.org/rfc/rfc9230.html): ODoH et separation
   proxy/cible. Specification experimentale, pas garantie globale d'anonymat.
+- [nft, manuel officiel](https://netfilter.org/projects/nftables/manpage.html):
+  sorties JSON, compteurs variables, handles, politiques et priorites.
+- [Noyau Linux, nftables netlink](https://docs.kernel.org/netlink/specs/nftables.html):
+  operation getgen et identifiant de generation pour la future collecte D1b.2.
