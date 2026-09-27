@@ -311,6 +311,7 @@ dependencies = [
  "bifrost-coffre",
  "bifrost-core",
  "bifrost-evasion",
+ "bifrost-firewall",
  "bifrost-ipc",
  "clap",
  "netlink-sys",
@@ -398,6 +399,8 @@ name = "bifrost-firewall"
 version = "0.1.0"
 dependencies = [
  "bifrost-core",
+ "serde",
+ "serde_json",
  "sha1",
  "tracing",
  "windows-sys 0.61.2",

@@ -181,7 +181,9 @@ jobs:
         run: cargo build --workspace --locked
 
       - name: Preuve nft passive dans un namespace jetable
-        run: sudo bash ./scripts/preuve-nft-linux.sh
+        run: |
+          cargo build --locked -p bifrost-firewall --example politique_nft
+          sudo bash ./scripts/preuve-nft-linux.sh
 
       # Les DEUX BRAS de `doh-bypass`, que ce vecteur n'avait pas.
       #

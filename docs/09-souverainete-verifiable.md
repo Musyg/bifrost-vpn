@@ -146,7 +146,46 @@ cree son propre namespace sans lien externe sur runner Linux jetable: MATCH,
 regle ajoutee -> MISMATCH, droits retires -> UNMEASURED, table retiree ->
 MISMATCH. La capture avant/apres le controle doit rester identique.
 
-#### D1b.3 - Politique attendue versionnee et WFP (a faire)
+#### D1b.3a - Reference produit depuis une intention versionnee
+
+`bifrost-cli --json prove nft --politique intention.json --actif`
+
+`--politique` et `--attendu` sont exclusifs. La comparaison d'une capture reste
+possible avec `--observe`. Le mode politique est Linux uniquement pour cette
+tranche. Aucune regle n'est appliquee par ces commandes.
+
+Le fichier porte exactement `schema_version=1`, `tunnel_interface` (chaine ou
+null), `fwmark` (entier non nul ou null), `dns_resolver` (IP), `allow_lan` (booleen),
+`coeur_uid` et `resolveur_uid` (entiers non nuls ou null). Tous les champs sont
+obligatoires. Champs inconnus, cles dupliquees, version inconnue, types invalides,
+interface invalide/lo, UID root/partage et DNS non exploitable sont refuses avant
+toute collecte. Un resolveur embarque exige une destination DNS de boucle locale.
+Les plafonds et controles de lecture D1b.1 s'appliquent au fichier d'intention.
+
+Le module pur `bifrost-firewall::politique_nft` reconstruit une `FirewallPolicy`
+et sa reference JSON. Les parametres proviennent de L'APPELANT: ce n'est pas une
+lecture du profil actif du daemon. Le rapport conserve `schema_version=1`, ajoute
+`expected_source=bifrost-policy-v1-user-declared` et `policy_schema_version=1`
+apres validation. Pour une capture de reference, `expected_source` vaut
+`user-supplied-snapshot` et `policy_schema_version` est null. Aucun parametre de
+l'intention n'est exporte. `network_security` reste `not-evaluated`.
+
+La reference couvre le ruleset produit complet (input/output/forward, DNS,
+DHCP, NDP, marque, interface, LAN et exceptions par UID), pas les seules regles
+qui portent le nom Bifrost. Une table tierce rend MISMATCH; un objet hors
+perimetre rend UNMEASURED. Aucun tri global ni filtre de regles tierces ne peut
+masquer un changement. La forme JSON cible est celle de nft avec `--numeric`;
+une difference de representation entre versions peut rendre un ecart et doit
+etre examinee, pas ignoree automatiquement.
+
+Acceptation: 64 combinaisons interface/marque/LAN/coeur/resolveur/DNS IPv6. Le
+banc jetable applique le rendu texte REEL du produit, puis le compare a la
+reference pure, hors ligne et via la collecte active. Les captures avant/apres
+doivent rester identiques. Table tierce et permis non prevu deviennent MISMATCH.
+Les tests sans privileges couvrent aussi l'intention invalide, l'ordre des
+restrictions DNS et le changement de chaque parametre attendu.
+
+#### D1b.3b - Liaison au profil actif, autres objets et WFP (a faire)
 
 Collecteurs dedies en lecture seule: nftables/netlink sur Linux, enumeration
 WFP sur Windows. Comparer famille, couches/hooks, priorites, filtres, exceptions,
@@ -162,8 +201,11 @@ Eprouver sur machines jetables; ne pas couper le reseau du poste de travail.
 
 La collecte Linux D1b.2 encadre le dump par la generation nftables (`getgen`/`id`),
 pas par deux horodatages. Deux captures identiques seules ne prouvent pas
-l'absence d'un changement transitoire. D1b reste incomplet tant que la politique
-attendue ne vient pas du plan du produit et que la couverture WFP manque.
+l'absence d'un changement transitoire. D1b reste incomplet: la reference vient
+maintenant du moteur produit mais son intention reste declaree par l'appelant;
+la liaison au profil actif, les objets hors perimetre et la couverture WFP
+manquent encore. Une intention permissive ou obsolete n'est pas rendue fiable
+par le fait que le produit sait la representer.
 
 ### D1c - Routes, DNS et provenance
 

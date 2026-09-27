@@ -29,6 +29,9 @@ pub mod plan_telemetrie;
 /// de `#[cfg]` comme [`wfp_plan`]: ses recettes comptent sur les deux hotes.
 pub mod regles_nft;
 
+/// Reference nft pure, versionnee et derivee d'une intention explicite.
+pub mod politique_nft;
+
 #[cfg(target_os = "linux")]
 pub mod linux;
 

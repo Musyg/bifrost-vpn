@@ -57,7 +57,7 @@ la prochaine action. Une cellule vide signalerait une tranche non finie.
 | 05 | Anonymat et chainage. Document redige; le chainage Tor et Nym n'est pas commence, et le document lui-meme le place apres les trois objectifs | Chainage Tor ou Nym, apres les objectifs 1 a 3 |
 | 06 | Architecture logicielle et packaging. Daemon, IPC authentifie, machine a etats et scripts d'installation faits (Linux et Windows, comptes dedies, ACL); ni interface graphique, ni MSI, ni .deb/.rpm, ni mise a jour TUF, ni provisioning; SBOM en CI | Interface graphique en jalon propre apres J2; paquets signes et mise a jour TUF |
 | 07 | Programme de securite produit. fmt, clippy, recettes, suite de fuite, cargo audit, cargo deny et SBOM en CI; politique de divulgation publiee (SECURITY.md, security.txt); inventaire unsafe ferme; cargo vet et fuzz absents, aucune cle PGP | Publier une cle PGP (champ Encryption); ajouter cargo vet et un harnais fuzz |
-| 09 | Souverainete verifiable. D1a: `prove binaire`. D1b.1: comparaison nft hors ligne. D1b.2: `prove nft --actif` collecte Linux en lecture seule encadree par GETGEN, sorties et attente bornees; reference utilisateur non authentifiee. Ni preuve globale du VPN ni validation Windows | D1b.3: politique attendue issue du plan du produit, couverture des objets nft restants et collecte WFP |
+| 09 | Souverainete verifiable. D1a: `prove binaire`. D1b.1: comparaison nft hors ligne. D1b.2: collecte Linux passive encadree par GETGEN. D1b.3a: `prove nft --politique` engendre la reference produit depuis une intention v1 explicite; 64 combinaisons confrontees au rendu applique en banc jetable. Ni preuve globale du VPN ni validation Windows | D1b.3b: liaison de l'intention au profil actif, objets nft restants et collecte WFP |
 
 ## Scripts
 
