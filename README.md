@@ -187,6 +187,25 @@ le dit aussi sur succes. La verification du pare-feu, des routes et du DNS,
 la provenance des releases et les autres axes sont specifies dans
 [`docs/09-souverainete-verifiable.md`](docs/09-souverainete-verifiable.md).
 
+## Comparer deux captures du pare-feu, hors ligne
+
+```bash
+bifrost-cli --json prove nft --attendu reference.json --observe capture.json
+```
+
+La commande compare des captures au format JSON de `nft -j list ruleset`, sans
+lancer nft, contacter le daemon ou appliquer de regles. Elle signale les ecarts
+de tables, chaines, regles et ordre; elle conserve les priorites et exceptions,
+en ignorant les handles et valeurs variables des compteurs anonymes. Les noms,
+adresses et chemins des captures ne sont pas exportes dans le rapport.
+
+Codes: MATCH/0, MISMATCH/1, UNMEASURED/2. Fichiers reguliers de 2 Mio maximum.
+Les captures invalides ou les objets hors perimetre (dont sets/maps/flowtables)
+restent non mesures. **MATCH ne certifie ni le pare-feu actif ni sa surete**:
+la reference et l'observation sont deux fichiers fournis, potentiellement
+anciens ou incomplets. La collecte noyau et sa generation restent a implementer;
+voir [D1b dans les specifications](docs/09-souverainete-verifiable.md#d1b---politique-pare-feu-effective-en-cours).
+
 ## Tester
 
 ### Quota de CI et validation Windows

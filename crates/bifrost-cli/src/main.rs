@@ -5,6 +5,7 @@
 mod inspection;
 mod pilote;
 mod preuve;
+mod preuve_nft;
 mod profile;
 mod render;
 /// La source des reprises sous Linux. Ici et pas dans le daemon: le producteur
@@ -151,6 +152,13 @@ enum Cmd {
 
 #[derive(Subcommand, Debug)]
 enum CmdPreuve {
+    /// Compare deux captures nft JSON fournies, hors ligne. Ne lit pas le noyau.
+    Nft {
+        #[arg(long)]
+        attendu: std::path::PathBuf,
+        #[arg(long)]
+        observe: std::path::PathBuf,
+    },
     /// Compare un fichier a un SHA-256 fourni. N'authentifie pas son editeur.
     /// Ne contacte ni le daemon ni le reseau, et ne modifie aucun fichier.
     Binaire {
@@ -792,6 +800,17 @@ async fn run(args: Args) -> anyhow::Result<i32> {
             IpcCommand::Connect {
                 config: Box::new(tunnel),
             }
+        }
+        Cmd::Prove {
+            quoi: CmdPreuve::Nft { attendu, observe },
+        } => {
+            let rapport = preuve_nft::verifier(attendu, observe);
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&rapport)?);
+            } else {
+                print!("{}", rapport.texte());
+            }
+            return Ok(rapport.code());
         }
         Cmd::Prove {
             quoi: CmdPreuve::Binaire { fichier, sha256 },
