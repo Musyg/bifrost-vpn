@@ -57,7 +57,7 @@ la prochaine action. Une cellule vide signalerait une tranche non finie.
 | 05 | Anonymat et chainage. Document redige; le chainage Tor et Nym n'est pas commence, et le document lui-meme le place apres les trois objectifs | Chainage Tor ou Nym, apres les objectifs 1 a 3 |
 | 06 | Architecture logicielle et packaging. Daemon, IPC authentifie, machine a etats et scripts d'installation faits (Linux et Windows, comptes dedies, ACL); ni interface graphique, ni MSI, ni .deb/.rpm, ni mise a jour TUF, ni provisioning; SBOM en CI | Interface graphique en jalon propre apres J2; paquets signes et mise a jour TUF |
 | 07 | Programme de securite produit. fmt, clippy, recettes, suite de fuite, cargo audit, cargo deny et SBOM en CI; politique de divulgation publiee (SECURITY.md, security.txt); inventaire unsafe ferme; cargo vet et fuzz absents, aucune cle PGP | Publier une cle PGP (champ Encryption); ajouter cargo vet et un harnais fuzz |
-| 09 | Souverainete verifiable. D1a: `prove binaire`. D1b.1: `prove nft` compare deux captures JSON hors ligne, avec ordre des regles, priorites et exceptions; origine, collecte noyau et generation non attestees. Ni preuve reseau ni authentification de release | D1b.2: collecte passive du noyau encadree par sa generation, politique attendue versionnee et traitement des regles tierces |
+| 09 | Souverainete verifiable. D1a: `prove binaire`. D1b.1: comparaison nft hors ligne. D1b.2: `prove nft --actif` collecte Linux en lecture seule encadree par GETGEN, sorties et attente bornees; reference utilisateur non authentifiee. Ni preuve globale du VPN ni validation Windows | D1b.3: politique attendue issue du plan du produit, couverture des objets nft restants et collecte WFP |
 
 ## Scripts
 
@@ -71,6 +71,7 @@ Sous `scripts/`:
 | recettes-strict.sh | Compte honnete des recettes cargo (vertes, abstentions, rouges); `--strict` echoue aussi sur abstention |
 | abstentions-budget.sh | Exige que chaque abstention de la CI figure dans la liste attendue du job |
 | check-strict.sh | Exige que les dix vecteurs de fuite soient PASSED |
+| preuve-nft-linux.sh | Collecte nft passive, ecart et refus de privileges dans un namespace jetable; sudo bash ./scripts/preuve-nft-linux.sh |
 | check-cibles.sh | Construit et verifie les cibles sur l'hote courant |
 | e2e-linux.sh | Bout en bout Linux: daemon reel, capture, montee du tunnel et etancheite |
 | banc-coeur-e2e.sh | Banc bout en bout d'un coeur anti-censure |

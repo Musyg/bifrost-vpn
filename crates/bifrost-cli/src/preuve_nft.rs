@@ -1,5 +1,5 @@
-//! Comparaison structurelle de captures nft JSON, sans appel a nft ni au daemon.
-//! Ni l'origine, ni la fraicheur, ni l'exhaustivite des fichiers ne sont attestees.
+//! Comparaison structurelle nft JSON: fichiers, ou collecte passive Linux.
+//! La reference fournie reste non authentifiee, meme pour une collecte noyau.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -74,8 +74,9 @@ impl Rapport {
 
     pub fn texte(&self) -> String {
         format!(
-            "{}  nft-json-comparison\n{}\nentree non mesuree: {}\necarts: {}\n\n{}\n",
+            "{}  {}\n{}\nentree non mesuree: {}\necarts: {}\n\n{}\n",
             self.verdict,
+            self.scope,
             self.reason,
             self.failed_input.unwrap_or("aucune"),
             self.differences.join(", "),
@@ -300,9 +301,8 @@ fn lire(chemin: &Path) -> Result<Vec<u8>, &'static str> {
     Ok(octets)
 }
 
-pub fn verifier(attendu: &Path, observe: &Path) -> Rapport {
-    let debut = Instant::now();
-    let mut r = Rapport {
+fn commencer() -> Rapport {
+    Rapport {
         schema_version: 1,
         scope: "nft-json-comparison",
         verdict: "UNMEASURED",
@@ -319,37 +319,44 @@ pub fn verifier(attendu: &Path, observe: &Path) -> Rapport {
         failed_input: Some("expected"),
         reason: "reference illisible ou non prise en charge",
         limitation: LIMITE,
+    }
+}
+
+fn reference(r: &mut Rapport, attendu: &Path) -> Result<Capture, &'static str> {
+    let a = analyser(&lire(attendu)?)?;
+    if !a.chaines.values().any(|v| v.get("hook").is_some()) {
+        return Err("reference sans chaine de base");
+    }
+    r.expected_counts = Some(a.compte());
+    r.failed_input = Some("observed");
+    Ok(a)
+}
+
+fn confronter(r: &mut Rapport, a: Capture, octets: &[u8]) -> Result<(), &'static str> {
+    let b = analyser(octets)?;
+    r.observed_counts = Some(b.compte());
+    r.failed_input = None;
+    if a.tables != b.tables {
+        r.differences.push("tables");
+    }
+    if a.chaines != b.chaines {
+        r.differences.push("chains");
+    }
+    if a.regles != b.regles {
+        r.differences.push("rules");
+    }
+    if r.differences.is_empty() && a.ordre != b.ordre {
+        r.differences.push("object-order");
+    }
+    r.verdict = if r.differences.is_empty() {
+        "MATCH"
+    } else {
+        "MISMATCH"
     };
-    let resultat = (|| {
-        let a = analyser(&lire(attendu)?)?;
-        // Une reference sans chaine de base ne peut servir de point de depart.
-        if !a.chaines.values().any(|v| v.get("hook").is_some()) {
-            return Err("reference sans chaine de base");
-        }
-        r.expected_counts = Some(a.compte());
-        r.failed_input = Some("observed");
-        let b = analyser(&lire(observe)?)?;
-        r.observed_counts = Some(b.compte());
-        r.failed_input = None;
-        if a.tables != b.tables {
-            r.differences.push("tables");
-        }
-        if a.chaines != b.chaines {
-            r.differences.push("chains");
-        }
-        if a.regles != b.regles {
-            r.differences.push("rules");
-        }
-        if r.differences.is_empty() && a.ordre != b.ordre {
-            r.differences.push("object-order");
-        }
-        r.verdict = if r.differences.is_empty() {
-            "MATCH"
-        } else {
-            "MISMATCH"
-        };
-        Ok(())
-    })();
+    Ok(())
+}
+
+fn terminer(mut r: Rapport, debut: Instant, resultat: Result<(), &'static str>) -> Rapport {
     r.reason = match resultat {
         Ok(()) => {
             "comparaison structurelle; seuls handles et valeurs des compteurs anonymes sont ignores"
@@ -359,6 +366,41 @@ pub fn verifier(attendu: &Path, observe: &Path) -> Rapport {
     r.completed_at_unix_ms = heure();
     r.duration_ms = debut.elapsed().as_millis();
     r
+}
+
+pub fn verifier(attendu: &Path, observe: &Path) -> Rapport {
+    let debut = Instant::now();
+    let mut r = commencer();
+    let resultat = (|| {
+        let a = reference(&mut r, attendu)?;
+        confronter(&mut r, a, &lire(observe)?)
+    })();
+    terminer(r, debut, resultat)
+}
+
+pub async fn verifier_actif(attendu: &Path) -> Rapport {
+    let debut = Instant::now();
+    let mut r = commencer();
+    r.scope = "nft-kernel-comparison";
+    r.source = "kernel-netlink-and-system-nft";
+    r.limitation = "Reference utilisateur non authentifiee; nftables du namespace courant uniquement, pas une preuve d'etancheite du VPN.";
+    let resultat = async {
+        let a = reference(&mut r, attendu)?;
+        #[cfg(target_os = "linux")]
+        {
+            let octets = crate::preuve_nft_linux::collecter().await?;
+            r.live_kernel = true;
+            r.generation_verified = true;
+            confronter(&mut r, a, &octets)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = a;
+            Err("collecte nft active disponible uniquement sous Linux")
+        }
+    }
+    .await;
+    terminer(r, debut, resultat)
 }
 
 #[cfg(test)]

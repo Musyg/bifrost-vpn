@@ -6,6 +6,8 @@ mod inspection;
 mod pilote;
 mod preuve;
 mod preuve_nft;
+#[cfg(target_os = "linux")]
+mod preuve_nft_linux;
 mod profile;
 mod render;
 /// La source des reprises sous Linux. Ici et pas dans le daemon: le producteur
@@ -152,12 +154,15 @@ enum Cmd {
 
 #[derive(Subcommand, Debug)]
 enum CmdPreuve {
-    /// Compare deux captures nft JSON fournies, hors ligne. Ne lit pas le noyau.
+    /// Compare une reference nft JSON a une capture, ou au noyau avec --actif.
     Nft {
         #[arg(long)]
         attendu: std::path::PathBuf,
-        #[arg(long)]
-        observe: std::path::PathBuf,
+        #[arg(long, required_unless_present = "actif", conflicts_with = "actif")]
+        observe: Option<std::path::PathBuf>,
+        /// Linux: lecture seule du noyau, sans elevation ni changement de regles.
+        #[arg(long, conflicts_with = "observe")]
+        actif: bool,
     },
     /// Compare un fichier a un SHA-256 fourni. N'authentifie pas son editeur.
     /// Ne contacte ni le daemon ni le reseau, et ne modifie aucun fichier.
@@ -802,9 +807,18 @@ async fn run(args: Args) -> anyhow::Result<i32> {
             }
         }
         Cmd::Prove {
-            quoi: CmdPreuve::Nft { attendu, observe },
+            quoi:
+                CmdPreuve::Nft {
+                    attendu,
+                    observe,
+                    actif,
+                },
         } => {
-            let rapport = preuve_nft::verifier(attendu, observe);
+            let rapport = if *actif {
+                preuve_nft::verifier_actif(attendu).await
+            } else {
+                preuve_nft::verifier(attendu, observe.as_ref().expect("valide par clap"))
+            };
             if args.json {
                 println!("{}", serde_json::to_string_pretty(&rapport)?);
             } else {
