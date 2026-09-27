@@ -4,6 +4,7 @@
 
 mod inspection;
 mod pilote;
+mod preuve;
 mod profile;
 mod render;
 /// La source des reprises sous Linux. Ici et pas dans le daemon: le producteur
@@ -39,6 +40,11 @@ struct Args {
 
 #[derive(Subcommand, Debug)]
 enum Cmd {
+    /// Verifications locales, avec un perimetre explicite et un rapport exportable.
+    Prove {
+        #[command(subcommand)]
+        quoi: CmdPreuve,
+    },
     /// Monte le tunnel.
     ///
     /// Sans --config, c'est le DAEMON qui ouvre son propre profil. C'est le
@@ -140,6 +146,18 @@ enum Cmd {
         /// `hibernate`, `hybrid-sleep` ou `suspend-then-hibernate`.
         #[arg(long)]
         operation: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum CmdPreuve {
+    /// Compare un fichier a un SHA-256 fourni. N'authentifie pas son editeur.
+    /// Ne contacte ni le daemon ni le reseau, et ne modifie aucun fichier.
+    Binaire {
+        #[arg(long)]
+        fichier: std::path::PathBuf,
+        #[arg(long, value_parser = preuve::empreinte)]
+        sha256: String,
     },
 }
 
@@ -774,6 +792,17 @@ async fn run(args: Args) -> anyhow::Result<i32> {
             IpcCommand::Connect {
                 config: Box::new(tunnel),
             }
+        }
+        Cmd::Prove {
+            quoi: CmdPreuve::Binaire { fichier, sha256 },
+        } => {
+            let rapport = preuve::verifier(fichier, sha256);
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&rapport)?);
+            } else {
+                print!("{}", rapport.texte());
+            }
+            return Ok(rapport.code());
         }
         Cmd::Disconnect => IpcCommand::Disconnect,
         Cmd::Status => IpcCommand::Status,

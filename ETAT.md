@@ -9,7 +9,7 @@ la conception. Daemon et CLI, pas d'interface graphique.
 
 Cette page tient sur un ecran et se met a jour a chaque tranche. Ce qui est
 mesure et ce qui ne l'est pas est detaille dans le README et dans les documents
-du plan `docs/01..07`. La suite de fuite couvre dix vecteurs; le compte des
+du plan `docs/01..07` et `docs/09`. La suite de fuite couvre dix vecteurs; le compte des
 recettes cargo est pris par `scripts/recettes-strict.sh`, jamais par le compte
 de `cargo test`, qui presente comme verte une recette abstenue.
 
@@ -20,6 +20,10 @@ role: `dev-windows` (Windows 10 build 19045, ou vit et compile le depot),
 
 ## Comptes de recettes
 
+Les comptes ci-dessous sont ceux de la reference anterieure a D1a; ils ne
+comptent pas les nouvelles recettes de `prove`. Ne pas les presenter comme un
+releve du 27 septembre. Les resultats de la tranche figurent dans sa CI.
+
 Compte honnete des recettes cargo, par hote. La colonne `reelles` est ce qui a
 verifie quelque chose: `annoncees` moins `abstentions` moins `rouges`.
 
@@ -28,7 +32,7 @@ verifie quelque chose: `annoncees` moins `abstentions` moins `rouges`.
 | dev-windows | 1225 | 19 | 0 | 1206 |
 | essai-linux | 1222 | 22 | 0 | 1200 |
 
-Les deux lignes sont prises sur cet arbre par `scripts/recettes-strict.sh`, chacune
+Les deux lignes ont ete prises avant D1a par `scripts/recettes-strict.sh`, chacune
 sur son hote. Sur `essai-linux` une recette de plus est ignoree par construction
 (elle pose une route et ne tourne qu'en espace de noms reseau), et la garde des
 modes de scripts s'y abstient parce que la copie mesuree n'a pas de `.git` (elle
@@ -36,7 +40,7 @@ lit l'index; dans un clone elle mesure).
 
 ## Ce qui est ouvert, document par document
 
-Les sept documents du plan `docs/01..07`, leur etat et, pour un chantier ouvert,
+Les documents du plan `docs/01..07` et `docs/09`, leur etat et, pour un chantier ouvert,
 la prochaine action. Une cellule vide signalerait une tranche non finie.
 
 | Chantier | Etat et derniere mesure | Prochaine action |
@@ -48,6 +52,7 @@ la prochaine action. Une cellule vide signalerait une tranche non finie.
 | 05 | Anonymat et chainage. Document redige; le chainage Tor et Nym n'est pas commence, et le document lui-meme le place apres les trois objectifs | Chainage Tor ou Nym, apres les objectifs 1 a 3 |
 | 06 | Architecture logicielle et packaging. Daemon, IPC authentifie, machine a etats et scripts d'installation faits (Linux et Windows, comptes dedies, ACL); ni interface graphique, ni MSI, ni .deb/.rpm, ni mise a jour TUF, ni provisioning; SBOM en CI | Interface graphique en jalon propre apres J2; paquets signes et mise a jour TUF |
 | 07 | Programme de securite produit. fmt, clippy, recettes, suite de fuite, cargo audit, cargo deny et SBOM en CI; politique de divulgation publiee (SECURITY.md, security.txt); inventaire unsafe ferme; cargo vet et fuzz absents, aucune cle PGP | Publier une cle PGP (champ Encryption); ajouter cargo vet et un harnais fuzz |
+| 09 | Souverainete verifiable. Contrats D1 a D6 specifies; D1a implemente: `prove binaire`, comparaison SHA-256 locale, JSON expurge, ecart et non-mesure distincts. Ni preuve reseau ni authentification de release | D1b: confronter la politique pare-feu attendue aux regles effectives, avec collecte passive et detection de changement de generation |
 
 ## Scripts
 
