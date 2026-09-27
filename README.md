@@ -163,6 +163,30 @@ Remove-Item -Recurse -Force "$env:ProgramFiles\Bifrost"
 
 `--cleanup-firewall` avant de retirer quoi que ce soit, pour la meme raison que sous Linux : arreter le service ne desarme pas le kill switch, et supprimer le binaire avant les filtres laisserait une machine bloquee sans l'outil pour la debloquer.
 
+## Verifier l'integrite d'un fichier, hors ligne
+
+La premiere tranche de `prove` compare les octets d'un fichier a une empreinte
+SHA-256 obtenue separement. Elle ne contacte ni le daemon ni le reseau, ne demande
+pas d'elevation et ne modifie pas le fichier:
+
+```bash
+bifrost-cli prove binaire --fichier ./bifrost-daemon --sha256 <SHA256-attendu>
+bifrost-cli --json prove binaire --fichier ./bifrost-daemon --sha256 <SHA256-attendu>
+```
+
+Codes de sortie: 0 (`MATCH`), 1 (`MISMATCH`), 2 (`UNMEASURED`, ou erreur de
+syntaxe CLI). Le JSON porte le perimetre `file-sha256`, les deux empreintes et
+le nombre d'octets lus, sans nom de fichier ni chemin local. Fichiers reguliers
+uniquement, sans lien symbolique, jusqu'a 512 Mio. Le fichier doit rester
+immuable pendant le controle; le rapport concerne les octets lus, pas une
+future execution. Une empreinte peut identifier un fichier: relire avant partage.
+
+**MATCH ne prouve ni l'origine du binaire ni la securite du VPN.** La reference
+reste fournie par l'utilisateur, sans authentification de l'editeur. Le rapport
+le dit aussi sur succes. La verification du pare-feu, des routes et du DNS,
+la provenance des releases et les autres axes sont specifies dans
+[`docs/09-souverainete-verifiable.md`](docs/09-souverainete-verifiable.md).
+
 ## Tester
 
 ```bash
@@ -477,7 +501,7 @@ Ce qui manque : le DoH des navigateurs n'est desactive par aucune policy, et l'e
 
 ## Documentation
 
-**Ou on en est se lit dans [`ETAT.md`](ETAT.md)**, qui tient sur un ecran et se met a jour a chaque tranche : l'etat des sept documents du plan, les chantiers ouverts avec leur prochaine action, et les comptes de recettes avec la commande qui les rend. Le reste est du detail.
+**Ou on en est se lit dans [`ETAT.md`](ETAT.md)**, qui tient sur un ecran et se met a jour a chaque tranche : l'etat des documents du plan, les chantiers ouverts avec leur prochaine action, et les comptes de recettes avec la commande qui les rend. Le reste est du detail.
 
 | Document | Objet |
 |---|---|
@@ -490,6 +514,7 @@ Ce qui manque : le DoH des navigateurs n'est desactive par aucune policy, et l'e
 | `docs/05-anonymat-chainage.md` | Modeles de menace, architectures de sortie comparees, multi-hop, Tor, Nym, defense contre la correlation de trafic |
 | `docs/06-architecture-logicielle-packaging.md` | Daemon Rust et interface Tauri, IPC privilegie, MSI et paquets Linux, signature, mise a jour TUF, provisioning serveur |
 | `docs/07-programme-securite-produit.md` | Modele de menace du produit, fuzzing, audit externe, divulgation coordonnee, conformite Cyber Resilience Act |
+| `docs/09-souverainete-verifiable.md` | Controle utilisateur, preuves locales, builds reproductibles, sorties reseau, ODoH et multihop: criteres mesurables et ordre de livraison |
 
 ## Decisions structurantes deja actees
 
