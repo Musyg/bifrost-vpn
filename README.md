@@ -221,6 +221,24 @@ une politique permissive peut correspondre, sans prouver l'etancheite du VPN.
 WFP, routes, DNS et autres mecanismes de filtrage restent hors de cette mesure.
 Voir [D1b dans les specifications](docs/09-souverainete-verifiable.md#d1b---politique-pare-feu-effective-en-cours).
 
+La reference peut aussi venir d'une intention Bifrost explicite, sans reprendre
+une capture comme modele:
+
+```sh
+bifrost-cli --json prove nft --politique examples/politique-nft-v1.json --observe capture.json
+bifrost-cli --json prove nft --politique examples/politique-nft-v1.json --actif
+```
+
+Sous Linux, `--politique` remplace `--attendu`. Le format v1 exige les sept
+champs de l'exemple, y compris les `null` explicites. Adapter interface, marque,
+DNS, LAN et identites a l'intention voulue; l'exemple n'est pas une detection de
+la configuration du poste. Le moteur produit engendre la reference en memoire.
+Un changement de ces parametres ou une table tierce devient un ecart; aucun
+objet tiers n'est ignore. Les parametres prives ne sont pas copies dans le
+rapport. `expected_source=bifrost-policy-v1-user-declared` distingue cette
+intention d'une capture fournie. Elle n'est ni signee ni attestee comme profil
+actif du daemon, et MATCH ne devient pas une preuve globale d'etancheite.
+
 ## Tester
 
 ### Quota de CI et validation Windows

@@ -52,6 +52,8 @@ pub struct Rapport {
     completed_at_unix_ms: Option<u128>,
     duration_ms: u128,
     source: &'static str,
+    expected_source: &'static str,
+    policy_schema_version: Option<u32>,
     live_kernel: bool,
     generation_verified: bool,
     network_security: &'static str,
@@ -310,6 +312,8 @@ fn commencer() -> Rapport {
         completed_at_unix_ms: None,
         duration_ms: 0,
         source: "user-supplied-snapshots",
+        expected_source: "user-supplied-snapshot",
+        policy_schema_version: None,
         live_kernel: false,
         generation_verified: false,
         network_security: "not-evaluated",
@@ -397,6 +401,48 @@ pub async fn verifier_actif(attendu: &Path) -> Rapport {
         {
             let _ = a;
             Err("collecte nft active disponible uniquement sous Linux")
+        }
+    }
+    .await;
+    terminer(r, debut, resultat)
+}
+
+pub async fn verifier_politique(politique: &Path, observe: Option<&Path>, actif: bool) -> Rapport {
+    let debut = Instant::now();
+    let mut r = commencer();
+    r.expected_source = "bifrost-policy-v1-user-declared";
+    r.source = "user-supplied-snapshot";
+    r.failed_input = Some("policy");
+    r.limitation = "Intention declaree, pas le profil actif atteste; comparaison nft uniquement, pas une preuve d'etancheite du VPN.";
+    if actif {
+        r.scope = "nft-kernel-comparison";
+        r.source = "kernel-netlink-and-system-nft";
+    }
+    let resultat = async {
+        let Unique(v) = serde_json::from_slice(&lire(politique)?)
+            .map_err(|_| "politique JSON invalide ou ambigue")?;
+        #[cfg(target_os = "linux")]
+        {
+            let p = bifrost_firewall::politique_nft::Politique::lire(v)?;
+            let octets = serde_json::to_vec(&p.reference()?).map_err(|_| "reference impossible")?;
+            let a = analyser(&octets)?;
+            r.policy_schema_version = Some(1);
+            r.expected_counts = Some(a.compte());
+            r.failed_input = Some("observed");
+            let b = if actif {
+                let b = crate::preuve_nft_linux::collecter().await?;
+                r.live_kernel = true;
+                r.generation_verified = true;
+                b
+            } else {
+                lire(observe.ok_or("capture observee absente")?)?
+            };
+            confronter(&mut r, a, &b)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (v, observe);
+            Err("reference de politique nft disponible uniquement sous Linux")
         }
     }
     .await;

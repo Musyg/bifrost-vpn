@@ -156,8 +156,15 @@ enum Cmd {
 enum CmdPreuve {
     /// Compare une reference nft JSON a une capture, ou au noyau avec --actif.
     Nft {
-        #[arg(long)]
-        attendu: std::path::PathBuf,
+        #[arg(
+            long,
+            required_unless_present = "politique",
+            conflicts_with = "politique"
+        )]
+        attendu: Option<std::path::PathBuf>,
+        /// Intention nft Bifrost v1, alternative a une capture de reference.
+        #[arg(long, conflicts_with = "attendu")]
+        politique: Option<std::path::PathBuf>,
         #[arg(long, required_unless_present = "actif", conflicts_with = "actif")]
         observe: Option<std::path::PathBuf>,
         /// Linux: lecture seule du noyau, sans elevation ni changement de regles.
@@ -810,14 +817,20 @@ async fn run(args: Args) -> anyhow::Result<i32> {
             quoi:
                 CmdPreuve::Nft {
                     attendu,
+                    politique,
                     observe,
                     actif,
                 },
         } => {
-            let rapport = if *actif {
-                preuve_nft::verifier_actif(attendu).await
+            let rapport = if let Some(p) = politique {
+                preuve_nft::verifier_politique(p, observe.as_deref(), *actif).await
+            } else if *actif {
+                preuve_nft::verifier_actif(attendu.as_ref().expect("valide par clap")).await
             } else {
-                preuve_nft::verifier(attendu, observe.as_ref().expect("valide par clap"))
+                preuve_nft::verifier(
+                    attendu.as_ref().expect("valide par clap"),
+                    observe.as_ref().expect("valide par clap"),
+                )
             };
             if args.json {
                 println!("{}", serde_json::to_string_pretty(&rapport)?);

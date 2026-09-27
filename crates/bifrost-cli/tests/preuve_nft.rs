@@ -8,6 +8,113 @@ use serde_json::{Value, json};
 
 static NUMERO: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(target_os = "linux")]
+fn politique() -> Value {
+    json!({"schema_version":1,"tunnel_interface":"wg-prive","fwmark":51820,
+        "dns_resolver":"127.0.0.1","allow_lan":false,"coeur_uid":1001,"resolveur_uid":1002})
+}
+
+#[cfg(target_os = "linux")]
+fn lancer_politique(b: &Bac, p: &[u8], observation: Option<&Value>) -> Output {
+    std::fs::write(b.0.join("politique-privee.json"), p).unwrap();
+    let mut c = Command::new(env!("CARGO_BIN_EXE_bifrost-cli"));
+    c.args([
+        "--json",
+        "--socket",
+        "absent",
+        "prove",
+        "nft",
+        "--politique",
+    ])
+    .arg(b.0.join("politique-privee.json"));
+    if let Some(o) = observation {
+        std::fs::write(b.0.join("observe.json"), o.to_string()).unwrap();
+        c.arg("--observe").arg(b.0.join("observe.json"));
+    } else {
+        c.arg("--actif");
+    }
+    c.output().unwrap()
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn politique_produit_comparee_sans_daemon_et_sans_exporter_ses_parametres() {
+    let b = Bac::nouveau();
+    let p = politique();
+    let attendu = bifrost_firewall::politique_nft::Politique::lire(p.clone())
+        .unwrap()
+        .reference()
+        .unwrap();
+    let sortie = lancer_politique(&b, p.to_string().as_bytes(), Some(&attendu));
+    assert_eq!(sortie.status.code(), Some(0), "{sortie:?}");
+    let r: Value = serde_json::from_slice(&sortie.stdout).unwrap();
+    assert_eq!(r["verdict"], "MATCH");
+    assert_eq!(r["expected_source"], "bifrost-policy-v1-user-declared");
+    assert_eq!(r["policy_schema_version"], 1);
+    assert_eq!(r["live_kernel"], false);
+    assert_eq!(r["network_security"], "not-evaluated");
+    for secret in ["wg-prive", "127.0.0.1", "politique-privee", "51820"] {
+        assert!(!String::from_utf8_lossy(&sortie.stdout).contains(secret));
+    }
+    // Changer l'intention sans toucher l'observation doit produire un ecart.
+    for (cle, valeur) in [
+        ("allow_lan", json!(true)),
+        ("fwmark", json!(42)),
+        ("tunnel_interface", json!("wg-autre")),
+        ("coeur_uid", json!(1003)),
+        ("resolveur_uid", json!(1004)),
+        ("dns_resolver", json!("::1")),
+    ] {
+        let mut autre = p.clone();
+        autre[cle] = valeur;
+        let sortie = lancer_politique(&b, autre.to_string().as_bytes(), Some(&attendu));
+        assert_eq!(
+            sortie.status.code(),
+            Some(1),
+            "ecart ignore: {cle}, {sortie:?}"
+        );
+    }
+    assert_eq!(
+        std::fs::read(b.0.join("observe.json")).unwrap(),
+        attendu.to_string().as_bytes()
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn politique_invalide_refusee_avant_toute_collecte() {
+    let b = Bac::nouveau();
+    let p = politique().to_string();
+    for invalide in [
+        "{}".to_owned(),
+        format!("{{\"schema_version\":1,{}", &p[1..]),
+        p.replace("51820", "0"),
+        p.replace("\"schema_version\":1", "\"schema_version\":99"),
+    ] {
+        let sortie = lancer_politique(&b, invalide.as_bytes(), None);
+        assert_eq!(sortie.status.code(), Some(2), "{sortie:?}");
+        let r: Value = serde_json::from_slice(&sortie.stdout).unwrap();
+        assert_eq!(r["verdict"], "UNMEASURED");
+        assert_eq!(r["failed_input"], "policy");
+        assert_eq!(r["live_kernel"], false);
+        assert_eq!(r["generation_verified"], false);
+    }
+    let sortie = Command::new(env!("CARGO_BIN_EXE_bifrost-cli"))
+        .args([
+            "prove",
+            "nft",
+            "--politique",
+            "absent",
+            "--attendu",
+            "absent",
+            "--actif",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(sortie.status.code(), Some(2));
+    assert!(sortie.stdout.is_empty());
+}
+
 struct Bac(PathBuf);
 impl Bac {
     fn nouveau() -> Self {
