@@ -12,7 +12,7 @@ use std::time::Duration;
 use bifrost_ipc::protocol::{
     Command, DECLARATION_PARE_FEU_VERSION, DeclarationPareFeu, IssueApplication, Request, Response,
 };
-use bifrost_ipc::{IpcClient, IpcError};
+use bifrost_ipc::{IpcClient, IpcError, ServerIdentityError, ServerRequirement};
 use serde_json::Value;
 
 use crate::preuve_nft::Unique;
@@ -21,6 +21,34 @@ use crate::preuve_nft::Unique;
 /// applique les politiques: il peut etre occupe a monter un tunnel, mais une
 /// preuve qui attendrait sans fin ne rendrait jamais son NON MESURE.
 const DELAI: Duration = Duration::from_secs(5);
+
+/// Pourquoi la declaration n'a pas pu servir d'attendu, et quelle entree
+/// manque: le rapport distingue un serveur dont l'identite n'est pas admise
+/// (`daemon-identity`) d'une declaration absente ou illisible
+/// (`daemon-declaration`). Les raisons ne nomment ni uid, ni pid, ni SID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Refus {
+    Identite(&'static str),
+    Declaration(&'static str),
+}
+
+impl Refus {
+    pub(crate) fn entree(self) -> &'static str {
+        match self {
+            Refus::Identite(_) => "daemon-identity",
+            Refus::Declaration(_) => "daemon-declaration",
+        }
+    }
+
+    pub(crate) fn raison(self) -> &'static str {
+        match self {
+            Refus::Identite(r) | Refus::Declaration(r) => r,
+        }
+    }
+}
+
+/// La declaration, et le nom de la regle qui a admis son serveur.
+pub(crate) type Lue = (DeclarationPareFeu, &'static str);
 
 const CLES: [&str; 7] = [
     "result",
@@ -34,30 +62,50 @@ const CLES: [&str; 7] = [
 
 const HORS_SCHEMA: &str = "declaration du daemon hors schema";
 
-pub(crate) async fn lire(socket: &str) -> Result<DeclarationPareFeu, &'static str> {
-    lire_avec_delai(socket, DELAI).await
+/// La lecture de la preuve: le serveur doit etre PRIVILEGIE, toujours.
+///
+/// `--socket` est choisi par l'utilisateur, et n'importe quel processus peut
+/// ecouter sur un chemin qu'il cree: sans cette exigence, il servirait une
+/// declaration taillee pour un noyau altere, et la preuve dirait MATCH. Le
+/// daemon, lui, tourne en root sans exception (`ensure_privileged` avant
+/// l'ecoute, aucun `User=` dans l'unite livree).
+pub(crate) async fn lire(socket: &str) -> Result<Lue, Refus> {
+    lire_avec(socket, DELAI, ServerRequirement::Privileged).await
 }
 
-async fn lire_avec_delai(
+async fn lire_avec(
     socket: &str,
     delai: Duration,
-) -> Result<DeclarationPareFeu, &'static str> {
+    attendu: ServerRequirement,
+) -> Result<Lue, Refus> {
     let echange = async {
-        let mut client = IpcClient::connect(socket).await.map_err(|e| match e {
-            // Le socket existe et ses droits nous ecartent: ce n'est pas une
-            // absence de daemon, et le rapport ne doit pas le laisser croire.
-            IpcError::Io(e) if e.kind() == ErrorKind::PermissionDenied => "acces au daemon refuse",
-            _ => "daemon injoignable",
-        })?;
-        client
+        let (mut client, regle) =
+            IpcClient::connect_verified(socket, attendu)
+                .await
+                .map_err(|e| match e {
+                    IpcError::ServerIdentity(ServerIdentityError::Refused) => {
+                        Refus::Identite("serveur de la declaration non privilegie")
+                    }
+                    IpcError::ServerIdentity(ServerIdentityError::Unreadable) => {
+                        Refus::Identite("identite du serveur de la declaration illisible")
+                    }
+                    // Le socket existe et ses droits nous ecartent: ce n'est pas une
+                    // absence de daemon, et le rapport ne doit pas le laisser croire.
+                    IpcError::Io(e) if e.kind() == ErrorKind::PermissionDenied => {
+                        Refus::Declaration("acces au daemon refuse")
+                    }
+                    _ => Refus::Declaration("daemon injoignable"),
+                })?;
+        let octets = client
             .request_raw(&Request::new(Command::DeclarationPareFeu))
             .await
-            .map_err(|_| "reponse du daemon tronquee ou illisible")
+            .map_err(|_| Refus::Declaration("reponse du daemon tronquee ou illisible"))?;
+        Ok((octets, regle))
     };
-    let octets = tokio::time::timeout(delai, echange)
+    let (octets, regle) = tokio::time::timeout(delai, echange)
         .await
-        .map_err(|_| "daemon sans reponse dans le delai")??;
-    analyser(&octets)
+        .map_err(|_| Refus::Declaration("daemon sans reponse dans le delai"))??;
+    Ok((analyser(&octets).map_err(Refus::Declaration)?, regle.name()))
 }
 
 /// Analyse une trame de reponse, sans jamais recopier ce qu'elle contient
@@ -147,6 +195,26 @@ mod tests {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     const INSTANCE: &str = "0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    /// L'uid effectif de ce processus, lu sans code non sur: le faux daemon
+    /// des recettes tourne sous lui, et `SO_PEERCRED` rend precisement cet
+    /// uid-la (le second champ de `Uid:`).
+    fn mon_uid() -> u32 {
+        std::fs::read_to_string("/proc/self/status")
+            .unwrap()
+            .lines()
+            .find_map(|l| l.strip_prefix("Uid:"))
+            .and_then(|champs| champs.split_whitespace().nth(1))
+            .and_then(|u| u.parse().ok())
+            .expect("uid effectif lisible dans /proc/self/status")
+    }
+
+    /// L'exigence des recettes de PROTOCOLE: le faux daemon a l'uid de la
+    /// recette. L'exigence de production (`lire`) a ses propres recettes plus
+    /// bas; celle-ci ne sert qu'a atteindre le protocole sans etre root.
+    fn recette() -> ServerRequirement {
+        ServerRequirement::Uid(mon_uid())
+    }
 
     /// Une politique de production plausible, et complete: les six champs
     /// renseignes, pour qu'en changer un seul change le rendu.
@@ -271,7 +339,7 @@ mod tests {
     async fn prouver(daemon: &FauxDaemon, capture: Vec<u8>) -> Value {
         let socket = daemon.socket.clone();
         let r = verifier_declaration_avec(
-            || lire_avec_delai(&socket, Duration::from_secs(2)),
+            || lire_avec(&socket, Duration::from_secs(2), recette()),
             move || async move { Ok(capture) },
         )
         .await;
@@ -291,7 +359,7 @@ mod tests {
     async fn sans_collecte(daemon: &FauxDaemon) -> Value {
         let socket = daemon.socket.clone();
         let r = verifier_declaration_avec(
-            || lire_avec_delai(&socket, Duration::from_secs(2)),
+            || lire_avec(&socket, Duration::from_secs(2), recette()),
             || async { panic!("collecte interdite sans politique a comparer") },
         )
         .await;
@@ -342,6 +410,9 @@ mod tests {
         assert_eq!(r["generation_verified"], true);
         assert_eq!(r["network_security"], "not-evaluated");
         assert!(r["failed_input"].is_null());
+        // Le nom de la regle, jamais sa valeur: celle des recettes, puisque
+        // le faux daemon tourne sous l'uid de la recette.
+        assert_eq!(r["daemon_identity"], "uid-peer-credentials");
         assert_eq!(daemon.requetes(), 2, "N1 puis N2, ni plus ni moins");
         rien_de_la_declaration(&r);
     }
@@ -423,7 +494,7 @@ mod tests {
         let daemon = FauxDaemon::demarrer(vec![posee(&politique())]);
         let socket = format!("{}.absent", daemon.socket);
         let r = verifier_declaration_avec(
-            || lire_avec_delai(&socket, Duration::from_secs(2)),
+            || lire_avec(&socket, Duration::from_secs(2), recette()),
             || async { panic!("collecte interdite sans declaration") },
         )
         .await;
@@ -448,9 +519,9 @@ mod tests {
         let daemon = FauxDaemon::demarrer(vec![posee(&politique())]);
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&daemon.socket, std::fs::Permissions::from_mode(0o000)).unwrap();
-        let r = lire_avec_delai(&daemon.socket, Duration::from_secs(2)).await;
+        let r = lire_avec(&daemon.socket, Duration::from_secs(2), recette()).await;
         match r {
-            Err(raison) => assert_eq!(raison, "acces au daemon refuse"),
+            Err(refus) => assert_eq!(refus, Refus::Declaration("acces au daemon refuse")),
             // root passe outre les droits du socket: ce cas-la n'a pas ete
             // mesure, et la ligne le dit au decompte des abstentions.
             Ok(_) => println!(
@@ -644,7 +715,7 @@ mod tests {
             let daemon = FauxDaemon::demarrer(vec![posee(&politique())]);
             let socket = daemon.socket.clone();
             let r = verifier_declaration_avec(
-                || lire_avec_delai(&socket, Duration::from_secs(2)),
+                || lire_avec(&socket, Duration::from_secs(2), recette()),
                 move || async move { Err(raison) },
             )
             .await;
@@ -668,9 +739,113 @@ mod tests {
                 tenus.push(flux);
             }
         });
-        let r = lire_avec_delai(&chemin.to_string_lossy(), Duration::from_millis(200)).await;
+        let r = lire_avec(
+            &chemin.to_string_lossy(),
+            Duration::from_millis(200),
+            recette(),
+        )
+        .await;
         garde.abort();
         let _ = std::fs::remove_dir_all(&dossier);
-        assert_eq!(r, Err("daemon sans reponse dans le delai"));
+        assert_eq!(
+            r,
+            Err(Refus::Declaration("daemon sans reponse dans le delai"))
+        );
+    }
+
+    /// LA garde de D1b.3c, sur son occurrence reelle: `lire`, la lecture de
+    /// production, face a un faux daemon qui sert une declaration conforme au
+    /// noyau. Non root, il n'est pas admis, et il ne recoit RIEN: le client
+    /// verifie avant d'ecrire. Root, il est admis, et c'est la limite de la
+    /// regle: elle dit qui ecoute, pas que c'est le daemon. Les deux branches
+    /// mesurent.
+    #[tokio::test]
+    async fn la_preuve_exige_un_serveur_root() {
+        let p = politique();
+        let daemon = FauxDaemon::demarrer(vec![posee(&p)]);
+        let socket = daemon.socket.clone();
+        let capture = noyau(&p);
+        let root = mon_uid() == 0;
+        let r = verifier_declaration_avec(
+            || lire(&socket),
+            move || async move {
+                assert!(root, "collecte interdite sans identite admise");
+                Ok(capture)
+            },
+        )
+        .await;
+        let code = r.code();
+        let r = serde_json::to_value(&r).unwrap();
+        if root {
+            assert_eq!(r["verdict"], "MATCH", "{r}");
+            assert_eq!(r["daemon_identity"], "root-peer-credentials");
+            assert_eq!(daemon.requetes(), 2);
+        } else {
+            assert_eq!(code, 2);
+            assert_eq!(r["verdict"], "UNMEASURED", "{r}");
+            assert_eq!(r["reason"], "serveur de la declaration non privilegie");
+            assert_eq!(r["failed_input"], "daemon-identity");
+            assert!(r["daemon_identity"].is_null(), "{r}");
+            assert_eq!(r["live_kernel"], false);
+            assert_eq!(
+                daemon.requetes(),
+                0,
+                "une requete est partie vers un serveur refuse"
+            );
+        }
+        rien_de_la_declaration(&r);
+    }
+
+    /// L'identite se reverifie a N2: un serveur admis pour la premiere
+    /// lecture et refuse pour la seconde ne laisse rien comparer, et le
+    /// rapport ne garde pas la regle de N1.
+    #[tokio::test]
+    async fn une_identite_refusee_apres_la_collecte_n_est_pas_mesuree() {
+        let p = politique();
+        let d = DeclarationPareFeu {
+            schema_version: DECLARATION_PARE_FEU_VERSION,
+            instance: INSTANCE.into(),
+            application: 4,
+            moteur: "nftables".into(),
+            issue: IssueApplication::Posee,
+            politique: Some(serde_json::to_value(Politique::projeter(&p)).unwrap()),
+        };
+        for (refus, entree) in [
+            (
+                Refus::Identite("serveur de la declaration non privilegie"),
+                "daemon-identity",
+            ),
+            (
+                Refus::Identite("identite du serveur de la declaration illisible"),
+                "daemon-identity",
+            ),
+        ] {
+            let mut lectures = vec![Err(refus), Ok((d.clone(), "root-peer-credentials"))];
+            let capture = noyau(&p);
+            let r = verifier_declaration_avec(
+                || std::future::ready(lectures.pop().unwrap()),
+                move || async move { Ok(capture) },
+            )
+            .await;
+            let r = serde_json::to_value(&r).unwrap();
+            assert_eq!(r["verdict"], "UNMEASURED", "{r}");
+            assert_eq!(r["reason"], refus.raison());
+            assert_eq!(r["failed_input"], entree);
+            assert!(r["daemon_identity"].is_null(), "{r}");
+            assert_eq!(r["live_kernel"], true);
+        }
+        // Et a N1: rien n'est lu, rien n'est collecte.
+        let r = verifier_declaration_avec(
+            || {
+                std::future::ready(Err(Refus::Identite(
+                    "identite du serveur de la declaration illisible",
+                )))
+            },
+            || async { panic!("collecte interdite sans identite admise") },
+        )
+        .await;
+        let r = serde_json::to_value(&r).unwrap();
+        assert_eq!(r["failed_input"], "daemon-identity");
+        assert!(r["daemon_identity"].is_null(), "{r}");
     }
 }

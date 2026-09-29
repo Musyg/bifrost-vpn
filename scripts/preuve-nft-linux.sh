@@ -8,7 +8,7 @@ fi
 RACINE=$(cd "$(dirname "$0")/.." && pwd)
 CLI="$RACINE/target/debug/bifrost-cli"
 DAEMON="$RACINE/target/debug/bifrost-daemon"
-for outil in ip nft jq setpriv cmp getent stat; do command -v "$outil" >/dev/null; done
+for outil in ip nft jq setpriv cmp getent stat python3; do command -v "$outil" >/dev/null; done
 test -x "$CLI"
 test -x "$DAEMON"
 BAC=$(mktemp -d)
@@ -17,6 +17,7 @@ NSD="bfdecl-$$"
 CREE=0
 CREE_D=0
 PID_DAEMON=""
+PID_FAUX=""
 COURSE=""
 # `ip netns del` ne tue rien: il retire le NOM, et ce qui tourne dans le
 # namespace continue de vivre, invisible a `ip netns list`. On releve donc les
@@ -45,7 +46,7 @@ retirer_netns() {
 nettoyer() {
   local code=$?
   if [ "$code" != 0 ]; then
-    for rapport in match ecart refus vide politique decl; do
+    for rapport in match ecart refus vide politique decl faux; do
       if [ -f "$BAC/$rapport.json" ]; then cat "$BAC/$rapport.json"; fi
     done
     for journal in connect.log daemon.log; do
@@ -53,6 +54,10 @@ nettoyer() {
     done
   fi
   if [ -n "$COURSE" ]; then kill "$COURSE" 2>/dev/null || true; wait "$COURSE" 2>/dev/null || true; fi
+  if [ -n "$PID_FAUX" ]; then
+    kill "$PID_FAUX" 2>/dev/null || true
+    wait "$PID_FAUX" 2>/dev/null || true
+  fi
   if [ -n "$PID_DAEMON" ]; then
     kill "$PID_DAEMON" 2>/dev/null || true
     wait "$PID_DAEMON" 2>/dev/null || true
@@ -202,7 +207,13 @@ done
 test -S "$SOCKET"
 # `ip netns exec` fait exec: le PID releve EST le daemon, et il est dans NOTRE
 # namespace. Sans cette verification, la suite pourrait tuer un autre processus.
-ip netns pids "$NSD" | grep -qx "$PID_DAEMON"
+#
+# Jamais `grep -q` au bout d'un tube dans ce script: il sort au premier
+# resultat, l'ecrivain recoit SIGPIPE, et `pipefail` fait de ce SUCCES un
+# echec 141. Mesure du 29/09/2026 sur la machine d'essai: le banc est tombe
+# ainsi apres un MATCH, sur la ligne `nft list chain | grep -qF` de l'etape
+# de reprise. `grep ... >/dev/null` lit tout et rend le meme verdict.
+ip netns pids "$NSD" | grep -x "$PID_DAEMON" >/dev/null
 
 prouver() {
   local sortie=$1
@@ -228,7 +239,7 @@ muet() {
 correspond() {
   prouver decl
   test "$CODE" = 0
-  jq -e '.verdict == "MATCH" and .schema_version == 1 and .expected_source == "daemon-declared-active-policy" and .policy_schema_version == 1 and .live_kernel and .generation_verified and .network_security == "not-evaluated" and .failed_input == null' "$BAC/decl.json" >/dev/null
+  jq -e '.verdict == "MATCH" and .schema_version == 1 and .expected_source == "daemon-declared-active-policy" and .daemon_identity == "root-peer-credentials" and .policy_schema_version == 1 and .live_kernel and .generation_verified and .network_security == "not-evaluated" and .failed_input == null' "$BAC/decl.json" >/dev/null
   muet decl
 }
 ecart() {
@@ -268,6 +279,8 @@ handle() {
 }
 
 non_mesure 'aucune politique posee par ce daemon depuis son demarrage'
+# Le serveur a ete admis avant que la declaration ne dise qu'il n'y a rien.
+jq -e '.daemon_identity == "root-peer-credentials" and .failed_input == "daemon-declaration"' "$BAC/decl.json" >/dev/null
 test -z "$(ip netns exec "$NSD" nft list ruleset)"
 echo 'PASSED: daemon neuf, aucune politique declaree, rien de compare'
 
@@ -285,6 +298,82 @@ ip netns exec "$NSD" nft --json --numeric list ruleset > "$BAC/apres.json"
 cmp "$BAC/avant.json" "$BAC/apres.json"
 echo 'PASSED: etat erreur, kill switch pose par le daemon, correspondance sans mutation'
 
+# --- D1b.3c: QUI sert la declaration ---
+#
+# Un faux daemon rejoue, octet pour octet, la declaration que le vrai vient de
+# servir, sur un --socket choisi par l'utilisateur. Le noyau porte exactement
+# ce qu'elle dit: sans verification d'identite, la preuve dirait MATCH. Sous
+# root, elle le dit encore, et c'est la LIMITE de la regle: elle dit qui ecoute,
+# pas que c'est le daemon. Sous un compte quelconque, le client refuse AVANT
+# d'ecrire: le faux daemon ne recoit aucune requete.
+LIRE_PY='
+import socket, sys
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.connect(sys.argv[1])
+s.sendall(b"{\"version\":1,\"command\":\"declaration-pare-feu\"}\n")
+d = b""
+while not d.endswith(b"\n"):
+    b = s.recv(65536)
+    if not b:
+        break
+    d += b
+sys.stdout.buffer.write(d)
+'
+FAUX_PY='
+import socket, sys
+chemin, reponse, journal = sys.argv[1], open(sys.argv[2], "rb").read(), sys.argv[3]
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.bind(chemin)
+s.listen(8)
+while True:
+    c, _ = s.accept()
+    if c.makefile("rb").readline():
+        with open(journal, "a") as j:
+            j.write("requete\n")
+        c.sendall(reponse)
+    c.close()
+'
+ip netns exec "$NSD" python3 -c "$LIRE_PY" "$SOCKET" > "$BAC/declaration.json"
+jq -e '.result == "declaration-pare-feu" and .issue == "posee"' "$BAC/declaration.json" >/dev/null
+chmod 644 "$BAC/declaration.json"
+mkdir "$BAC/faux"
+chown 65534:"$GROUPE" "$BAC/faux"
+FAUX="$BAC/faux/d.sock"
+# Le prefixe (vide, ou setpriv) choisit le compte du faux daemon. `ip netns
+# exec` et `setpriv` font exec: le PID releve EST l'interprete, dans NOTRE
+# namespace, et c'est lui qu'on tue, par PID.
+faux_daemon() {
+  rm -f "$FAUX" "$BAC/faux/requetes"
+  ip netns exec "$NSD" "$@" python3 -c "$FAUX_PY" "$FAUX" "$BAC/declaration.json" "$BAC/faux/requetes" &
+  PID_FAUX=$!
+  for _ in $(seq 1 40); do
+    if [ -S "$FAUX" ]; then break; fi
+    kill -0 "$PID_FAUX"
+    sleep 0.25
+  done
+  test -S "$FAUX"
+  ip netns pids "$NSD" | grep -x "$PID_FAUX" >/dev/null
+  CODE=0
+  ip netns exec "$NSD" "$CLI" --json --socket "$FAUX" prove nft --politique-daemon --actif \
+    > "$BAC/faux.json" || CODE=$?
+  kill "$PID_FAUX"
+  wait "$PID_FAUX" 2>/dev/null || true
+  PID_FAUX=""
+  muet faux
+}
+# Temoin: le rejeu sous root passe. Sans lui, le refus qui suit pourrait venir
+# d'une declaration mal rejouee plutot que de l'identite du serveur.
+faux_daemon
+test "$CODE" = 0
+jq -e '.verdict == "MATCH" and .daemon_identity == "root-peer-credentials" and .failed_input == null' "$BAC/faux.json" >/dev/null
+test "$(wc -l < "$BAC/faux/requetes")" = 2
+# La garde: le meme rejeu, servi par un compte non root.
+faux_daemon setpriv --reuid=65534 --regid=65534 --clear-groups
+test "$CODE" = 2
+jq -e '.verdict == "UNMEASURED" and .reason == "serveur de la declaration non privilegie" and .failed_input == "daemon-identity" and .daemon_identity == null and (.live_kernel | not) and (.generation_verified | not)' "$BAC/faux.json" >/dev/null
+test ! -e "$BAC/faux/requetes"
+echo 'PASSED: faux daemon non root sur un --socket choisi -> non mesure (daemon-identity), sans une requete; le meme rejeu sous root passe (limite de la regle)'
+
 # Regle retiree: le drop du :53 du coeur, celui qui l'empeche de resoudre en clair.
 H=$(handle 'any(.expr[]; .match.left.meta.key? == "skuid") and any(.expr[]; has("drop"))')
 test "$H" != null
@@ -294,7 +383,7 @@ reposer
 correspond
 # La reprise en etat erreur repose une politique qui nomme l'interface du
 # profil: la declaration a suivi ce que le daemon a REELLEMENT pose.
-ip netns exec "$NSD" nft list chain inet bifrost output | grep -qF 'oifname "bfdecl0" accept'
+ip netns exec "$NSD" nft list chain inet bifrost output | grep -F 'oifname "bfdecl0" accept' >/dev/null
 echo 'PASSED: regle retiree -> ecart; reprise -> la declaration suit la nouvelle pose'
 
 # Exception trop large: l'exemption du coeur devient celle de tout non-root.
@@ -397,4 +486,5 @@ PID_DAEMON=""
 # elle, n'a plus d'attendu et ne conclut pas.
 ip netns exec "$NSD" nft list table inet bifrost >/dev/null
 non_mesure 'daemon injoignable'
+jq -e '.daemon_identity == null and .failed_input == "daemon-declaration"' "$BAC/decl.json" >/dev/null
 echo 'PASSED: daemon arrete -> non mesure, la table restee en place n est pas une correspondance'

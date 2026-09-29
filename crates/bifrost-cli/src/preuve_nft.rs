@@ -45,6 +45,36 @@ impl Capture {
     }
 }
 
+/// L'identite du serveur de la declaration, telle que le rapport la dit.
+///
+/// Absente du rapport hors de la preuve par declaration: une comparaison de
+/// fichiers n'a pas de serveur. Dans cette preuve, `null` tant qu'elle n'est
+/// pas etablie, puis le NOM de la regle qui l'a admise; jamais une valeur.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IdentiteDaemon {
+    HorsPerimetre,
+    NonVerifiee,
+    // Hors Linux la preuve par declaration s'arrete avant toute lecture:
+    // aucune regle ne peut y etre verifiee.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    Verifiee(&'static str),
+}
+
+impl IdentiteDaemon {
+    fn hors_perimetre(&self) -> bool {
+        *self == IdentiteDaemon::HorsPerimetre
+    }
+}
+
+impl Serialize for IdentiteDaemon {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            IdentiteDaemon::Verifiee(regle) => s.serialize_str(regle),
+            _ => s.serialize_none(),
+        }
+    }
+}
+
 #[derive(Serialize)]
 pub struct Rapport {
     schema_version: u32,
@@ -55,6 +85,8 @@ pub struct Rapport {
     duration_ms: u128,
     source: &'static str,
     expected_source: &'static str,
+    #[serde(skip_serializing_if = "IdentiteDaemon::hors_perimetre")]
+    daemon_identity: IdentiteDaemon,
     policy_schema_version: Option<u32>,
     live_kernel: bool,
     generation_verified: bool,
@@ -77,8 +109,13 @@ impl Rapport {
     }
 
     pub fn texte(&self) -> String {
+        let identite = match self.daemon_identity {
+            IdentiteDaemon::HorsPerimetre => String::new(),
+            IdentiteDaemon::NonVerifiee => "identite du daemon: non verifiee\n".to_owned(),
+            IdentiteDaemon::Verifiee(regle) => format!("identite du daemon: {regle}\n"),
+        };
         format!(
-            "{}  {}\n{}\nentree non mesuree: {}\necarts: {}\n\n{}\n",
+            "{}  {}\n{}\n{identite}entree non mesuree: {}\necarts: {}\n\n{}\n",
             self.verdict,
             self.scope,
             self.reason,
@@ -316,6 +353,7 @@ fn commencer() -> Rapport {
         duration_ms: 0,
         source: "user-supplied-snapshots",
         expected_source: "user-supplied-snapshot",
+        daemon_identity: IdentiteDaemon::HorsPerimetre,
         policy_schema_version: None,
         live_kernel: false,
         generation_verified: false,
@@ -481,6 +519,7 @@ fn commencer_declaration() -> Rapport {
     r.scope = "nft-kernel-comparison";
     r.source = "kernel-netlink-and-system-nft";
     r.expected_source = "daemon-declared-active-policy";
+    r.daemon_identity = IdentiteDaemon::NonVerifiee;
     r.failed_input = Some("daemon-declaration");
     r.reason = "declaration du daemon non lue";
     r.limitation = "Attendu declare par le daemon, pas observe: une correspondance dit que le noyau porte ce que le daemon dit avoir pose; nftables du namespace courant uniquement, pas une preuve d'etancheite du VPN.";
@@ -496,6 +535,12 @@ fn commencer_declaration() -> Rapport {
 /// vers la meme politique, rend la capture non attribuable. Rien de la
 /// declaration n'entre dans le rapport, hors la version de schema: ni les
 /// parametres, ni le numero, ni l'instance.
+///
+/// Chaque lecture exige l'identite du serveur AVANT de lui ecrire (voir
+/// `preuve_nft_daemon::lire`). Le rapport en garde le NOM de la regle, et
+/// `failed_input = daemon-identity` quand c'est elle qui manque, a N1 comme a
+/// N2: une declaration dont le second serveur n'est pas admis n'est pas
+/// attribuable non plus.
 #[cfg(target_os = "linux")]
 pub(crate) async fn verifier_declaration_avec<L, FL, C, FC>(
     mut lire_declaration: L,
@@ -504,15 +549,20 @@ pub(crate) async fn verifier_declaration_avec<L, FL, C, FC>(
 where
     L: FnMut() -> FL,
     FL: std::future::Future<
-            Output = Result<bifrost_ipc::protocol::DeclarationPareFeu, &'static str>,
+            Output = Result<crate::preuve_nft_daemon::Lue, crate::preuve_nft_daemon::Refus>,
         >,
     C: FnOnce() -> FC,
     FC: std::future::Future<Output = Result<Vec<u8>, &'static str>>,
 {
+    use crate::preuve_nft_daemon::Refus;
     let debut = Instant::now();
     let mut r = commencer_declaration();
     let resultat = async {
-        let premiere = lire_declaration().await?;
+        let (premiere, regle) = lire_declaration().await.map_err(|refus| {
+            r.failed_input = Some(refus.entree());
+            refus.raison()
+        })?;
+        r.daemon_identity = IdentiteDaemon::Verifiee(regle);
         let politique = crate::preuve_nft_daemon::politique_posee(&premiere)?;
         // Le meme lecteur strict que `--politique`: la declaration ne passe pas
         // par un chemin plus indulgent que celui d'un fichier. Ce qu'il refuse
@@ -529,9 +579,16 @@ where
         r.live_kernel = true;
         r.generation_verified = true;
         r.failed_input = Some("daemon-declaration");
-        let seconde = lire_declaration()
-            .await
-            .map_err(|_| "declaration du daemon illisible ou injoignable apres la collecte")?;
+        let (seconde, _) = lire_declaration().await.map_err(|refus| match refus {
+            Refus::Identite(raison) => {
+                r.failed_input = Some(refus.entree());
+                r.daemon_identity = IdentiteDaemon::NonVerifiee;
+                raison
+            }
+            Refus::Declaration(_) => {
+                "declaration du daemon illisible ou injoignable apres la collecte"
+            }
+        })?;
         if seconde != premiere {
             return Err("declaration du daemon modifiee pendant la collecte");
         }
