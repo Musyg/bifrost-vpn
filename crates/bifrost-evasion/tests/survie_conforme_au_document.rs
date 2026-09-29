@@ -98,24 +98,69 @@ fn parser_annee_mois(brut: &str) -> Option<(i32, u8)> {
 /// (annee, mois) attendus pour un pays, lus dans la cellule "Derniere mesure".
 ///
 /// Format du document: une date de base "AAAA-MM" ou "AAAA-Qn", suivie
-/// eventuellement d'un remplacement "(Russie: AAAA-MM)" qui ne vaut que pour la
-/// Russie.
+/// eventuellement d'une liste de remplacements par pays entre parentheses,
+/// separes par un point-virgule: "(Russie: AAAA-MM; Iran: AAAA-MM)".
+///
+/// # Ce que cette fonction ne lisait pas, et pourquoi c'etait un trou
+///
+/// Jusqu'au 20/09/2026 elle ne connaissait qu'un seul remplacement, "Russie:",
+/// parce que la Russie etait le seul pays a avoir jamais diverge de la date de
+/// base. Le trou n'etait pas qu'elle ignorait les autres pays: c'est qu'elle
+/// les ignorait EN SILENCE. Ecrire "(Iran: 2026-08)" dans le document pendant
+/// que le code gardait 2026-07 laissait la garde verte, puisqu'elle lisait la
+/// base des deux cotes; le document et le code se seraient contredits a la
+/// lecture sans qu'aucune recette ne le dise.
+///
+/// Deux changements, donc: tout pays peut porter un remplacement, et un libelle
+/// de pays inconnu fait PANIQUER plutot que retomber sur la base. Une date par
+/// pays que personne ne lit est pire qu'une date absente.
 fn date_du_document(cellule: &str, pays: Pays) -> (i32, u8) {
     let cellule = cellule.trim();
     let base = cellule.split('(').next().unwrap_or("").trim();
     let base = parser_annee_mois(base)
         .unwrap_or_else(|| panic!("date de base illisible dans la cellule {cellule:?}"));
 
-    if pays == Pays::Russie
-        && let Some(debut) = cellule.find("Russie:")
-    {
-        let reste = &cellule[debut + "Russie:".len()..];
-        let brut = reste.split(')').next().unwrap_or("").trim();
-        if let Some(rus) = parser_annee_mois(brut) {
-            return rus;
+    let Some(debut) = cellule.find('(') else {
+        return base;
+    };
+    let dedans = cellule[debut + 1..].split(')').next().unwrap_or("");
+    for morceau in dedans.split(';') {
+        let morceau = morceau.trim();
+        if morceau.is_empty() {
+            continue;
+        }
+        let (nom, brut) = morceau.split_once(':').unwrap_or_else(|| {
+            panic!(
+                "remplacement de date illisible dans la cellule {cellule:?}: {morceau:?} \
+                 n'est pas de la forme \"Pays: AAAA-MM\""
+            )
+        });
+        let pays_du_morceau = pays_du_libelle(nom.trim(), cellule);
+        let date = parser_annee_mois(brut.trim()).unwrap_or_else(|| {
+            panic!("date illisible pour {nom:?} dans la cellule {cellule:?}: {brut:?}")
+        });
+        if pays_du_morceau == pays {
+            return date;
         }
     }
     base
+}
+
+/// Le pays que designe un libelle de remplacement, ou une panique.
+///
+/// La panique est le comportement voulu: un libelle mal orthographie doit
+/// arreter la garde, pas la faire retomber sur la date de base en silence.
+fn pays_du_libelle(nom: &str, cellule: &str) -> Pays {
+    match nom {
+        "Chine" => Pays::Chine,
+        "Russie" => Pays::Russie,
+        "Iran" => Pays::Iran,
+        "Turkmenistan" => Pays::Turkmenistan,
+        autre => panic!(
+            "pays inconnu dans un remplacement de date: {autre:?} (cellule {cellule:?}). \
+             Les libelles acceptes sont Chine, Russie, Iran, Turkmenistan."
+        ),
+    }
 }
 
 /// La ligne du tableau dont la premiere cellule est EXACTEMENT ce libelle.
@@ -170,6 +215,35 @@ fn la_legende_du_document_se_lit_comme_le_code() {
     assert_eq!(statut_du_document("Incertain"), Statut::Incertain);
     assert_eq!(statut_du_document("Degrade/Mort"), Statut::Incertain);
     assert_eq!(statut_du_document("Mort/Degrade"), Statut::Incertain);
+}
+
+#[test]
+fn une_date_de_remplacement_se_lit_pour_chacun_des_quatre_pays() {
+    // La forme que porte la ligne REALITY du document depuis le 20/09/2026.
+    let cellule = "2026-07 (Russie: 2026-09; Iran: 2026-08)";
+    assert_eq!(date_du_document(cellule, Pays::Chine), (2026, 7));
+    assert_eq!(date_du_document(cellule, Pays::Turkmenistan), (2026, 7));
+    assert_eq!(date_du_document(cellule, Pays::Russie), (2026, 9));
+    assert_eq!(date_du_document(cellule, Pays::Iran), (2026, 8));
+
+    // Sans parenthese, tout le monde prend la base, trimestre compris.
+    assert_eq!(date_du_document("2026-Q2", Pays::Iran), (2026, 4));
+    // Un remplacement qui ne concerne pas le pays demande ne deborde pas sur
+    // lui: c'est ce que l'ancienne forme garantissait deja, et qu'il ne faut
+    // pas perdre en generalisant.
+    assert_eq!(
+        date_du_document("2026-06 (Russie: 2026-09)", Pays::Iran),
+        (2026, 6)
+    );
+}
+
+#[test]
+#[should_panic(expected = "pays inconnu")]
+fn un_libelle_de_pays_mal_orthographie_arrete_la_garde() {
+    // Le coeur de l'elargissement du 20/09/2026. Avant lui, un libelle que la
+    // garde ne connaissait pas retombait sur la date de base SANS RIEN DIRE:
+    // le document pouvait annoncer une date par pays que le code ignorait.
+    date_du_document("2026-07 (Irna: 2026-08)", Pays::Iran);
 }
 
 #[test]

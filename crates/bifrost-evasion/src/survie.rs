@@ -121,12 +121,29 @@ pub const TABLEAU: &[Observation] = &[
         2026,
         9,
     ),
+    // # Rafraichie le 20 septembre 2026: date 2026-07 -> 2026-08, statut inchange.
+    //
+    // net4people/bbs #640 ("tlshello Fragmentation is not working in Iran
+    // anymore", ouvert le 2026-07-31, etiquete Iran par le mainteneur du
+    // forum), reponse de son auteur le 2026-08-03T16:25:46Z - date relevee par
+    // l'API GitHub, pas lue dans un resume: "Yes, REALITY works fine, though I
+    // need to rotate the IP periodically". Le meme auteur ouvre ce fil pour
+    // annoncer que la fragmentation, elle, est tombee: il ne plaide pas pour
+    // REALITY, il repond a une question posee dans son fil.
+    //
+    // Reste `Incertain` et ne passe PAS a `Degrade`. Une survie chez un
+    // utilisateur ne refute pas "Reality is dead in Iran" chez un autre, et
+    // l'etude d'allowlist de net4people/bbs #630 (2026-06-19) mesure justement
+    // un filtrage qui differe d'une IP autorisee a l'autre: sur 737 IP
+    // autorisees testees, environ la moitie ne subit aucun filtrage SNI.
+    // Tenir ou tomber selon l'utilisateur est la definition meme d'`Incertain`.
+    // Ce que la source change, c'est la date; pas le statut.
     obs(
         Technique::RealityVision,
         Pays::Iran,
         Statut::Incertain,
         2026,
-        7,
+        8,
     ),
     obs(
         Technique::RealityVision,
@@ -199,6 +216,18 @@ pub const TABLEAU: &[Observation] = &[
     // tous les ports UDP, v2 non touche); #650 commentaire (2026-08-22, Ijevsk,
     // Hysteria passe). Reste Degrade: deux temoignages positifs sur deux
     // reseaux ne valent pas "tient partout", et le SNI en liste reste vise.
+    //
+    // Confirmee le 20 septembre 2026, SANS changer de donnee. HyNetworks
+    // (ex-apernet)/hysteria #1683, ouverte le 2026-09-17T14:08:04Z, sans
+    // commentaire au 20/09: un serveur Hysteria2 chez Aeza "fonctionne
+    // correctement seulement en Wi-Fi", et "ne reagit pas du tout" sur reseau
+    // mobile. Va dans le sens de `Degrade`, pas de `Fonctionne`, et corrige
+    // l'impression que les deux temoignages du 04/09 laissaient. La source est
+    // posterieure a la cellule mais tombe dans le MEME mois, et la donnee ne
+    // porte que l'annee et le mois: elle ne bouge donc pas. A prendre avec la
+    // meme reserve que les autres: un rapporteur, aucun FAI nomme, aucune
+    // mesure, et Aeza est un hebergeur dont des plages sont connues bloquees
+    // en Russie - un blocage d'IP y ressemblerait a un blocage de protocole.
     obs(Technique::Hysteria2, Pays::Russie, Statut::Degrade, 2026, 9),
     obs(Technique::Hysteria2, Pays::Iran, Statut::Mort, 2026, 1),
     obs(
@@ -307,19 +336,54 @@ impl Observation {
 /// ne le peut pas - le jour ou quelqu'un rafraichit une ligne, la recette
 /// devient rouge et le force a corriger ici, donc dans les documents.
 ///
-/// La regle est simple: c'est la ligne la PLUS RECENTE plus
-/// [`FRAICHEUR_POUR_ELIMINER_JOURS`], puisqu'il suffit d'une ligne vivante
-/// pour que le tableau puisse encore mordre.
-pub const TABLEAU_INERTE_A_PARTIR_DU: Date = Date::new(2026, 12, 1);
+/// # La regle, et la facon dont elle a ete fausse une deuxieme fois
+///
+/// La regle a d'abord ete ecrite ainsi: "la ligne la PLUS RECENTE plus
+/// [`FRAICHEUR_POUR_ELIMINER_JOURS`], puisqu'il suffit d'une ligne vivante pour
+/// que le tableau puisse encore mordre". Elle est fausse, et elle l'est devenue
+/// visiblement le 04/09/2026.
+///
+/// Une ligne vivante ne suffit pas: il faut une ligne vivante ET `Mort`.
+/// `selection::refuser` n'elimine un candidat que sur
+/// `o.statut == Statut::Mort && o.assez_fraiche_pour_eliminer(...)`. Une ligne
+/// `Fonctionne`, `Degrade` ou `Incertain` ne retire jamais personne, quelle que
+/// soit sa fraicheur; elle ne fait que classer. Tant que la ligne la plus
+/// recente du tableau se trouvait etre aussi une ligne `Mort`, les deux regles
+/// donnaient le meme jour et l'erreur ne se voyait pas.
+///
+/// Le rafraichissement du 04/09/2026 a date trois cellules RUSSES de 2026-09 -
+/// `Incertain`, `Degrade`, `Degrade`, aucune `Mort` - et la constante a suivi
+/// la ligne la plus recente jusqu'au 01/12/2026. Elle annoncait donc 62 jours
+/// de morsure que le code ne pouvait plus produire: la ligne `Mort` la plus
+/// recente est REALITY au Turkmenistan, 2026-07, qui expire le 30/09/2026.
+///
+/// Ce que cela apprend sur la garde, et c'est le vrai defaut: la recette
+/// [`la_peremption_du_tableau_est_celle_qu_on_annonce`] est restee verte
+/// pendant ce temps parce qu'elle recalculait la MEME definition trop large que
+/// [`mord_encore`]. Une garde qui reprend la formule du code ne peut pas voir
+/// que la formule est fausse. C'est pourquoi la garde d'integration
+/// `inertie_du_tableau_est_celle_de_la_selection` interroge desormais
+/// `selection::planifier`, seul juge de ce qui elimine reellement.
+///
+/// Regle corrigee: la ligne `Mort` la plus recente, plus
+/// [`FRAICHEUR_POUR_ELIMINER_JOURS`].
+pub const TABLEAU_INERTE_A_PARTIR_DU: Date = Date::new(2026, 9, 30);
 
 /// Le tableau peut-il encore eliminer QUOI QUE CE SOIT a cette date.
 ///
-/// Rend faux quand toutes les observations sont perimees. Le tableau continue
+/// Rend faux quand plus aucune ligne `Mort` n'est fraiche. Le tableau continue
 /// alors de peser sur le CLASSEMENT - une technique morte reste derriere une
 /// technique vivante - il perd seulement le droit de supprimer un candidat.
+///
+/// Le filtre sur `Mort` n'est pas un raffinement, c'est la question posee.
+/// `selection::refuser` exige les DEUX conditions; sans le filtre, cette
+/// fonction repondait "oui" en montrant une ligne `Degrade` fraiche, qui
+/// n'elimine rien et n'eliminera jamais rien. Elle a menti ainsi du 04/09/2026
+/// au 20/09/2026, et [`TABLEAU_INERTE_A_PARTIR_DU`] avec elle.
 pub fn mord_encore(aujourd_hui: Date) -> bool {
     TABLEAU
         .iter()
+        .filter(|o| o.statut == Statut::Mort)
         .any(|o| o.assez_fraiche_pour_eliminer(aujourd_hui))
 }
 
@@ -347,16 +411,59 @@ mod tests {
         // falsification l'a montre. On l'exprime maintenant exactement, sans
         // arithmetique de date: ce jour-la, l'observation la plus recente doit
         // avoir tout juste franchi la fenetre.
+        //
+        // Le `filter` sur `Mort` a ete AJOUTE le 20/09/2026, et son absence est
+        // tout le defaut: sans lui, cette ligne recalculait la definition trop
+        // large de `mord_encore` et validait donc n'importe quelle constante
+        // que `mord_encore` validait aussi. Une observation qui n'est pas
+        // `Mort` n'a jamais eu le droit d'eliminer: elle ne peut pas decider
+        // du jour ou ce droit s'eteint.
         let plus_jeune = TABLEAU
             .iter()
+            .filter(|o| o.statut == Statut::Mort)
             .map(|o| o.mesure_le.jours_jusqu_a(TABLEAU_INERTE_A_PARTIR_DU))
             .min()
-            .expect("le tableau n'est pas vide");
+            .expect("le tableau porte au moins une ligne Mort");
         assert_eq!(
             plus_jeune,
             FRAICHEUR_POUR_ELIMINER_JOURS + 1,
-            "TABLEAU_INERTE_A_PARTIR_DU doit etre le lendemain du dernier jour ou l'observation la plus recente mordait encore"
+            "TABLEAU_INERTE_A_PARTIR_DU doit etre le lendemain du dernier jour ou l'observation MORTE la plus recente mordait encore"
         );
+    }
+
+    /// Ce que le seuil de 90 jours produit au 20 septembre 2026.
+    ///
+    /// Le calcul qui a motive le rafraichissement de ce jour-la, fige ici pour
+    /// qu'il ne redevienne pas une phrase de prose. Des sept cellules `Mort`
+    /// du tableau, six sont deja perimees; une seule elimine encore.
+    ///
+    /// La consequence est ce qui compte: en Chine, en Russie et en Iran, le
+    /// tableau n'elimine plus RIEN depuis le 1er juillet 2026. La Chine et la
+    /// Russie n'ont qu'une ligne `Mort`, WireGuard nu (2026-04); l'Iran en a
+    /// DEUX, Hysteria2 (2026-01) et WireGuard nu (2026-04). C'est la plus
+    /// TARDIVE des peremptions qui gouverne la date, celle d'Hysteria2 etant
+    /// echue des le 02/04/2026, et les trois colonnes cessent donc d'eliminer
+    /// le meme jour. Seul le Turkmenistan garde une elimination, et elle
+    /// expire le 30 septembre.
+    #[test]
+    fn au_20_septembre_2026_une_seule_cellule_elimine_encore() {
+        let jour = Date::new(2026, 9, 20);
+        let eliminantes: Vec<(Technique, Pays)> = TABLEAU
+            .iter()
+            .filter(|o| o.statut == Statut::Mort && o.assez_fraiche_pour_eliminer(jour))
+            .map(|o| (o.technique, o.pays))
+            .collect();
+        assert_eq!(
+            eliminantes,
+            vec![(Technique::RealityVision, Pays::Turkmenistan)],
+            "au 20/09/2026 une seule cellule du tableau peut encore eliminer un candidat"
+        );
+
+        // Et elle expire dix jours plus tard, ce que la constante annonce.
+        assert!(mord_encore(jour));
+        assert!(mord_encore(Date::new(2026, 9, 29)));
+        assert!(!mord_encore(Date::new(2026, 9, 30)));
+        assert_eq!(TABLEAU_INERTE_A_PARTIR_DU, Date::new(2026, 9, 30));
     }
 
     /// Et au 20 aout 2026, le tableau mord encore - contrairement a ce que
@@ -381,17 +488,36 @@ mod tests {
         ] {
             assert!(
                 fraiches.contains(&attendue),
-                "{} devait encore pouvoir eliminer",
+                "{} devait porter au moins une observation fraiche",
                 attendue.nom()
             );
         }
         for perimee in [Technique::Hysteria2, Technique::WireGuardNu] {
             assert!(
                 !fraiches.contains(&perimee),
-                "{} est mesuree en janvier ou avril: elle ne peut plus eliminer",
+                "{} n'est mesuree qu'en janvier, en avril ou dans le futur: aucune observation fraiche",
                 perimee.nom()
             );
         }
+        // Le vocabulaire a ete corrige le 20/09/2026. `fraiches` dit "porte une
+        // observation fraiche", PAS "peut eliminer": les cellules fraiches de
+        // XHTTP-CDN et d'AmneziaWG sont `Fonctionne` ou `Degrade` et n'ont
+        // jamais elimine personne. Confondre les deux est l'erreur qui a mis
+        // `TABLEAU_INERTE_A_PARTIR_DU` au 01/12/2026. Ce jour-la, ce qui
+        // eliminait vraiment etait ailleurs:
+        let eliminantes: Vec<(Technique, Pays)> = TABLEAU
+            .iter()
+            .filter(|o| o.statut == Statut::Mort && o.assez_fraiche_pour_eliminer(jour))
+            .map(|o| (o.technique, o.pays))
+            .collect();
+        assert_eq!(
+            eliminantes,
+            vec![
+                (Technique::RealityVision, Pays::Turkmenistan),
+                (Technique::XhttpCdn, Pays::Turkmenistan),
+            ],
+            "au 20/08/2026, seules deux cellules du Turkmenistan eliminaient"
+        );
     }
 
     /// En Russie, plus AUCUNE technique n'est donnee pour fonctionnelle.

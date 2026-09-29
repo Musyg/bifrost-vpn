@@ -23,7 +23,7 @@
 
 ## Details
 
-### PARTIE 1 - Tableau de survie des techniques (etabli au 25 juillet 2026; cinq lignes rafraichies le 20 aout et le 4 septembre 2026, voir SOTA-2026-07.md)
+### PARTIE 1 - Tableau de survie des techniques (etabli au 25 juillet 2026; lignes rafraichies le 20 aout, le 4 et le 20 septembre 2026, voir SOTA-2026-07.md)
 
 Legende: Fonctionne / Degrade / Incertain / Mort. "Incertain" est la lecture que le code (`crates/bifrost-evasion/src/survie.rs`) fait des cellules ecrites ici "Degrade/Mort" ou "Mort/Degrade": la technique tient ou tombe selon le reseau. Ces lignes sont des observations communautaires (net4people, ntc.party, Tor forum, GFW Report), pas des mesures controlees. Fraicheur en semaines. Pour les cinq techniques candidates du produit (REALITY+Vision, XHTTP-CDN, Hysteria2, AmneziaWG, WireGuard nu), la colonne "Derniere mesure" porte la date par pays quand elle differe; le tableau operatoire est celui du code, qui fait foi en cas d'ecart.
 
@@ -33,10 +33,10 @@ Legende: Fonctionne / Degrade / Incertain / Mort. "Incertain" est la lecture que
 | OpenVPN | Mort | Mort | Mort | Mort | 2026 | GFW Report, communaute |
 | Shadowsocks-2022 | Mort (sans plugin) | Degrade | Degrade | Degrade | 2026 | GFW USENIX23 |
 | Trojan | Degrade | Mort (16KB) | Mort | Mort | 2026 | net4people #490 |
-| VLESS+REALITY(+Vision) | Fonctionne | Incertain (CIDR; mobile sous liste blanche: passe sur un MTS, coupe sur un autre; TUN degrade sur Beeline) | Mort/Degrade | Mort (IP ban) | 2026-07 (Russie: 2026-09) | net4people #490/#546/#628; Russie 2026-09: net4people #650/#663/#662 |
+| VLESS+REALITY(+Vision) | Fonctionne | Incertain (CIDR; mobile sous liste blanche: passe sur un MTS, coupe sur un autre; TUN degrade sur Beeline) | Mort/Degrade (passe chez un utilisateur le 03/08/2026 au prix d'une rotation d'IP periodique; le filtrage SNI iranien ne mord que sur environ la moitie des IP autorisees) | Mort (IP ban) | 2026-07 (Russie: 2026-09; Iran: 2026-08) | net4people #490/#546/#628; Russie 2026-09: net4people #650/#663/#662; Iran 2026-08: net4people #640, #630 |
 | VLESS+XTLS-Vision (sans REALITY) | Degrade | Mort | Mort | Mort | 2026 | net4people #546 |
 | XHTTP (SplitHTTP) | Fonctionne | Degrade (gel 16-20 Ko hors petite liste blanche sur Cloudflare; l'attribution au prefixe IP a ete retiree par son auteur le 02/09/2026; httpupgrade/xhttp OK Extreme-Orient 2026-06) | Degrade | Mort | 2026-06 (Russie: 2026-09) | net4people #490, Xray #4113; Russie 2026-09: net4people #662 |
-| Hysteria2 | Degrade (QUIC SNI) | Degrade (passe par sing-box sur un reseau filtre le 03/09/2026; la TSPU filtre le QUIC v1 par SNI sur tous les ports UDP, v2 non touche; passe sur mobile MTS et Megafon a Ijevsk le 22/08, un temoignage sans mesure) | Mort (UDP off) | Mort | 2026-01 (Russie: 2026-09) | GFW USENIX25, Nym; Russie 2026-09: Xray #6717, net4people #654/#650 |
+| Hysteria2 | Degrade (QUIC SNI) | Degrade (passe par sing-box sur un reseau filtre le 03/09/2026; la TSPU filtre le QUIC v1 par SNI sur tous les ports UDP, v2 non touche; passe sur mobile MTS et Megafon a Ijevsk le 22/08, un temoignage sans mesure; a l'inverse, le 17/09/2026, un serveur chez Aeza ne repond pas du tout sur mobile et passe en Wi-Fi) | Mort (UDP off) | Mort | 2026-01 (Russie: 2026-09) | GFW USENIX25, Nym; Russie 2026-09: Xray #6717, net4people #654/#650, hysteria #1683 |
 | TUIC v5 | Degrade | Degrade | Mort | Mort | 2026 | communaute |
 | AmneziaWG | Degrade | Degrade (blocage generalise juin-juillet 2026 selon la documentation amont Amnezia, versions 1.5/2.0; IP d'un exploitant bloquees le 04/08/2026; la 3.1, reponse au blocage, est supportee par le client 5.0.1.5 du 21/08/2026) | Degrade | Fonctionne (bas volume) | 2026-07 | net4people #523; Russie: docs.amnezia.org, hub.xeovo.com #208, amnezia-client 5.0.1.5 |
 | obfs4 | Mort | Degrade | Degrade | Mort | 2025-04 | Tor forum |
@@ -50,7 +50,9 @@ Legende: Fonctionne / Degrade / Incertain / Mort. "Incertain" est la lecture que
 | NaiveProxy | Fonctionne | Degrade | Degrade | Mort | 2026 | klzgrad |
 | gost | Degrade | Degrade | Degrade | Mort | 2026 | communaute |
 
-Rafraichissements du tableau: 20 aout 2026 (AmneziaWG/Russie, Fonctionne -> Degrade) et 4 septembre 2026 (REALITY, XHTTP-CDN et Hysteria2 en Russie dates 2026-09, statuts confirmes; dix-sept cellules inchangees faute de source posterieure au 20 aout). Le detail, le Source Log et la Claim Map de chaque rafraichissement sont dans `SOTA-2026-07.md`, sections "Rafraichissement du tableau de survie". La regle: une cellule ne change que sur une source primaire datee plus recente que la sienne; sinon elle garde sa date, meme perimee.
+Rafraichissements du tableau: 20 aout 2026 (AmneziaWG/Russie, Fonctionne -> Degrade), 4 septembre 2026 (REALITY, XHTTP-CDN et Hysteria2 en Russie dates 2026-09, statuts confirmes; dix-sept cellules inchangees faute de source posterieure au 20 aout) et 20 septembre 2026 (REALITY/Iran date 2026-07 -> 2026-08, statut inchange; dix-neuf cellules inchangees). Le detail, le Source Log et la Claim Map de chaque rafraichissement sont dans `SOTA-2026-07.md`, sections "Rafraichissement du tableau de survie". La regle: une cellule ne change que sur une source primaire datee plus recente que la sienne; sinon elle garde sa date, meme perimee.
+
+Ce que la fraicheur autorise, au 20 septembre 2026. Une observation de plus de 90 jours garde son poids au classement mais perd le droit d'ELIMINER un candidat, et seules les cellules `Mort` eliminent (`crates/bifrost-evasion/src/survie.rs`, `selection::refuser`). Consequence mesuree ce jour-la: en Chine, en Russie et en Iran, plus aucune cellule n'elimine depuis le 1er juillet 2026. La Chine et la Russie n'ont qu'une cellule `Mort`, WireGuard nu (2026-Q2); l'Iran en a deux, Hysteria2 (2026-01) et WireGuard nu (2026-Q2). C'est la plus tardive des peremptions qui gouverne la date, celle d'Hysteria2 etant echue des le 2 avril 2026, et les trois colonnes cessent donc d'eliminer le meme jour. La derniere elimination du produit est REALITY au Turkmenistan, et elle expire le 30 septembre 2026, date portee par `survie::TABLEAU_INERTE_A_PARTIR_DU`. A partir de ce jour, le tableau classe encore mais n'ecarte plus rien nulle part.
 
 ### Techniques de detection 2026
 - **Entropie/popcount/ASCII**: seuils GFW exacts ci-dessus (Ex1-Ex5). Consequence design: ne jamais exposer un premier paquet a haute entropie sans camouflage TLS/HTTP. Un protocole "looks like nothing" (SS nu) est mort en Chine.

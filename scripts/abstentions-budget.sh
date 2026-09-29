@@ -45,6 +45,8 @@
 #   ./scripts/abstentions-budget.sh --verifier-liste FICHIER
 #
 # --journal absent: le script relance recettes-strict.sh et lit sa sortie.
+# Une option a valeur sans sa valeur (`--verifier-liste` seul, par exemple)
+# est refusee nommement et le script sort en 2 par usage: voir `sans_valeur`.
 
 set -uo pipefail
 
@@ -166,6 +168,19 @@ usage() {
   echo "       $0 --verifier-liste FICHIER"
 }
 
+# Une option a valeur sans sa valeur: on le dit, nommement, et on sort en 2 par
+# usage. Sans ce test, `shift 2` sur un seul argument restant ECHOUE sans rien
+# decaler (le script ne tourne pas sous `set -e`), `$#` reste a 1 et la boucle
+# des options recommence sur le meme `$1`, sans fin: `--verifier-liste` tape a
+# la main sans fichier figeait le terminal, tue par PID sur les deux hotes le
+# 14/09/2026. Un outil qui ne rend pas la main passe pour un outil qui
+# travaille; en CI, le job aurait pendu jusqu'a son delai.
+sans_valeur() {
+  echo "$1 attend un fichier"
+  usage
+  exit 2
+}
+
 LISTE=""
 JOURNAL=""
 VERIFIER_SEUL=0
@@ -173,15 +188,18 @@ VERIFIER_SEUL=0
 while [ $# -gt 0 ]; do
   case "$1" in
   --liste)
-    LISTE="${2:-}"
+    [ $# -ge 2 ] || sans_valeur "$1"
+    LISTE="$2"
     shift 2
     ;;
   --journal)
-    JOURNAL="${2:-}"
+    [ $# -ge 2 ] || sans_valeur "$1"
+    JOURNAL="$2"
     shift 2
     ;;
   --verifier-liste)
-    LISTE="${2:-}"
+    [ $# -ge 2 ] || sans_valeur "$1"
+    LISTE="$2"
     VERIFIER_SEUL=1
     shift 2
     ;;

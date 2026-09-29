@@ -227,7 +227,8 @@ mod tests {
         if !systeme.is_file() {
             // Jamais PASSED par defaut: si la machine n'a pas ce fichier, le
             // test n'a rien mesure et doit le dire.
-            eprintln!("SKIPPED: {} absent", systeme.display());
+            // stdout, jamais stderr: le ok du harnais s'intercale dans une ecriture stderr et dechire l'abstention (run 35278274527).
+            println!("SKIPPED: {} absent", systeme.display());
             return;
         }
         let err = match WireGuardNt::load_from(systeme) {
