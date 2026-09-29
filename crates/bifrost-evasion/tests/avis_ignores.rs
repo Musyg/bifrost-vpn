@@ -19,7 +19,17 @@
 //! Elle ne juge aucun avis. Elle ne dit pas qu'ignorer RUSTSEC-2024-0436 est
 //! une bonne idee - ce raisonnement-la vit dans `deny.toml`, a cote de
 //! l'entree, et il est date. Elle dit seulement que les deux fichiers portent
-//! le meme ensemble d'identifiants.
+//! le meme ensemble d'identifiants, et que `deny.toml` porte les deux cles de
+//! reglage ci-dessous.
+//!
+//! # Deux cles de reglage dans `deny.toml`
+//!
+//! `unsound = "all"` et `unused-ignored-advisory = "deny"`, depuis le
+//! 2026-09-15. La premiere parce que le defaut `workspace` n'examine les avis
+//! unsound que sur les dependances DIRECTES et laisse passer un crate
+//! transitif unsound en silence, alors que ce lock est celui des binaires
+//! PRIVILEGIES; la seconde parce qu'un ignore perime doit rougir, pas avertir.
+//! Une ligne commentee ne compte pas, comme pour les identifiants.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -147,5 +157,130 @@ fn les_commentaires_ne_comptent_pas() {
         avis_actifs(&deny).len(),
         1,
         "un seul avis est ignore aujourd'hui, et il l'est sur une ligne active"
+    );
+}
+
+// --- Les deux cles de reglage, dans la section [advisories] ------------------
+
+/// La ligne exigee, telle quelle, dans `deny.toml`.
+const LIGNE_UNSOUND: &str = r#"unsound = "all""#;
+const LIGNE_IGNORE_PERIME: &str = r#"unused-ignored-advisory = "deny""#;
+
+/// La valeur d'une cle de la section `[advisories]` d'un `deny.toml`, lue sur
+/// une ligne ACTIVE (les commentaires sont ecartes, comme dans `avis_actifs`:
+/// `# unsound = "all"` n'est pas un reglage). `None` si la section ne la porte
+/// pas. Un commentaire en fin de ligne (`unsound = "all" # ...`) est tolere,
+/// c'est du TOML valide; la valeur s'arrete au premier `#`, ce qui suffit pour
+/// des valeurs qui sont des mots entre guillemets.
+///
+/// Meme parti que `identifiants`: pas de parseur TOML. Une section commence a
+/// une ligne `[...]`; une table imbriquee comme `[[licenses.exceptions]]` en
+/// ouvre une autre, ce qui suffit ici.
+fn valeur_dans_advisories(texte: &str, cle: &str) -> Option<String> {
+    let mut dans_advisories = false;
+    for ligne in texte.lines() {
+        let net = ligne.trim();
+        if net.is_empty() || net.starts_with('#') {
+            continue;
+        }
+        if net.starts_with('[') {
+            dans_advisories = net == "[advisories]";
+            continue;
+        }
+        if !dans_advisories {
+            continue;
+        }
+        let Some((gauche, droite)) = net.split_once('=') else {
+            continue;
+        };
+        if gauche.trim() != cle {
+            continue;
+        }
+        let valeur = match droite.split_once('#') {
+            Some((avant, _)) => avant,
+            None => droite,
+        };
+        return Some(valeur.trim().to_owned());
+    }
+    None
+}
+
+/// `unsound = "all"` dans `[advisories]` de `deny.toml`, sur une ligne active
+/// et avec cette valeur exacte.
+///
+/// Depuis cargo-deny 0.19.0 la cle existe avec le defaut `workspace`: un avis
+/// UNSOUND n'est examine que si le crate est une dependance DIRECTE d'un membre
+/// de l'espace de travail, et un crate transitif unsound passe en silence. Le
+/// lock de la racine est celui des binaires PRIVILEGIES: il n'a pas a etre
+/// moins exigeant pour `unsound` qu'il ne l'est deja pour `unmaintained`.
+/// Falsifiee le 15/09/2026 en retirant la ligne, puis en la mettant en
+/// commentaire: rouge les deux fois.
+#[test]
+fn deny_examine_les_avis_unsound_sur_tout_l_arbre() {
+    let valeur = valeur_dans_advisories(&lire("deny.toml"), "unsound");
+    assert_eq!(
+        valeur.as_deref(),
+        Some(r#""all""#),
+        "deny.toml: la section [advisories] doit porter la ligne active \
+         `{LIGNE_UNSOUND}`; sans elle cargo-deny n'examine les avis unsound que \
+         sur les dependances directes et un crate transitif unsound passe en silence"
+    );
+}
+
+/// `unused-ignored-advisory = "deny"` aussi: un ignore qui ne matche plus aucun
+/// crate de l'arbre est perime, et un avertissement que personne ne lit laisse
+/// la liste vieillir en silence. Le jour ou la pile netlink cesse de tirer
+/// `paste`, c'est cette cle qui le dit, en rouge.
+#[test]
+fn deny_refuse_un_ignore_perime() {
+    let valeur = valeur_dans_advisories(&lire("deny.toml"), "unused-ignored-advisory");
+    assert_eq!(
+        valeur.as_deref(),
+        Some(r#""deny""#),
+        "deny.toml: la section [advisories] doit porter la ligne active \
+         `{LIGNE_IGNORE_PERIME}`, sinon un ignore perime n'est qu'un avertissement"
+    );
+}
+
+/// Le temoin du lecteur de cle: une ligne commentee n'est pas un reglage, une
+/// cle hors de `[advisories]` n'est pas la bonne, un commentaire de fin de
+/// ligne ne change pas la valeur, et la premiere occurrence active de la
+/// section l'emporte. Sans lui, un lecteur qui rendrait `"all"` sur n'importe
+/// quelle occurrence ferait passer les deux recettes ci-dessus sur un fichier
+/// ou la cle n'est qu'en commentaire: une garde verte parce qu'elle ne regarde
+/// pas.
+#[test]
+fn le_lecteur_de_cle_ne_lit_que_les_lignes_actives_de_la_section() {
+    let texte = r##"# unsound = "all"
+[licenses]
+unsound = "all"
+[advisories]
+# unsound = "all"
+unsound = "workspace" # pas all
+unsound = "all"
+"##;
+    assert_eq!(
+        valeur_dans_advisories(texte, "unsound").as_deref(),
+        Some(r#""workspace""#)
+    );
+
+    let texte = r##"[advisories]
+  unsound = "all"   # examine tout l'arbre
+[[licenses.exceptions]]
+unsound = "none"
+"##;
+    assert_eq!(
+        valeur_dans_advisories(texte, "unsound").as_deref(),
+        Some(r#""all""#)
+    );
+
+    let texte = r##"[advisories]
+# unsound = "all"
+unused-ignored-advisory = "deny"
+"##;
+    assert_eq!(valeur_dans_advisories(texte, "unsound"), None);
+    assert_eq!(
+        valeur_dans_advisories(texte, "unused-ignored-advisory").as_deref(),
+        Some(r#""deny""#)
     );
 }

@@ -44,6 +44,25 @@ yanked = "deny"
 # transitives qu'on ne choisit pas.
 unmaintained = "all"
 
+# `unsound = "all"` et NON le defaut. Depuis cargo-deny 0.19.0 la cle existe
+# avec le defaut `workspace`: un avis de type UNSOUND n'est examine que si le
+# crate est une dependance DIRECTE d'un membre de l'espace de travail, et un
+# crate transitif unsound passe en silence. Ce lock est celui des binaires
+# PRIVILEGIES du daemon. Meme raisonnement que pour `unmaintained` juste
+# au-dessus: `workspace` masquerait exactement les dependances qu'on ne
+# choisit pas. Mesure le 2026-09-29 sur un hote Ubuntu 24.04 (cargo-deny
+# 0.19.0): `check advisories` est vert avec `all` comme sans la ligne, donc
+# aucun avis unsound transitif n'est cache aujourd'hui; la ligne garde le jour
+# ou il en viendra un. La recette `avis_ignores.rs` exige cette ligne.
+unsound = "all"
+
+# Un ignore perime est une ERREUR, pas un avertissement: une entree de la
+# liste `ignore` ci-dessous qui ne matche plus aucun crate de l'arbre
+# (`advisory-not-detected`) doit faire rougir, sinon la liste vieillit en
+# silence. Equivalent du drapeau `-D advisory-not-detected` en ligne de
+# commande, mais dans le fichier, a cote de l'entree qu'il surveille.
+unused-ignored-advisory = "deny"
+
 # Le SEUL avis de l'arbre au 22 aout 2026, et il est nomme plutot que couvert
 # par une regle plus lache. Abaisser `unmaintained` a `workspace` l'aurait fait
 # taire, et aurait fait taire du meme coup tous ceux qui viendront apres.
@@ -69,7 +88,9 @@ unmaintained = "all"
 # ne l'a ouverte.
 #
 # Le jour ou la pile netlink cessera de tirer `paste`, cette ligne deviendra
-# inutile et `unused-ignored-advisory`, laisse a son defaut, le dira.
+# inutile et `unused-ignored-advisory = "deny"` (ci-dessus) fera rougir
+# `cargo deny check advisories`: l'entree tombe alors des DEUX listes, ici et
+# dans `.cargo/audit.toml`, que la recette `avis_ignores.rs` tient d'accord.
 ignore = [
     { id = "RUSTSEC-2024-0436", reason = "paste archive, proc-macro donc absent du binaire livre, transitif sous wireguard-control, aucune version corrigee" },
 ]

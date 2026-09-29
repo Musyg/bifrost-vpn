@@ -42,7 +42,8 @@ async fn serve_once(mut server: IpcServer) {
 #[tokio::test]
 async fn un_processus_non_autorise_ne_peut_pas_piloter_le_daemon() {
     if euid() == 0 {
-        eprintln!("SKIPPED: lance en root, qui est autorise par conception");
+        // stdout, jamais stderr: le ok du harnais s'intercale dans une ecriture stderr et dechire l'abstention (run 35278274527).
+        println!("SKIPPED: lance en root, qui est autorise par conception");
         return;
     }
 

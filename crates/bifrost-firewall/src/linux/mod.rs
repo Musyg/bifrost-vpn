@@ -237,7 +237,8 @@ mod tests {
     fn le_ruleset_est_syntaxiquement_valide_pour_nft() {
         let ks = NftablesKillSwitch::new();
         if find_nft().is_none() {
-            eprintln!("SKIPPED: nft absent de cette machine");
+            // stdout, jamais stderr: le ok du harnais s'intercale dans une ecriture stderr et dechire l'abstention (run 35278274527).
+            println!("SKIPPED: nft absent de cette machine");
             return;
         }
         for p in [
@@ -275,7 +276,8 @@ mod tests {
                     let msg = e.to_string();
                     if msg.contains("Operation not permitted") || msg.contains("Permission denied")
                     {
-                        eprintln!("SKIPPED: nft --check exige des privileges ({msg})");
+                        // stdout, jamais stderr: le ok du harnais s'intercale dans une ecriture stderr et dechire l'abstention (run 35278274527).
+                        println!("SKIPPED: nft --check exige des privileges ({msg})");
                         return;
                     }
                     panic!("ruleset invalide: {msg}\n{}", ruleset::render(&p));

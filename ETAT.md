@@ -25,20 +25,22 @@ La CI automatique couvre Linux; Windows est lance uniquement sur demande
 Windows saute n'atteste rien sur cette plateforme. Voir le README pour le
 lancement avant une livraison Windows et la revision effectivement mesuree.
 
-Les comptes ci-dessous sont ceux de la reference anterieure a D1a; ils ne
-comptent pas les nouvelles recettes de `prove`. Ne pas les presenter comme un
-releve du 27 septembre. Les resultats de la tranche figurent dans sa CI.
+Les comptes ci-dessous ont ete pris le 29/09/2026 apres le portage des
+corrections du tableau de survie et des abstentions; ils comptent les recettes
+de `prove` jusqu'a D1b.3a. L'hote qui tient le role `essai-linux` a change le
+29/09: ses comptes ne se comparent pas a ceux d'avant cette date.
 
 Compte honnete des recettes cargo, par hote. La colonne `reelles` est ce qui a
 verifie quelque chose: `annoncees` moins `abstentions` moins `rouges`.
 
 | Hote | Annoncees | Abstentions | Rouges | Reelles |
 |---|---|---|---|---|
-| dev-windows | 1225 | 19 | 0 | 1206 |
-| essai-linux | 1222 | 22 | 0 | 1200 |
+| dev-windows | 1259 | 19 | 0 | 1240 |
+| essai-linux | 1264 | 26 | 0 | 1238 |
 
-Les deux lignes ont ete prises avant D1a par `scripts/recettes-strict.sh`, chacune
-sur son hote. Sur `essai-linux` une recette de plus est ignoree par construction
+Les deux lignes ont ete prises par `scripts/recettes-strict.sh`, chacune sur son
+hote, avant et apres le portage: +14 recettes des deux cotes. Sur `essai-linux`
+une recette de plus est ignoree par construction
 (elle pose une route et ne tourne qu'en espace de noms reseau), et la garde des
 modes de scripts s'y abstient parce que la copie mesuree n'a pas de `.git` (elle
 lit l'index; dans un clone elle mesure).
@@ -53,7 +55,7 @@ la prochaine action. Une cellule vide signalerait une tranche non finie.
 | 01 | Architecture technique. Cadre du plan, redige; ce n'est pas un livrable | - |
 | 02 | Kill switch WFP et nftables. Specification de reference, a jour | - |
 | 03 | Anti-telemetrie OS. Couche DNS livree; couches Windows registre et WFP par service a finir | Finir les couches Windows registre et WFP par service |
-| 04 | Anti-censure DPI. Tableau de survie a jour | - |
+| 04 | Anti-censure DPI. Tableau de survie rafraichi le 20/09/2026 (une cellule); inerte a partir du 30/09/2026 (`TABLEAU_INERTE_A_PARTIR_DU`, gardee par `selection::planifier`): il classe encore, il n'ecarte plus rien | Rafraichir le tableau, en priorite la colonne Turkmenistan, sans source depuis juillet |
 | 05 | Anonymat et chainage. Document redige; le chainage Tor et Nym n'est pas commence, et le document lui-meme le place apres les trois objectifs | Chainage Tor ou Nym, apres les objectifs 1 a 3 |
 | 06 | Architecture logicielle et packaging. Daemon, IPC authentifie, machine a etats et scripts d'installation faits (Linux et Windows, comptes dedies, ACL); ni interface graphique, ni MSI, ni .deb/.rpm, ni mise a jour TUF, ni provisioning; SBOM en CI | Interface graphique en jalon propre apres J2; paquets signes et mise a jour TUF |
 | 07 | Programme de securite produit. fmt, clippy, recettes, suite de fuite, cargo audit, cargo deny et SBOM en CI; politique de divulgation publiee (SECURITY.md, security.txt); inventaire unsafe ferme; cargo vet et fuzz absents, aucune cle PGP | Publier une cle PGP (champ Encryption); ajouter cargo vet et un harnais fuzz |

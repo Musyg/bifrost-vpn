@@ -17,6 +17,9 @@
 //!   3. une liste a jour -> vert;
 //!   4. une ligne de liste qui n'apparait plus (progres) -> vert, avec un
 //!      avertissement.
+//!   5. une option a valeur sans sa valeur (`--verifier-liste` seul) -> refus
+//!      nomme, code 2, SANS pendre: la version d'avant le 15/09/2026 bouclait
+//!      sans fin sur son `shift 2`, et il a fallu la tuer par PID.
 //!
 //! Elle controle aussi la FORME des deux listes reelles du depot: en-tete date
 //! citant run et commit, corps trie (LC_ALL=C) et sans doublon, chaque ligne de
@@ -50,8 +53,11 @@
 //! parcourt donc le `PATH` elle-meme en ecartant tout repertoire sous
 //! `SystemRoot`, et retombe sur l'emplacement usuel de Git Bash.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 /// Le `bash` a lancer: sur les plateformes Unix, celui du `PATH`; sous Windows,
 /// le premier `bash.exe` du `PATH` HORS du repertoire systeme, sinon Git Bash
@@ -123,6 +129,87 @@ fn budget(args: &[&str]) -> (bool, String) {
     let mut texte = String::from_utf8_lossy(&sortie.stdout).into_owned();
     texte.push_str(&String::from_utf8_lossy(&sortie.stderr));
     (sortie.status.success(), texte)
+}
+
+/// Lit un flux de l'enfant jusqu'a sa fermeture, dans un fil a part: un tuyau
+/// plein bloquerait l'enfant, et un enfant bloque ressemblerait a un enfant
+/// qui boucle. Une erreur de lecture est ecrite dans le tampon, pas tue.
+fn lire_en_fond<R: Read + Send + 'static>(mut flux: R) -> JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut tampon = Vec::new();
+        if let Err(e) = flux.read_to_end(&mut tampon) {
+            tampon.extend_from_slice(format!("<lecture interrompue: {e}>").as_bytes());
+        }
+        tampon
+    })
+}
+
+/// Recolle les deux flux lus en fond, stdout puis stderr, comme `budget`.
+fn recoller(stdout: JoinHandle<Vec<u8>>, stderr: JoinHandle<Vec<u8>>) -> String {
+    let stdout = stdout.join().expect("le lecteur de stdout ne panique pas");
+    let stderr = stderr.join().expect("le lecteur de stderr ne panique pas");
+    let mut texte = String::from_utf8_lossy(&stdout).into_owned();
+    texte.push_str(&String::from_utf8_lossy(&stderr));
+    texte
+}
+
+/// Lance le budget SANS l'attendre a l'aveugle: rend (code de sortie, sortie
+/// melangee, duree) s'il se termine avant `delai`; sinon le tue PAR SA POIGNEE
+/// (jamais par nom), attend sa mort pour ne laisser aucun orphelin, et panique
+/// en le disant, avec le pid pour qu'un releve puisse verifier qu'il n'en
+/// reste rien.
+///
+/// `budget` ci-dessus passe par `output()`, qui attend la fin du processus
+/// sans borne. C'est ce qu'une garde du << script qui ne rend pas la main >> ne
+/// peut pas faire: sur la version d'avant le 15/09/2026, le script sans valeur
+/// ne se terminait jamais, la recette n'aurait jamais rougi, elle aurait pendu
+/// la suite jusqu'au delai du job. D'ou `try_wait` en boucle, a trois etats
+/// (tourne encore / fini / etat illisible), comme `checks/mod.rs` le fait pour
+/// le pair du banc.
+fn budget_borne(args: &[&str], delai: Duration) -> (Option<i32>, String, Duration) {
+    let interprete = bash();
+    let mut enfant = Command::new(&interprete)
+        .arg(script())
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| {
+            panic!(
+                "bash doit pouvoir tourner: cette garde exerce un script bash ({}: {e})",
+                interprete.display()
+            )
+        });
+    let pid = enfant.id();
+    let stdout = lire_en_fond(enfant.stdout.take().expect("stdout demande en tuyau"));
+    let stderr = lire_en_fond(enfant.stderr.take().expect("stderr demande en tuyau"));
+    let depart = Instant::now();
+    loop {
+        match enfant.try_wait() {
+            Ok(Some(statut)) => {
+                let duree = depart.elapsed();
+                return (statut.code(), recoller(stdout, stderr), duree);
+            }
+            Ok(None) if depart.elapsed() < delai => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Ok(None) => {
+                let ecoule = depart.elapsed();
+                let tue = enfant.kill();
+                let mort = enfant.wait();
+                let sortie = recoller(stdout, stderr);
+                panic!(
+                    "le script ne rend pas la main sans argument: {args:?} tourne encore \
+                     apres {ecoule:?} (pid {pid}; kill: {tue:?}; wait: {mort:?}). Sortie lue:\n{sortie}"
+                );
+            }
+            Err(e) => {
+                let tue = enfant.kill();
+                panic!("l'etat du script (pid {pid}) est illisible: {e} (kill: {tue:?})");
+            }
+        }
+    }
 }
 
 /// Un dossier de travail propre a CE test, sous le repertoire temporaire que
@@ -468,4 +555,67 @@ fn une_liste_vide_de_corps_reste_bien_formee() {
     let liste = ecrire(&d.join("liste.txt"), ENTETE);
     let (ok, sortie) = budget(&["--verifier-liste", &liste]);
     assert!(ok, "une liste au corps vide doit rester valide:\n{sortie}");
+}
+
+// --- Une option a valeur sans sa valeur: refus nomme, jamais une boucle -----
+
+/// Le delai au-dela duquel le script est repute ne pas rendre la main. Le
+/// chemin mesure ne fait que lire ses arguments et imprimer l'usage: sur les
+/// deux hotes il tient en moins d'une seconde, et sur un runner charge le
+/// demarrage de bash reste loin de dix secondes.
+const DELAI_SANS_VALEUR: Duration = Duration::from_secs(10);
+
+/// Lance le script avec `args`, ou une option a valeur n'a pas sa valeur, et
+/// exige le refus: fin avant le delai, code 2, l'option nommee, la ligne
+/// `usage:` imprimee.
+fn exiger_refus_sans_valeur(args: &[&str], option: &str) {
+    let (code, sortie, duree) = budget_borne(args, DELAI_SANS_VALEUR);
+    assert_eq!(
+        code,
+        Some(2),
+        "{option} sans valeur doit sortir en 2 par usage (fini en {duree:?}):\n{sortie}"
+    );
+    assert!(
+        sortie.contains(&format!("{option} attend un fichier")),
+        "le refus doit nommer l'option qui manque de valeur:\n{sortie}"
+    );
+    assert!(
+        sortie.contains("usage:"),
+        "le refus doit imprimer l'usage:\n{sortie}"
+    );
+}
+
+/// Releve du 14/09/2026 sur dev-windows et essai-linux: `abstentions-budget.sh
+/// --verifier-liste` SANS fichier ne rendait jamais la main, tue par PID sur
+/// les deux hotes. Cause, lue dans le
+/// script: `shift 2` sur un seul argument restant echoue sans rien decaler
+/// (pas de `set -e`), `$#` reste a 1 et la boucle des options recommence sur
+/// le meme `$1`. Meme classe que << un outil qui ne rend pas la main passe pour
+/// un outil qui travaille >>: en CI, le job aurait pendu jusqu'a son delai.
+///
+/// Cette recette DOIT pouvoir rougir sur la version d'avant, ou le script ne
+/// se termine jamais: d'ou `budget_borne` et non `budget`, qui attendrait sans
+/// fin. Falsifiee le 15/09/2026 en remettant le `shift 2` nu: rouge par le
+/// delai, processus tue par sa poignee.
+#[test]
+fn verifier_liste_sans_valeur_est_refuse_sans_pendre() {
+    exiger_refus_sans_valeur(&["--verifier-liste"], "--verifier-liste");
+}
+
+/// La meme garde pour `--liste`: meme boucle, meme `shift 2`, meme classe. Une
+/// recette par option, et non une boucle sur les trois: quand l'une tombe, son
+/// nom dit laquelle sans lire le message.
+#[test]
+fn liste_sans_valeur_est_refusee_sans_pendre() {
+    exiger_refus_sans_valeur(&["--liste"], "--liste");
+}
+
+/// Et pour `--journal`, en DEUXIEME position derriere un `--liste` valide: la
+/// version d'avant pendait aussi la, apres avoir consomme la premiere option.
+/// Le refus doit nommer `--journal`, pas `--liste`.
+#[test]
+fn journal_sans_valeur_est_refuse_sans_pendre() {
+    let d = bac("journal-sans-valeur");
+    let liste = ecrire(&d.join("liste.txt"), ENTETE);
+    exiger_refus_sans_valeur(&["--liste", &liste, "--journal"], "--journal");
 }
