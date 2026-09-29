@@ -112,6 +112,24 @@ pub enum Command {
     /// rafale couterait des transactions de pare-feu, pas une fuite ni une
     /// coupure. `Disconnect`, deja exposee, est strictement plus puissante.
     Reprise,
+    /// Ce que le daemon dit avoir remis a son moteur de pare-feu, en dernier.
+    ///
+    /// # Pourquoi une commande a part, et pas un champ de `Status`
+    ///
+    /// `TunnelStatus` decrit l'etat de la machine d'etats; la politique, elle,
+    /// est completee au moment d'agir (identite du coeur, restriction du
+    /// resolveur, handle du tunnel) et n'existe nulle part ailleurs que dans
+    /// l'appel au moteur. La recalculer depuis l'etat serait une seconde
+    /// source de verite, qui peut diverger de la premiere sans que rien ne le
+    /// dise. La reponse est donc ce que le superviseur a RETENU de cet appel.
+    ///
+    /// # Ce qu'un appelant y gagne: une lecture
+    ///
+    /// Aucun parametre, aucun effet: elle ne pose rien, ne change aucun etat,
+    /// et passe par le meme controle d'acces que `Status`. Elle ne transporte
+    /// ni cle ni profil, seulement les six champs que le moteur nft lit (voir
+    /// [`DeclarationPareFeu`]).
+    DeclarationPareFeu,
 }
 
 impl Command {
@@ -146,6 +164,7 @@ impl Command {
             Command::Check => "check",
             Command::VerdictInspectionTls { .. } => "verdict-inspection-tls",
             Command::Reprise => "reprise",
+            Command::DeclarationPareFeu => "declaration-pare-feu",
         }
     }
 }
@@ -156,7 +175,58 @@ pub enum Response {
     Ok,
     Status(Box<TunnelStatus>),
     Check(Box<CheckReport>),
+    DeclarationPareFeu(Box<DeclarationPareFeu>),
     Error { message: String },
+}
+
+/// Version du contenu de [`DeclarationPareFeu`], distincte de
+/// [`PROTOCOL_VERSION`]: un lecteur strict refuse une forme qu'il ne connait
+/// pas plutot que d'en comparer une partie.
+pub const DECLARATION_PARE_FEU_VERSION: u32 = 1;
+
+/// Issue du dernier appel du daemon a son moteur de pare-feu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum IssueApplication {
+    /// Aucun appel depuis le demarrage du daemon: il n'a rien pose.
+    Aucune,
+    /// Le moteur a accepte la politique jointe.
+    Posee,
+    /// Le moteur a accepte le retrait: le daemon ne declare aucune politique.
+    Retiree,
+    /// Le moteur a refuse. Le daemon ne sait pas ce que porte le noyau, et le
+    /// dit: aucune politique n'est jointe, pas meme la precedente.
+    Echec,
+}
+
+/// Declaration du daemon: la derniere politique qu'il a remise a son moteur.
+///
+/// C'est une DECLARATION, jamais une observation: elle dit ce que le daemon a
+/// demande et ce que le moteur a repondu, pas ce que le noyau porte. Seul un
+/// verificateur qui lit le noyau peut la confronter a la realite.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeclarationPareFeu {
+    /// Toujours [`DECLARATION_PARE_FEU_VERSION`].
+    pub schema_version: u32,
+    /// Alea tire au demarrage du daemon. Le numero d'application repart de
+    /// zero a chaque demarrage: sans cet alea, un daemon redemarre entre deux
+    /// lectures, qui aurait fait le meme nombre d'applications, serait pris
+    /// pour le meme. Il ne designe rien d'autre et n'est pas un secret.
+    pub instance: String,
+    /// Numero de l'appel au moteur, monotone sur la vie du daemon; zero tant
+    /// qu'aucun appel n'a eu lieu. Chaque appel l'incremente, reussi ou non.
+    pub application: u64,
+    /// `KillSwitch::backend` du moteur appele, par exemple `nftables`.
+    pub moteur: String,
+    pub issue: IssueApplication,
+    /// Presente si et seulement si `issue` vaut `posee`: la projection v1
+    /// (`bifrost_firewall::politique_nft::Politique::projeter`) de la
+    /// politique EXACTE remise au moteur, soit les six champs que le rendu nft
+    /// lit. Aucune cle, aucun point d'acces, aucun chemin: ni le profil ni les
+    /// executables n'en font partie. Pour un autre moteur que `nftables`, ces
+    /// six champs ne decrivent pas ce que le moteur lit, et un lecteur doit
+    /// refuser de s'en servir.
+    pub politique: Option<serde_json::Value>,
 }
 
 impl Response {
@@ -187,6 +257,64 @@ mod tests {
         // Elle repose des filtres: son appelant se retrouve dans le journal,
         // sans quoi une rafale de reprises fabriquees serait anonyme.
         assert!(Command::Reprise.is_mutating());
+        // Une lecture: la ranger parmi les mutantes ne changerait aucun droit
+        // (le controle d'acces est le meme pour toutes), mais ferait passer
+        // pour une action ce qui n'en est pas une dans le journal d'audit.
+        assert!(!Command::DeclarationPareFeu.is_mutating());
+    }
+
+    /// Le nom sur le fil est un contrat avec `bifrost-cli prove nft
+    /// --politique-daemon`, et la commande ne porte rien: un appelant ne peut
+    /// pas lui faire decrire autre chose que ce que le daemon a retenu.
+    #[test]
+    fn la_declaration_du_pare_feu_a_son_nom_et_ne_porte_rien() {
+        let s = serde_json::to_string(&Request::new(Command::DeclarationPareFeu)).unwrap();
+        assert_eq!(s, r#"{"version":1,"command":"declaration-pare-feu"}"#);
+        let back: Request = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.command.name(), "declaration-pare-feu");
+    }
+
+    /// La forme de la reponse, cle par cle: c'est ce que le lecteur strict de
+    /// la preuve compare, et une cle ajoutee ici doit le faire tomber plutot
+    /// que d'etre ignoree en silence.
+    #[test]
+    fn la_reponse_de_declaration_a_exactement_sept_cles() {
+        let d = DeclarationPareFeu {
+            schema_version: DECLARATION_PARE_FEU_VERSION,
+            instance: "00".repeat(24),
+            application: 3,
+            moteur: "nftables".into(),
+            issue: IssueApplication::Posee,
+            politique: Some(serde_json::json!({"schema_version": 1})),
+        };
+        let v = serde_json::to_value(Response::DeclarationPareFeu(Box::new(d.clone()))).unwrap();
+        let mut cles: Vec<_> = v.as_object().unwrap().keys().cloned().collect();
+        cles.sort();
+        assert_eq!(
+            cles,
+            [
+                "application",
+                "instance",
+                "issue",
+                "moteur",
+                "politique",
+                "result",
+                "schema_version"
+            ]
+        );
+        assert_eq!(v["result"], "declaration-pare-feu");
+        assert_eq!(v["issue"], "posee");
+        match serde_json::from_value::<Response>(v).unwrap() {
+            Response::DeclarationPareFeu(relue) => assert_eq!(*relue, d),
+            autre => panic!("attendu une declaration, recu {autre:?}"),
+        }
+        for (issue, fil) in [
+            (IssueApplication::Aucune, "aucune"),
+            (IssueApplication::Retiree, "retiree"),
+            (IssueApplication::Echec, "echec"),
+        ] {
+            assert_eq!(serde_json::to_value(issue).unwrap(), fil);
+        }
     }
 
     /// Le nom sur le fil de la reprise, qui est un contrat avec un SCRIPT.

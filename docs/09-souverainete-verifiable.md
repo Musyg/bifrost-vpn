@@ -185,14 +185,78 @@ doivent rester identiques. Table tierce et permis non prevu deviennent MISMATCH.
 Les tests sans privileges couvrent aussi l'intention invalide, l'ordre des
 restrictions DNS et le changement de chaque parametre attendu.
 
-#### D1b.3b - Liaison au profil actif, autres objets et WFP (a faire)
+#### D1b.3b - Politique declaree par le daemon, livree sous Linux
 
-Collecteurs dedies en lecture seule: nftables/netlink sur Linux, enumeration
-WFP sur Windows. Comparer famille, couches/hooks, priorites, filtres, exceptions,
-interface, destinations autorisees et persistance a une politique attendue
-versionnee. Documenter les effets de composition avec les regles tierces.
-Lire avant/apres l'identite de la generation active; si elle change pendant
-la collecte, rendre NON MESURE. Ne pas confondre absence de table et acces refuse.
+`bifrost-cli --json prove nft --politique-daemon --actif`
+
+L'attendu n'est plus fourni par l'appelant: c'est la politique que le daemon
+joint par `--socket` declare avoir remise en dernier a son moteur nftables. Le
+superviseur la retient a l'endroit unique ou il appelle le moteur, apres ses
+propres retouches (handle du tunnel, exemption du coeur, restriction du
+resolveur) et avec la reponse du moteur. Rien n'est recalcule depuis le profil
+ni depuis `TunnelStatus`. Chaque appel au moteur, reussi ou non, incremente un
+numero d'application; un alea tire au demarrage distingue deux vies du daemon.
+Un refus du moteur est declare `echec`, sans politique: la precedente n'est pas
+redeclaree.
+
+La requete IPC `declaration-pare-feu` est une lecture sans parametre, classee
+non mutante. Elle passe par le controle d'acces existant, inchange: socket 0660
+et SO_PEERCRED sous Linux (root et le groupe `--group`), DACL du pipe sous
+Windows (SYSTEM et Administrateurs). Qui peut la lire pouvait deja connecter et
+deconnecter. Elle ne porte ni cle, ni profil, ni point d'acces: version, alea,
+numero, moteur, issue (`aucune`, `posee`, `retiree`, `echec`) et, si posee, la
+projection v1 des six champs que le rendu nft lit. Une recette verifie sur le
+rendu reel que ces six champs suffisent a le reproduire.
+
+Protocole: lire la declaration (N1), GETGEN, dump nft, GETGEN, relire (N2). N1
+et N2 doivent etre identiques en entier. La declaration est servie par le fil
+qui applique les politiques: aucune lecture ne tombe entre une pose et sa note.
+Declaration ou generation changee, daemon injoignable ou muet (5 s), acces
+refuse, reponse tronquee ou hors schema, aucune politique posee, retrait ou
+echec du moteur: UNMEASURED avec sa raison. La declaration passe par le meme
+lecteur strict que `--politique`; interface `lo`, compte de coeur ou de
+resolveur root, compte partage entre les deux, ou moteur autre que nftables
+sortent du perimetre de la reference et rendent UNMEASURED, jamais MATCH. Un
+noyau different de la declaration rend MISMATCH.
+
+`--politique-daemon` exclut `--attendu`, `--politique` et `--observe`, et exige
+donc `--actif`. Le rapport garde `schema_version=1` et `policy_schema_version=1`,
+porte `expected_source=daemon-declared-active-policy`, et
+`failed_input=daemon-declaration` quand la declaration est en cause. Il
+n'exporte ni les parametres de la politique, ni le numero, ni l'alea. Une
+correspondance dit que le noyau porte ce que le daemon dit avoir pose;
+`network_security` reste `not-evaluated`. Une declaration du daemon n'est
+jamais une observation du noyau, et le client n'authentifie pas encore le
+processus qui repond sur le socket.
+
+Etats du daemon sous Linux, qui n'a pas de filtre de demarrage: au demarrage,
+rien n'est pose; la connexion pose sans interface puis, interface montee, avec
+elle; la reconnexion repose sans interface; l'erreur garde la derniere pose; la
+reprise apres veille, dans tout etat sauf deconnecte, repose avec l'interface du
+profil; la deconnexion retire. Chaque pose est la politique exacte remise au
+moteur.
+
+Acceptation, banc jetable (`scripts/preuve-nft-linux.sh`, job `fuite`): daemon
+reel dans un namespace sans veth, profil a coeur dont le binaire manque; le kill
+switch est pose, le tunnel ne monte jamais, le DNS de l'hote n'est pas touche.
+Daemon neuf: UNMEASURED. Etat erreur: MATCH sans mutation. Regle retiree,
+exception elargie, filtre tiers prioritaire, interface remplacee: MISMATCH,
+puis MATCH apres reprise. Lecteur sans droit noyau, hors du groupe, ou refuse
+par le daemon: UNMEASURED. Trente reprises concurrentes: MATCH ou UNMEASURED
+explique, jamais MISMATCH. Deconnexion, daemon arrete avec sa table en place:
+UNMEASURED. Aucun processus ne survit aux namespaces. Non mesures en banc:
+etat connecte, montee de l'interface, reconnexion, chemin WireGuard (marque),
+resolveur embarque reel.
+
+#### D1b.3c - Autres objets, authentification du daemon et WFP (a faire)
+
+Collecteurs dedies en lecture seule: enumeration WFP sur Windows. Comparer
+famille, couches/hooks, priorites, filtres, exceptions, interface, destinations
+autorisees et persistance a une politique attendue versionnee. Documenter les
+effets de composition avec les regles tierces. Lire avant/apres l'identite de
+la generation active; si elle change pendant la collecte, rendre NON MESURE. Ne
+pas confondre absence de table et acces refuse. Verifier cote client
+l'identite du processus qui sert la declaration.
 
 Acceptation: regle retiree, exception trop large, filtre tiers prioritaire,
 interface remplacee, donnees tronquees, acces refuse, generation modifiee.
@@ -201,11 +265,11 @@ Eprouver sur machines jetables; ne pas couper le reseau du poste de travail.
 
 La collecte Linux D1b.2 encadre le dump par la generation nftables (`getgen`/`id`),
 pas par deux horodatages. Deux captures identiques seules ne prouvent pas
-l'absence d'un changement transitoire. D1b reste incomplet: la reference vient
-maintenant du moteur produit mais son intention reste declaree par l'appelant;
-la liaison au profil actif, les objets hors perimetre et la couverture WFP
-manquent encore. Une intention permissive ou obsolete n'est pas rendue fiable
-par le fait que le produit sait la representer.
+l'absence d'un changement transitoire. D1b reste incomplet: sous Linux,
+l'attendu peut venir de la declaration du daemon, mais le client ne verifie pas
+encore qui la sert, les objets hors perimetre et la couverture WFP manquent. Une
+intention permissive ou obsolete n'est pas rendue fiable par le fait que le
+produit sait la representer, ni par le fait que le daemon la declare.
 
 ### D1c - Routes, DNS et provenance
 

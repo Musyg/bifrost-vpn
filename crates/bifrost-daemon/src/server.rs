@@ -95,6 +95,15 @@ async fn dispatch(command: Command, tx: &Sender<Cmd>, profil: &std::path::Path) 
             Ok(report) => Response::Check(Box::new(report)),
             Err(e) => Response::error(e),
         },
+        // Par `ask`, comme `Status`, et pour une raison de plus: la reponse
+        // vient du thread qui appelle le moteur, donc elle ne peut pas etre
+        // lue au milieu d'une application. Aucun controle d'acces propre: ce
+        // canal n'en a qu'un, a l'acceptation, et il vaut pour toutes les
+        // commandes.
+        Command::DeclarationPareFeu => match ask(tx, Cmd::Declaration).await {
+            Ok(declaration) => Response::DeclarationPareFeu(Box::new(declaration)),
+            Err(e) => Response::error(e),
+        },
         // Rien a attendre: le superviseur range le verdict et poursuit. Lui
         // demander de confirmer ferait patienter le client derriere une
         // eventuelle connexion en cours, pour une reponse qui ne peut pas
@@ -270,6 +279,53 @@ upstream = ["10.2.0.1"]
         let (tx, rx) = std::sync::mpsc::channel();
         drop(rx);
         let reponse = dispatch(Command::Reprise, &tx, std::path::Path::new("/inexistant")).await;
+        assert!(matches!(reponse, Response::Error { .. }), "{reponse:?}");
+    }
+
+    /// La declaration rendue est CELLE du superviseur, transmise sans retouche.
+    ///
+    /// Le superviseur est simule par un fil qui repond a `Cmd::Declaration`
+    /// et a rien d'autre: une branche qui fabriquerait sa propre reponse, ou
+    /// qui passerait par `Cmd::Status`, ne recevrait pas cette declaration.
+    #[tokio::test]
+    async fn la_declaration_vient_du_superviseur_sans_retouche() {
+        use bifrost_ipc::protocol::{DeclarationPareFeu, IssueApplication};
+        let (tx, rx) = std::sync::mpsc::channel();
+        let attendue = DeclarationPareFeu {
+            schema_version: 1,
+            instance: "ab".repeat(24),
+            application: 7,
+            moteur: "nftables".into(),
+            issue: IssueApplication::Posee,
+            politique: Some(serde_json::json!({"schema_version": 1})),
+        };
+        let envoyee = attendue.clone();
+        let fil = std::thread::spawn(move || match rx.recv() {
+            Ok(Cmd::Declaration(reply)) => {
+                let _ = reply.send(envoyee);
+                true
+            }
+            _ => false,
+        });
+        let reponse = dispatch(
+            Command::DeclarationPareFeu,
+            &tx,
+            std::path::Path::new("/inexistant"),
+        )
+        .await;
+        assert!(fil.join().unwrap(), "le superviseur n'a pas ete interroge");
+        match reponse {
+            Response::DeclarationPareFeu(d) => assert_eq!(*d, attendue),
+            autre => panic!("attendu une declaration, recu {autre:?}"),
+        }
+        let (tx, rx) = std::sync::mpsc::channel::<Cmd>();
+        drop(rx);
+        let reponse = dispatch(
+            Command::DeclarationPareFeu,
+            &tx,
+            std::path::Path::new("/inexistant"),
+        )
+        .await;
         assert!(matches!(reponse, Response::Error { .. }), "{reponse:?}");
     }
 

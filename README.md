@@ -239,6 +239,24 @@ rapport. `expected_source=bifrost-policy-v1-user-declared` distingue cette
 intention d'une capture fournie. Elle n'est ni signee ni attestee comme profil
 actif du daemon, et MATCH ne devient pas une preuve globale d'etancheite.
 
+Sous Linux, l'attendu peut aussi venir du daemon: la derniere politique qu'il
+declare avoir remise a son moteur nftables.
+
+```sh
+bifrost-cli --json prove nft --politique-daemon --actif
+```
+
+La commande lit cette declaration sur le socket du daemon (memes droits que
+`status`), collecte le noyau encadre par sa generation, puis relit la
+declaration. Si elle a change entre-temps, si le daemon est injoignable, refuse
+l'acces, n'a encore rien pose, a retire son kill switch ou a vu son moteur
+echouer, le rapport rend UNMEASURED/2 avec sa raison.
+`expected_source=daemon-declared-active-policy` distingue cet attendu d'une
+intention fournie. Ni les parametres de la politique ni le numero d'application
+ne sont exportes. MATCH dit que le noyau porte ce que le daemon dit avoir pose:
+une declaration confrontee au noyau, pas une preuve d'etancheite du VPN, et le
+client n'authentifie pas encore le processus qui repond sur le socket.
+
 ## Tester
 
 ### Quota de CI et validation Windows

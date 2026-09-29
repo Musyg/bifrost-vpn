@@ -416,3 +416,59 @@ fn mode_actif_explicite_et_exclusif_sans_collecte_sur_reference_invalide() {
     assert_eq!(r["live_kernel"], false);
     assert_eq!(r["generation_verified"], false);
 }
+
+/// `--politique-daemon`: l'attendu vient du daemon, le noyau courant l'observe.
+///
+/// Toute autre source d'attendu, et toute capture fournie, est refusee par
+/// clap avant la moindre lecture. Sans `--actif` aussi: la declaration est
+/// relue avant et apres la collecte, et cet encadrement ne veut rien dire
+/// autour d'un fichier capture a un autre moment.
+#[test]
+fn politique_daemon_exclusive_et_liee_au_noyau_courant() {
+    let b = Bac::nouveau();
+    let fichier = b.0.join("fichier-prive.json");
+    std::fs::write(&fichier, "{}").unwrap();
+    let f = fichier.to_str().unwrap();
+    for arguments in [
+        vec!["--politique-daemon"],
+        vec!["--politique-daemon", "--observe", f],
+        vec!["--politique-daemon", "--actif", "--attendu", f],
+        vec!["--politique-daemon", "--actif", "--politique", f],
+        vec!["--politique-daemon", "--actif", "--observe", f],
+        vec!["--politique-daemon", "--attendu", f, "--observe", f],
+        vec!["--politique-daemon", "--politique", f, "--observe", f],
+    ] {
+        let sortie = Command::new(env!("CARGO_BIN_EXE_bifrost-cli"))
+            .args(["--json", "--socket", "absent", "prove", "nft"])
+            .args(&arguments)
+            .output()
+            .unwrap();
+        assert_eq!(sortie.status.code(), Some(2), "{arguments:?}");
+        assert!(sortie.stdout.is_empty(), "{arguments:?}");
+    }
+    let socket = b.0.join("daemon-prive.sock");
+    let sortie = Command::new(env!("CARGO_BIN_EXE_bifrost-cli"))
+        .args(["--json", "--socket"])
+        .arg(&socket)
+        .args(["prove", "nft", "--politique-daemon", "--actif"])
+        .output()
+        .unwrap();
+    assert_eq!(sortie.status.code(), Some(2), "{sortie:?}");
+    let r: Value = serde_json::from_slice(&sortie.stdout).unwrap();
+    assert_eq!(r["schema_version"], 1);
+    assert_eq!(r["scope"], "nft-kernel-comparison");
+    assert_eq!(r["verdict"], "UNMEASURED");
+    assert_eq!(r["expected_source"], "daemon-declared-active-policy");
+    assert_eq!(r["failed_input"], "daemon-declaration");
+    assert_eq!(r["live_kernel"], false);
+    assert_eq!(r["generation_verified"], false);
+    assert_eq!(r["network_security"], "not-evaluated");
+    #[cfg(target_os = "linux")]
+    assert_eq!(r["reason"], "daemon injoignable");
+    #[cfg(not(target_os = "linux"))]
+    assert_eq!(
+        r["reason"],
+        "preuve par declaration du daemon disponible uniquement sous Linux"
+    );
+    assert!(!String::from_utf8_lossy(&sortie.stdout).contains("daemon-prive"));
+}
