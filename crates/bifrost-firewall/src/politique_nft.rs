@@ -1,18 +1,25 @@
 //! Intention nft v1 sans secrets et reference pure du generateur produit.
 //!
-//! Cette intention est declaree par l'appelant, pas lue dans le daemon.
+//! L'intention a deux sources, et un seul lecteur (`lire`): un fichier declare
+//! par l'appelant (`prove nft --politique`), ou la projection de la politique
+//! que le daemon a remise a son moteur (`projeter`, `prove nft
+//! --politique-daemon`). Dans les deux cas c'est un ATTENDU, jamais une
+//! observation du noyau.
 //! Le rendu JSON est confronte au rendu texte REEL dans le banc Linux jetable.
 //! Toute evolution des regles produit doit faire evoluer ce contrat et le banc.
 
 use std::net::IpAddr;
 
 use bifrost_core::ports::FirewallPolicy;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 /// Tous les champs sont obligatoires, y compris les options explicites null.
 /// Ne pas deserialiser directement avec serde: passer par `lire`.
-#[derive(Debug, Deserialize)]
+///
+/// `Serialize` ecrit toujours les sept cles, les options absentes en `null`:
+/// c'est la forme que `lire` exige, donc la forme que le daemon transmet.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Politique {
     pub schema_version: u32,
@@ -76,6 +83,31 @@ impl Politique {
             return Err("destination DNS de politique nft invalide");
         }
         Ok(())
+    }
+
+    /// Ce que le moteur nftables LIT d'une politique qu'on lui a remise.
+    ///
+    /// Le rendu Linux (`linux::ruleset::render`) ne lit que ces six champs. Les
+    /// autres (LUID, executables, SID, `resolveur_embarque`) servent a WFP ou
+    /// au superviseur et ne changent pas un octet du ruleset; la recette
+    /// `la_projection_ne_perd_rien_de_ce_que_nft_rend` le mesure sur le rendu
+    /// reel, parce qu'un champ lu par le rendu et absent d'ici ferait
+    /// correspondre au noyau une declaration qui ne dit pas tout.
+    ///
+    /// Aucune validation ici, et c'est voulu: une politique posee par le daemon
+    /// peut sortir du perimetre de la reference (interface `lo`, UID root ou
+    /// partage). C'est `lire` qui le dira au moment de comparer, et la
+    /// comparaison sera alors NON MESUREE, jamais une correspondance.
+    pub fn projeter(p: &FirewallPolicy) -> Self {
+        Self {
+            schema_version: 1,
+            tunnel_interface: p.tunnel_interface.clone(),
+            fwmark: p.fwmark,
+            dns_resolver: p.dns_resolver,
+            allow_lan: p.allow_lan,
+            coeur_uid: p.coeur_uid,
+            resolveur_uid: p.resolveur_uid,
+        }
     }
 
     /// Meme type que celui consomme par le moteur du daemon. Aucun appel OS.
@@ -290,6 +322,86 @@ mod tests {
         cas["resolveur_uid"] = json!(1002);
         cas["dns_resolver"] = json!("192.0.2.1");
         assert!(Politique::lire(cas).is_err());
+    }
+
+    /// Une politique complete telle que le daemon la remet au moteur: les six
+    /// champs que nft lit, plus ceux qu'il ne lit pas, remplis expres pour
+    /// qu'une projection qui en dependrait se voie.
+    fn remise(n: u32) -> FirewallPolicy {
+        FirewallPolicy {
+            tunnel_interface: (n & 1 == 1).then(|| "wg0".to_string()),
+            tunnel_luid: Some(0x0123_4567_89ab_cdef),
+            fwmark: (n & 2 == 2).then_some(51820),
+            dns_resolver: if n & 32 == 32 {
+                "::1".parse().unwrap()
+            } else {
+                "127.0.0.1".parse().unwrap()
+            },
+            allow_lan: n & 4 == 4,
+            coeur_uid: (n & 8 == 8).then_some(1001),
+            coeur_executable: Some(std::path::PathBuf::from("coeur")),
+            resolveur_uid: (n & 16 == 16).then_some(1002),
+            resolveur_executable: Some(std::path::PathBuf::from("resolveur")),
+            resolveur_sid: Some("S-1-5-19".to_string()),
+            // Inverse de ce que `firewall_policy` deduit: si le rendu Linux
+            // lisait ce champ, la recette Linux ci-dessous le verrait.
+            resolveur_embarque: n & 16 == 0,
+        }
+    }
+
+    /// La forme transmise par le daemon est exactement celle que `lire`
+    /// accepte: sept cles, options absentes en null, rien de plus. Sans cette
+    /// egalite, le lecteur strict refuserait une declaration valide, ou une
+    /// cle ajoutee cote daemon passerait inapercue cote preuve.
+    #[test]
+    fn la_projection_serialisee_se_relit_a_l_identique() {
+        for n in 0..64 {
+            let p = Politique::projeter(&remise(n));
+            let v = serde_json::to_value(&p).unwrap();
+            assert_eq!(v.as_object().unwrap().len(), 7, "cas {n}");
+            assert_eq!(Politique::lire(v).unwrap(), p, "cas {n}");
+        }
+        let v = serde_json::to_value(Politique::projeter(&remise(0))).unwrap();
+        for cle in ["tunnel_interface", "fwmark", "coeur_uid", "resolveur_uid"] {
+            assert!(v[cle].is_null(), "option absente non ecrite en null: {cle}");
+        }
+    }
+
+    /// Le perimetre de la reference ne s'elargit pas par la projection: une
+    /// politique que la reference ne sait pas decrire se projette telle
+    /// quelle, et c'est `lire` qui la refuse.
+    #[test]
+    fn une_politique_hors_perimetre_se_projette_sans_devenir_valide() {
+        let mut lo = remise(1);
+        lo.tunnel_interface = Some("lo".to_string());
+        let mut root = remise(8);
+        root.coeur_uid = Some(0);
+        let mut partage = remise(8 | 16);
+        partage.resolveur_uid = partage.coeur_uid;
+        for p in [lo, root, partage] {
+            let projete = Politique::projeter(&p);
+            assert_eq!(projete.tunnel_interface, p.tunnel_interface);
+            assert_eq!(projete.coeur_uid, p.coeur_uid);
+            assert_eq!(projete.resolveur_uid, p.resolveur_uid);
+            let v = serde_json::to_value(projete).unwrap();
+            assert!(Politique::lire(v).is_err(), "{p:?}");
+        }
+    }
+
+    /// La projection ne garde que six champs: c'est sur si et seulement si le
+    /// VRAI rendu du moteur ne lit rien d'autre. On le mesure sur le rendu, pas
+    /// sur une relecture de son code: 64 combinaisons, tous les champs non
+    /// projetes remplis, et `resolveur_embarque` inverse de ce que la
+    /// reconstruction en deduit.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn la_projection_ne_perd_rien_de_ce_que_nft_rend() {
+        use crate::linux::ruleset::render;
+        for n in 0..64 {
+            let remise = remise(n);
+            let relue = Politique::projeter(&remise).firewall_policy().unwrap();
+            assert_eq!(render(&remise), render(&relue), "cas {n}");
+        }
     }
 
     #[test]

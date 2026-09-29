@@ -1,5 +1,7 @@
 //! Comparaison structurelle nft JSON: fichiers, ou collecte passive Linux.
 //! La reference fournie reste non authentifiee, meme pour une collecte noyau.
+//! Avec `--politique-daemon`, l'attendu est la declaration du daemon: elle est
+//! relue avant et apres la collecte, et reste un attendu, jamais une mesure.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -97,7 +99,8 @@ fn heure() -> Option<u128> {
 // Value accepte normalement deux cles identiques en gardant la derniere.
 // Une capture ambigue n'est jamais une observation acceptable, meme si les
 // doublons ont la meme valeur. Le refus vaut aussi au fond d'une expression.
-struct Unique(Value);
+// Partage avec le lecteur de la declaration du daemon, pour la meme raison.
+pub(crate) struct Unique(pub(crate) Value);
 
 impl<'de> Deserialize<'de> for Unique {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
@@ -444,6 +447,96 @@ pub async fn verifier_politique(politique: &Path, observe: Option<&Path>, actif:
             let _ = (v, observe);
             Err("reference de politique nft disponible uniquement sous Linux")
         }
+    }
+    .await;
+    terminer(r, debut, resultat)
+}
+
+/// L'attendu est la declaration du daemon joint par `socket`, le noyau
+/// l'observe. Linux seulement: la reference et la collecte n'existent que la.
+pub async fn verifier_declaration(socket: &str) -> Rapport {
+    #[cfg(target_os = "linux")]
+    {
+        verifier_declaration_avec(
+            move || crate::preuve_nft_daemon::lire(socket),
+            crate::preuve_nft_linux::collecter,
+        )
+        .await
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = socket;
+        let debut = Instant::now();
+        let r = commencer_declaration();
+        terminer(
+            r,
+            debut,
+            Err("preuve par declaration du daemon disponible uniquement sous Linux"),
+        )
+    }
+}
+
+fn commencer_declaration() -> Rapport {
+    let mut r = commencer();
+    r.scope = "nft-kernel-comparison";
+    r.source = "kernel-netlink-and-system-nft";
+    r.expected_source = "daemon-declared-active-policy";
+    r.failed_input = Some("daemon-declaration");
+    r.reason = "declaration du daemon non lue";
+    r.limitation = "Attendu declare par le daemon, pas observe: une correspondance dit que le noyau porte ce que le daemon dit avoir pose; nftables du namespace courant uniquement, pas une preuve d'etancheite du VPN.";
+    r
+}
+
+/// Le protocole, separe de ses deux sources pour que les recettes sans
+/// privilege le jouent avec un faux daemon et une fausse capture.
+///
+/// Ordre impose: declaration (N1), collecte encadree par deux GETGEN,
+/// declaration (N2). N1 et N2 doivent etre IDENTIQUES en entier (instance,
+/// numero, issue, politique): une application glissee entre les deux, meme
+/// vers la meme politique, rend la capture non attribuable. Rien de la
+/// declaration n'entre dans le rapport, hors la version de schema: ni les
+/// parametres, ni le numero, ni l'instance.
+#[cfg(target_os = "linux")]
+pub(crate) async fn verifier_declaration_avec<L, FL, C, FC>(
+    mut lire_declaration: L,
+    collecter: C,
+) -> Rapport
+where
+    L: FnMut() -> FL,
+    FL: std::future::Future<
+            Output = Result<bifrost_ipc::protocol::DeclarationPareFeu, &'static str>,
+        >,
+    C: FnOnce() -> FC,
+    FC: std::future::Future<Output = Result<Vec<u8>, &'static str>>,
+{
+    let debut = Instant::now();
+    let mut r = commencer_declaration();
+    let resultat = async {
+        let premiere = lire_declaration().await?;
+        let politique = crate::preuve_nft_daemon::politique_posee(&premiere)?;
+        // Le meme lecteur strict que `--politique`: la declaration ne passe pas
+        // par un chemin plus indulgent que celui d'un fichier. Ce qu'il refuse
+        // (interface `lo`, UID root ou partage, DNS hors boucle locale avec un
+        // resolveur) est hors du perimetre de la reference: NON MESURE.
+        let p = bifrost_firewall::politique_nft::Politique::lire(politique.clone())
+            .map_err(|_| "politique declaree hors du perimetre de la reference nft v1")?;
+        let octets = serde_json::to_vec(&p.reference()?).map_err(|_| "reference impossible")?;
+        let a = analyser(&octets)?;
+        r.policy_schema_version = Some(1);
+        r.expected_counts = Some(a.compte());
+        r.failed_input = Some("observed");
+        let b = collecter().await?;
+        r.live_kernel = true;
+        r.generation_verified = true;
+        r.failed_input = Some("daemon-declaration");
+        let seconde = lire_declaration()
+            .await
+            .map_err(|_| "declaration du daemon illisible ou injoignable apres la collecte")?;
+        if seconde != premiere {
+            return Err("declaration du daemon modifiee pendant la collecte");
+        }
+        r.failed_input = Some("observed");
+        confronter(&mut r, a, &b)
     }
     .await;
     terminer(r, debut, resultat)

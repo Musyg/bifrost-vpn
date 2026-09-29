@@ -7,6 +7,8 @@ mod pilote;
 mod preuve;
 mod preuve_nft;
 #[cfg(target_os = "linux")]
+mod preuve_nft_daemon;
+#[cfg(target_os = "linux")]
 mod preuve_nft_linux;
 mod profile;
 mod render;
@@ -158,13 +160,28 @@ enum CmdPreuve {
     Nft {
         #[arg(
             long,
-            required_unless_present = "politique",
+            required_unless_present_any = ["politique", "politique_daemon"],
             conflicts_with = "politique"
         )]
         attendu: Option<std::path::PathBuf>,
         /// Intention nft Bifrost v1, alternative a une capture de reference.
         #[arg(long, conflicts_with = "attendu")]
         politique: Option<std::path::PathBuf>,
+        /// Linux: l'intention est la politique que le daemon (--socket) declare
+        /// avoir posee en dernier, relue avant et apres la collecte. Exige
+        /// --actif: une declaration courante ne se compare qu'au noyau courant.
+        // Chaque contrainte ici porte, et une seule fois (clap rend les
+        // conflits symetriques). `--actif` est exige sans `requires`: exclure
+        // `--observe` suffit, puisque `--observe` est obligatoire sans
+        // `--actif`. Un `requires = "actif"` ne mordrait jamais, clap faisant
+        // passer un conflit avant une exigence: mesure du 29/09/2026, avec
+        // `requires` et sans ce conflit, clap acceptait `--politique-daemon
+        // --observe F`, et F aurait ete ignore sans un mot.
+        #[arg(
+            long = "politique-daemon",
+            conflicts_with_all = ["attendu", "politique", "observe"]
+        )]
+        politique_daemon: bool,
         #[arg(long, required_unless_present = "actif", conflicts_with = "actif")]
         observe: Option<std::path::PathBuf>,
         /// Linux: lecture seule du noyau, sans elevation ni changement de regles.
@@ -818,11 +835,14 @@ async fn run(args: Args) -> anyhow::Result<i32> {
                 CmdPreuve::Nft {
                     attendu,
                     politique,
+                    politique_daemon,
                     observe,
                     actif,
                 },
         } => {
-            let rapport = if let Some(p) = politique {
+            let rapport = if *politique_daemon {
+                preuve_nft::verifier_declaration(&args.socket).await
+            } else if let Some(p) = politique {
                 preuve_nft::verifier_politique(p, observe.as_deref(), *actif).await
             } else if *actif {
                 preuve_nft::verifier_actif(attendu.as_ref().expect("valide par clap")).await
@@ -932,5 +952,9 @@ async fn run(args: Args) -> anyhow::Result<i32> {
                 bail!("{message}");
             }
         }
+        // Aucune commande de ce chemin ne demande la declaration: elle n'est
+        // lue que par `prove nft --politique-daemon`, avec son lecteur strict.
+        // La recevoir ici est un daemon qui repond a cote, pas un resultat.
+        Response::DeclarationPareFeu(_) => bail!("reponse inattendue du daemon"),
     }
 }

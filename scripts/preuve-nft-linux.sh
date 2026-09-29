@@ -7,26 +7,67 @@ if [ "$(id -u)" != 0 ]; then
 fi
 RACINE=$(cd "$(dirname "$0")/.." && pwd)
 CLI="$RACINE/target/debug/bifrost-cli"
-for outil in ip nft jq setpriv cmp; do command -v "$outil" >/dev/null; done
+DAEMON="$RACINE/target/debug/bifrost-daemon"
+for outil in ip nft jq setpriv cmp getent stat; do command -v "$outil" >/dev/null; done
 test -x "$CLI"
+test -x "$DAEMON"
 BAC=$(mktemp -d)
 NS="bfproof-$$"
+NSD="bfdecl-$$"
 CREE=0
+CREE_D=0
+PID_DAEMON=""
+COURSE=""
+# `ip netns del` ne tue rien: il retire le NOM, et ce qui tourne dans le
+# namespace continue de vivre, invisible a `ip netns list`. On releve donc les
+# PID du namespace AVANT de le retirer, on les tue par PID (jamais par nom: un
+# motif de nom atteint les processus de l'hote), puis on compte ce qui vit
+# encore dans le namespace par son inode, qui survit au nom.
+retirer_netns() {
+  local ns=$1 inode pid reste
+  inode=$(stat -L -c %i "/run/netns/$ns")
+  for pid in $(ip netns pids "$ns"); do kill "$pid" 2>/dev/null || true; done
+  for _ in $(seq 1 20); do
+    if [ -z "$(ip netns pids "$ns")" ]; then break; fi
+    sleep 0.25
+  done
+  for pid in $(ip netns pids "$ns"); do kill -KILL "$pid" 2>/dev/null || true; done
+  ip netns del "$ns"
+  reste=0
+  for pid in /proc/[0-9]*; do
+    if [ "$(stat -L -c %i "$pid/ns/net" 2>/dev/null)" = "$inode" ]; then
+      reste=$((reste + 1))
+    fi
+  done
+  echo "orphelins apres retrait du namespace $ns: $reste"
+  [ "$reste" = 0 ]
+}
 nettoyer() {
   local code=$?
   if [ "$code" != 0 ]; then
-    for rapport in match ecart refus vide politique; do
+    for rapport in match ecart refus vide politique decl; do
       if [ -f "$BAC/$rapport.json" ]; then cat "$BAC/$rapport.json"; fi
     done
+    for journal in connect.log daemon.log; do
+      if [ -f "$BAC/$journal" ]; then tail -n 30 "$BAC/$journal"; fi
+    done
   fi
-  if [ "$CREE" = 1 ]; then ip netns del "$NS" || true; fi
+  if [ -n "$COURSE" ]; then kill "$COURSE" 2>/dev/null || true; wait "$COURSE" 2>/dev/null || true; fi
+  if [ -n "$PID_DAEMON" ]; then
+    kill "$PID_DAEMON" 2>/dev/null || true
+    wait "$PID_DAEMON" 2>/dev/null || true
+  fi
+  if [ "$CREE_D" = 1 ]; then retirer_netns "$NSD" || code=1; fi
+  if [ "$CREE" = 1 ]; then retirer_netns "$NS" || code=1; fi
   rm -rf -- "$BAC"
-  return "$code"
+  exit "$code"
 }
 trap nettoyer EXIT
 cp "$CLI" "$BAC/bifrost-cli"
 CLI="$BAC/bifrost-cli"
-chmod 755 "$BAC" "$CLI"
+cp "$DAEMON" "$BAC/bifrost-daemon"
+DAEMON="$BAC/bifrost-daemon"
+chmod 755 "$BAC" "$CLI" "$DAEMON"
 ip netns add "$NS"
 CREE=1
 # Sans interface physique ni veth: aucun trafic ne peut sortir de ce namespace.
@@ -115,3 +156,245 @@ ip netns exec "$NS" "$CLI" --json prove nft --politique "$BAC/intention.json" --
 test "$CODE" = 1
 jq -e '.verdict == "MISMATCH" and (.differences | index("rules") != null)' "$BAC/politique.json" >/dev/null
 echo 'PASSED: table tierce et permis ajoute detectes contre le plan produit'
+
+# --- D1b.3b: l'attendu est ce que le VRAI daemon declare avoir pose ---
+#
+# Le daemon tourne dans un second namespace jetable, sans veth: rien n'en sort.
+# L'etat choisi est le moins cher ou il pose une politique reelle: un profil a
+# coeur dont le binaire manque. Le kill switch est arme AVANT le lancement du
+# coeur, le lancement echoue sans etre retente, et le daemon reste en erreur,
+# kill switch arme. Le tunnel ne monte jamais, donc le DNS de l'hote (partage
+# par tous les namespaces via resolvectl ou /etc/resolv.conf) n'est jamais
+# touche: c'est la raison de ce choix, et pas seulement son cout.
+ip netns add "$NSD"
+CREE_D=1
+ip netns exec "$NSD" ip link set lo up
+SOCKET="$BAC/daemon.sock"
+# Le groupe 65534 porte un nom different selon la distribution.
+GROUPE=$(getent group 65534 | cut -d: -f1)
+test -n "$GROUPE"
+mkdir "$BAC/coeurs-vides" "$BAC/configurations"
+# Adresses de documentation (RFC 5737): elles ne designent aucune machine.
+cat > "$BAC/profil.toml" <<'TOML'
+interface = "bfdecl0"
+addresses = ["198.51.100.2/32"]
+
+[[coeurs]]
+etiquette = "injoignable"
+transport = { transport = "vless-websocket", serveur = "192.0.2.10", port = 443, uuid = "00000000-0000-4000-8000-000000000000", nom_de_serveur = "exemple.test", hote = "exemple.test", chemin = "/banc" }
+
+[dns]
+local_resolver = "127.0.0.1"
+upstream = ["198.51.100.53"]
+TOML
+# Le client refuse un profil lisible par d'autres: il porte des secrets.
+chmod 600 "$BAC/profil.toml"
+ip netns exec "$NSD" "$DAEMON" --socket "$SOCKET" --group "$GROUPE" \
+  --coeurs-dans "$BAC/coeurs-vides" --coeurs-configurations "$BAC/configurations" \
+  --facade 127.0.0.1:1081 --coeur-utilisateur 65534:65534 \
+  > "$BAC/daemon.log" 2>&1 &
+PID_DAEMON=$!
+for _ in $(seq 1 40); do
+  if [ -S "$SOCKET" ]; then break; fi
+  kill -0 "$PID_DAEMON"
+  sleep 0.25
+done
+test -S "$SOCKET"
+# `ip netns exec` fait exec: le PID releve EST le daemon, et il est dans NOTRE
+# namespace. Sans cette verification, la suite pourrait tuer un autre processus.
+ip netns pids "$NSD" | grep -qx "$PID_DAEMON"
+
+prouver() {
+  local sortie=$1
+  shift
+  CODE=0
+  ip netns exec "$NSD" "$@" "$CLI" --json --socket "$SOCKET" prove nft --politique-daemon --actif \
+    > "$BAC/$sortie.json" || CODE=$?
+}
+# Rien de la declaration ne sort: ni UID, ni interface, ni resolveur, ni numero.
+# Les horodatages sont retires avant la recherche, ou ils finiraient par
+# contenir un de ces nombres par coincidence.
+#
+# Pas de `! commande` ici ni plus bas: sous `set -e`, une commande inversee
+# n'arrete JAMAIS le script, meme quand l'inversion echoue.
+muet() {
+  jq -e 'has("application") or has("instance") or has("politique") | not' "$BAC/$1.json" >/dev/null
+  if jq 'del(.started_at_unix_ms, .completed_at_unix_ms, .duration_ms)' "$BAC/$1.json" \
+    | grep -F -e 65534 -e bfdecl0 -e 127.0.0.1 -e 198.51.100 >/dev/null; then
+    echo "le rapport exporte un parametre de la declaration" >&2
+    return 1
+  fi
+}
+correspond() {
+  prouver decl
+  test "$CODE" = 0
+  jq -e '.verdict == "MATCH" and .schema_version == 1 and .expected_source == "daemon-declared-active-policy" and .policy_schema_version == 1 and .live_kernel and .generation_verified and .network_security == "not-evaluated" and .failed_input == null' "$BAC/decl.json" >/dev/null
+  muet decl
+}
+ecart() {
+  prouver decl
+  test "$CODE" = 1
+  jq -e --arg d "$1" '.verdict == "MISMATCH" and .expected_source == "daemon-declared-active-policy" and .generation_verified and (.differences | index($d) != null)' "$BAC/decl.json" >/dev/null
+  muet decl
+}
+non_mesure() {
+  local raison=$1
+  shift
+  prouver decl "$@"
+  test "$CODE" = 2
+  jq -e --arg r "$raison" '.verdict == "UNMEASURED" and .reason == $r and .expected_source == "daemon-declared-active-policy"' "$BAC/decl.json" >/dev/null
+  muet decl
+}
+# Une reprise est asynchrone: le daemon la range et repose plus tard. On attend
+# que la table CHANGE (sans compteurs), puis une seule preuve doit correspondre:
+# la declaration est servie par le fil qui applique, donc aucune lecture ne
+# peut tomber entre la pose et sa note.
+reposer() {
+  local avant
+  avant=$(ip netns exec "$NSD" nft -s list table inet bifrost)
+  ip netns exec "$NSD" "$CLI" --socket "$SOCKET" reprise --phase post --operation suspend 2>/dev/null
+  for _ in $(seq 1 40); do
+    if [ "$(ip netns exec "$NSD" nft -s list table inet bifrost)" != "$avant" ]; then return 0; fi
+    sleep 0.25
+  done
+  echo "le daemon n'a pas repose sa politique apres la reprise" >&2
+  return 1
+}
+# Handle de la premiere regle de la chaine output dont l'expression satisfait
+# le filtre jq donne.
+handle() {
+  ip netns exec "$NSD" nft -j list chain inet bifrost output \
+    | jq -r "[.nftables[] | select(.rule) | .rule | select($1) | .handle][0]"
+}
+
+non_mesure 'aucune politique posee par ce daemon depuis son demarrage'
+test -z "$(ip netns exec "$NSD" nft list ruleset)"
+echo 'PASSED: daemon neuf, aucune politique declaree, rien de compare'
+
+# L'echec attendu, et pour SA raison: un refus du client (droits du profil,
+# lecture) laisserait le daemon deconnecte, et la suite ne mesurerait rien.
+CODE=0
+ip netns exec "$NSD" "$CLI" --socket "$SOCKET" connect --config "$BAC/profil.toml" > "$BAC/connect.log" 2>&1 || CODE=$?
+test "$CODE" != 0
+grep -qF 'coeur introuvable' "$BAC/connect.log"
+ip netns exec "$NSD" "$CLI" --json --socket "$SOCKET" status \
+  | jq -e '.state.state == "error" and .kill_switch_engaged' >/dev/null
+ip netns exec "$NSD" nft --json --numeric list ruleset > "$BAC/avant.json"
+correspond
+ip netns exec "$NSD" nft --json --numeric list ruleset > "$BAC/apres.json"
+cmp "$BAC/avant.json" "$BAC/apres.json"
+echo 'PASSED: etat erreur, kill switch pose par le daemon, correspondance sans mutation'
+
+# Regle retiree: le drop du :53 du coeur, celui qui l'empeche de resoudre en clair.
+H=$(handle 'any(.expr[]; .match.left.meta.key? == "skuid") and any(.expr[]; has("drop"))')
+test "$H" != null
+ip netns exec "$NSD" nft delete rule inet bifrost output handle "$H"
+ecart rules
+reposer
+correspond
+# La reprise en etat erreur repose une politique qui nomme l'interface du
+# profil: la declaration a suivi ce que le daemon a REELLEMENT pose.
+ip netns exec "$NSD" nft list chain inet bifrost output | grep -qF 'oifname "bfdecl0" accept'
+echo 'PASSED: regle retiree -> ecart; reprise -> la declaration suit la nouvelle pose'
+
+# Exception trop large: l'exemption du coeur devient celle de tout non-root.
+H=$(handle '(.expr | length) == 2 and .expr[0].match.left.meta.key? == "skuid" and (.expr[1] | has("accept"))')
+test "$H" != null
+ip netns exec "$NSD" nft replace rule inet bifrost output handle "$H" meta skuid '!=' 0 accept
+ecart rules
+reposer
+correspond
+echo 'PASSED: exception elargie -> ecart'
+
+# Filtre tiers prioritaire: une table etrangere accepte tout avant la notre.
+ip netns exec "$NSD" nft -f - <<'NFT'
+table inet tiers {
+  chain sortie {
+    type filter hook output priority -10; policy accept;
+    accept
+  }
+}
+NFT
+ecart tables
+ip netns exec "$NSD" nft delete table inet tiers
+correspond
+echo 'PASSED: filtre tiers prioritaire -> ecart'
+
+# Interface remplacee: le tunnel accepte vers une autre interface.
+H=$(handle '.expr[0].match.left.meta.key? == "oifname" and .expr[0].match.right == "bfdecl0"')
+test "$H" != null
+ip netns exec "$NSD" nft replace rule inet bifrost output handle "$H" oifname '"autre0"' accept
+ecart rules
+reposer
+correspond
+echo 'PASSED: interface remplacee -> ecart'
+
+# Droits retires, trois fois. Membre du groupe du daemon mais sans droit noyau:
+# la declaration est lue, le noyau ne l'est pas.
+non_mesure 'acces noyau refuse; aucune elevation automatique' \
+  setpriv --reuid=65534 --regid=65534 --clear-groups
+jq -e '.failed_input == "observed" and (.live_kernel | not)' "$BAC/decl.json" >/dev/null
+# Hors du groupe: le systeme de fichiers refuse le socket (0660).
+non_mesure 'acces au daemon refuse' setpriv --reuid=65533 --regid=65533 --clear-groups
+# Socket ouvert a tous le temps d'une preuve: c'est alors le daemon lui-meme
+# (SO_PEERCRED) qui refuse, et son journal le dit.
+chmod 0666 "$SOCKET"
+non_mesure 'acces au daemon refuse' setpriv --reuid=65533 --regid=65533 --clear-groups
+chmod 0660 "$SOCKET"
+grep -qF 'connexion refusee' "$BAC/daemon.log"
+echo 'PASSED: droits retires -> non mesure, cote noyau comme cote daemon'
+
+# Course: trente reprises concurrentes. Chaque preuve rend une correspondance ou
+# un non mesure explique; jamais un ecart, puisque rien ne s'ecarte de ce qui
+# est declare, seulement un attendu qui bouge pendant la lecture.
+(
+  for _ in $(seq 1 30); do
+    ip netns exec "$NSD" "$CLI" --socket "$SOCKET" reprise --phase post --operation suspend 2>/dev/null
+    sleep 0.02
+  done
+) &
+COURSE=$!
+VUS_M=0
+VUS_U=0
+for _ in $(seq 1 15); do
+  prouver course
+  case "$CODE" in
+    0) VUS_M=$((VUS_M + 1)) ;;
+    2)
+      jq -e '.reason == "declaration du daemon modifiee pendant la collecte" or .reason == "generation nft modifiee pendant la collecte"' "$BAC/course.json" >/dev/null
+      VUS_U=$((VUS_U + 1))
+      ;;
+    *) cat "$BAC/course.json"; exit 1 ;;
+  esac
+done
+wait "$COURSE"
+COURSE=""
+for _ in $(seq 1 20); do
+  prouver decl
+  if [ "$CODE" = 0 ]; then break; fi
+  sleep 0.25
+done
+correspond
+echo "PASSED: course de reprises -> $VUS_M correspondances, $VUS_U non mesures, aucun ecart"
+
+ip netns exec "$NSD" "$CLI" --socket "$SOCKET" disconnect >/dev/null
+if ip netns exec "$NSD" nft list table inet bifrost >/dev/null 2>&1; then
+  echo "la table du kill switch a survecu a la deconnexion" >&2
+  exit 1
+fi
+non_mesure 'kill switch retire par le daemon: aucune politique a comparer'
+echo 'PASSED: deconnexion -> retrait declare, rien de compare'
+
+CODE=0
+ip netns exec "$NSD" "$CLI" --socket "$SOCKET" connect --config "$BAC/profil.toml" > "$BAC/connect.log" 2>&1 || CODE=$?
+test "$CODE" != 0
+grep -qF 'coeur introuvable' "$BAC/connect.log"
+correspond
+kill "$PID_DAEMON"
+wait "$PID_DAEMON" || true
+PID_DAEMON=""
+# Le daemon arrete laisse son kill switch en place, et c'est voulu; la preuve,
+# elle, n'a plus d'attendu et ne conclut pas.
+ip netns exec "$NSD" nft list table inet bifrost >/dev/null
+non_mesure 'daemon injoignable'
+echo 'PASSED: daemon arrete -> non mesure, la table restee en place n est pas une correspondance'

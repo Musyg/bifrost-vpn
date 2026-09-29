@@ -13,10 +13,11 @@ use std::time::{Duration, Instant, SystemTime};
 
 use bifrost_core::checks::CheckReport;
 use bifrost_core::config::Portage;
-use bifrost_core::ports::{DnsManager, KillSwitch, TunnelDevice};
+use bifrost_core::ports::{DnsManager, FirewallPolicy, KillSwitch, TunnelDevice};
 use bifrost_core::profil::{Profil, Profils};
 use bifrost_core::state::{Action, Event, State, StateMachine, TunnelStatus};
 use bifrost_core::{Error, Result, TunnelConfig};
+use bifrost_ipc::protocol::{DECLARATION_PARE_FEU_VERSION, DeclarationPareFeu, IssueApplication};
 
 use bifrost_evasion::course::{Course, Echec, Pas};
 use bifrost_evasion::observation::{self, Echantillon, Observateur, Perte, Sonde, Verdict};
@@ -74,6 +75,10 @@ pub enum Cmd {
     Disconnect(Reply<Result<()>>),
     Status(Reply<TunnelStatus>),
     Check(Reply<CheckReport>),
+    /// Ce que le superviseur a retenu de son dernier appel au moteur de
+    /// pare-feu. Servi sur CE thread, celui qui appelle le moteur: une lecture
+    /// ne peut donc jamais tomber au milieu d'une application.
+    Declaration(Reply<DeclarationPareFeu>),
     /// La machine sort d'une mise en veille. Sans reponse: personne n'attend
     /// derriere, et la source est un rappel du systeme qui ne doit surtout pas
     /// se retrouver a attendre le superviseur.
@@ -129,6 +134,77 @@ impl Resolveur {
             identite,
             atelier,
             ..Default::default()
+        }
+    }
+}
+
+/// Ce que le dernier appel au moteur de pare-feu a laisse.
+enum Retenue {
+    Aucune,
+    /// La politique EXACTE remise au moteur, apres que le superviseur l'a
+    /// completee (handle du tunnel, identite du coeur, restriction du
+    /// resolveur), et que le moteur a acceptee.
+    Posee(Box<FirewallPolicy>),
+    Retiree,
+    /// Le moteur a refuse. On ne garde PAS la politique precedente: rien ne
+    /// dit ce que le noyau porte apres un refus, et la declarer encore serait
+    /// pretendre le savoir.
+    Echec,
+}
+
+/// La declaration que `Command::DeclarationPareFeu` rend.
+///
+/// Ecrite au seul endroit ou le superviseur appelle le moteur (`apply`), avec
+/// ce qu'il lui a passe et ce que le moteur a repondu. Rien n'y est recalcule
+/// depuis le profil ou l'etat: une politique recalculee pourrait differer de
+/// celle qui a ete posee, sans que la preuve le voie.
+struct Declaration {
+    instance: String,
+    application: u64,
+    retenue: Retenue,
+}
+
+impl Declaration {
+    fn nouvelle() -> Self {
+        // Sans alea, une instance vide: la preuve la refuse comme hors schema
+        // et rend NON MESURE, ce qui vaut mieux qu'un identifiant constant qui
+        // confondrait deux vies du daemon.
+        let instance = crate::coeurs::alea::secret().unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "instance de declaration sans alea");
+            String::new()
+        });
+        Self {
+            instance,
+            application: 0,
+            retenue: Retenue::Aucune,
+        }
+    }
+
+    /// Chaque appel au moteur compte, reussi ou non: deux lectures qui voient
+    /// le meme numero n'ont vu passer aucun appel entre elles. 2^64 appels
+    /// sont hors de portee, d'ou la saturation plutot qu'un debordement.
+    fn noter(&mut self, retenue: Retenue) {
+        self.application = self.application.saturating_add(1);
+        self.retenue = retenue;
+    }
+
+    fn publier(&self, moteur: &str) -> DeclarationPareFeu {
+        let (issue, politique) = match &self.retenue {
+            Retenue::Aucune => (IssueApplication::Aucune, None),
+            Retenue::Posee(p) => (
+                IssueApplication::Posee,
+                serde_json::to_value(bifrost_firewall::politique_nft::Politique::projeter(p)).ok(),
+            ),
+            Retenue::Retiree => (IssueApplication::Retiree, None),
+            Retenue::Echec => (IssueApplication::Echec, None),
+        };
+        DeclarationPareFeu {
+            schema_version: DECLARATION_PARE_FEU_VERSION,
+            instance: self.instance.clone(),
+            application: self.application,
+            moteur: moteur.to_owned(),
+            issue,
+            politique,
         }
     }
 }
@@ -236,6 +312,9 @@ pub struct Supervisor {
     /// monte, donc la route par defaut est la sienne, et la cle decrirait le
     /// tunnel au lieu du reseau. Voir le commentaire en tete de `connect`.
     cle: Option<CleReseau>,
+    /// Ce que le dernier appel au moteur de pare-feu a laisse, pour
+    /// `Command::DeclarationPareFeu`. Voir [`Declaration`].
+    declaration: Declaration,
 }
 
 /// Comment le superviseur tient le carnet des reseaux.
@@ -612,6 +691,7 @@ impl Supervisor {
             pending: VecDeque::new(),
             retry_at: None,
             last_error: None,
+            declaration: Declaration::nouvelle(),
         }
     }
 
@@ -632,6 +712,9 @@ impl Supervisor {
                 }
                 Ok(Cmd::Check(reply)) => {
                     let _ = reply.send(crate::checks::run_all());
+                }
+                Ok(Cmd::Declaration(reply)) => {
+                    let _ = reply.send(self.declaration());
                 }
                 Ok(Cmd::VerdictTls(intercepte)) => {
                     self.noter_le_verdict_tls(intercepte);
@@ -1249,6 +1332,13 @@ impl Supervisor {
         }
     }
 
+    /// La declaration retenue, sans rien interroger: ni le moteur, ni le
+    /// noyau, ni l'etat. `&self` le garantit au compilateur, et c'est le sens
+    /// de la commande: dire ce qui a ete demande, laisser le noyau a la preuve.
+    fn declaration(&self) -> DeclarationPareFeu {
+        self.declaration.publier(self.firewall.backend())
+    }
+
     fn status(&mut self) -> TunnelStatus {
         let engaged = self.firewall.is_engaged().unwrap_or(false);
         let cfg = self.machine.config().cloned();
@@ -1600,11 +1690,24 @@ impl Supervisor {
                 // application choisit son propre resolveur a travers le tunnel.
                 self.resolveur.identite.restreindre(&mut policy);
 
-                self.firewall.engage(&policy)?;
+                // Retenue ICI, apres la derniere retouche et avec la reponse
+                // du moteur: c'est l'objet meme que le moteur a recu, pas une
+                // copie reconstruite, et un refus n'est jamais note comme pose.
+                let pose = self.firewall.engage(&policy);
+                self.declaration.noter(match pose {
+                    Ok(()) => Retenue::Posee(policy),
+                    Err(_) => Retenue::Echec,
+                });
+                pose?;
                 Ok(Vec::new())
             }
             Action::DisengageKillSwitch => {
-                self.firewall.disengage()?;
+                let retrait = self.firewall.disengage();
+                self.declaration.noter(match retrait {
+                    Ok(()) => Retenue::Retiree,
+                    Err(_) => Retenue::Echec,
+                });
+                retrait?;
                 Ok(Vec::new())
             }
             Action::BringTunnelUp(cfg) => {
@@ -3799,6 +3902,177 @@ mod tests {
             derniere.coeur_uid, derniere.resolveur_uid,
             "le resolveur a herite de l'exemption du coeur"
         );
+    }
+
+    /// Kill switch de doublure qui accepte ses `acceptes` premiers appels,
+    /// armement ou desarmement, puis refuse tout: de quoi placer un refus du
+    /// moteur APRES une pose reussie, le seul cas ou une declaration pourrait
+    /// garder par erreur la politique precedente.
+    struct KillSwitchQuiCede {
+        acceptes: usize,
+        vues: Arc<Mutex<Vec<FirewallPolicy>>>,
+    }
+
+    impl KillSwitchQuiCede {
+        fn accepter(&mut self) -> Result<()> {
+            if self.acceptes == 0 {
+                return Err(Error::Firewall("refus de la doublure".into()));
+            }
+            self.acceptes -= 1;
+            Ok(())
+        }
+    }
+
+    impl KillSwitch for KillSwitchQuiCede {
+        fn engage(&mut self, policy: &FirewallPolicy) -> Result<()> {
+            self.accepter()?;
+            self.vues.lock().unwrap().push(policy.clone());
+            Ok(())
+        }
+        fn disengage(&mut self) -> Result<()> {
+            self.accepter()
+        }
+        fn is_engaged(&self) -> Result<bool> {
+            Ok(false)
+        }
+        fn backend(&self) -> &'static str {
+            "faux"
+        }
+    }
+
+    fn superviseur_declarant(firewall: Box<dyn KillSwitch>) -> Supervisor {
+        Supervisor::new(
+            firewall,
+            Box::new(FauxTunnel {
+                luid: Some(0xdead_beef),
+            }),
+            Box::new(FauxDns),
+            identite(),
+            Resolveur {
+                identite: identite_resolveur(),
+                verification: |_| Ok(()),
+                ..Default::default()
+            },
+            Equipement {
+                decision: Decision::default(),
+                carnetier: carnetier_muet(),
+                atelier: None,
+                chemin_coeur: None,
+            },
+        )
+    }
+
+    fn cfg_embarque() -> Box<TunnelConfig> {
+        let mut c = cfg();
+        c.dns.embarque = true;
+        c
+    }
+
+    fn projection(p: &FirewallPolicy) -> serde_json::Value {
+        serde_json::to_value(bifrost_firewall::politique_nft::Politique::projeter(p)).unwrap()
+    }
+
+    /// Avant tout appel au moteur, le daemon ne declare rien, et le dit.
+    #[test]
+    fn un_daemon_neuf_ne_declare_aucune_politique() {
+        let d = superviseur_nu().declaration();
+        assert_eq!(d.issue, IssueApplication::Aucune);
+        assert_eq!(d.application, 0);
+        assert_eq!(d.politique, None);
+        assert_eq!(d.moteur, "faux");
+        assert_eq!(d.schema_version, DECLARATION_PARE_FEU_VERSION);
+        assert_eq!(d.instance.len(), 48);
+        assert!(d.instance.bytes().all(|o| o.is_ascii_hexdigit()));
+        // Deux vies du daemon ne se confondent pas, meme a numero egal.
+        assert_ne!(d.instance, superviseur_nu().declaration().instance);
+    }
+
+    /// Le coeur de la tranche: la declaration est la politique que le moteur a
+    /// RECUE, pas une politique recalculee depuis le profil.
+    ///
+    /// Le moteur de doublure note ce qu'il recoit; la declaration doit en etre
+    /// la projection exacte, y compris ce que seul le superviseur ajoute au
+    /// moment d'agir (identite du coeur, restriction du resolveur, interface du
+    /// tunnel au second armement). Une politique recalculee depuis la
+    /// configuration n'aurait aucun des trois, et la derniere assertion le
+    /// verifie pour que la recette ne passe pas par coincidence.
+    #[test]
+    fn la_declaration_est_la_politique_meme_que_le_moteur_a_recue() {
+        let vues = Arc::new(Mutex::new(Vec::new()));
+        let mut sup = superviseur_declarant(Box::new(FauxKillSwitch { vues: vues.clone() }));
+        sup.connect(cfg_embarque()).expect("connexion");
+        let vues = vues.lock().unwrap().clone();
+        assert_eq!(vues.len(), 2, "deux armements attendus: {vues:?}");
+        let d = sup.declaration();
+        assert_eq!(d.issue, IssueApplication::Posee);
+        assert_eq!(d.application, 2);
+        let politique = d.politique.expect("une politique posee est jointe");
+        assert_eq!(politique, projection(&vues[1]));
+        assert_eq!(politique["coeur_uid"], 977);
+        assert_eq!(politique["resolveur_uid"], 981);
+        assert_eq!(politique["tunnel_interface"], "wg0");
+        let recalculee = FirewallPolicy::from_config(&cfg_embarque());
+        assert_ne!(politique, projection(&recalculee));
+    }
+
+    /// Un refus du moteur n'est jamais declare comme une pose, et il n'herite
+    /// pas non plus de la politique precedente: apres un refus, le daemon ne
+    /// sait pas ce que porte le noyau.
+    #[test]
+    fn un_refus_du_moteur_n_est_jamais_declare_pose() {
+        let vues = Arc::new(Mutex::new(Vec::new()));
+        let mut sup = superviseur_declarant(Box::new(KillSwitchQuiCede {
+            acceptes: 1,
+            vues: vues.clone(),
+        }));
+        let _ = sup.connect(cfg_embarque());
+        assert_eq!(vues.lock().unwrap().len(), 1, "une seule pose acceptee");
+        let d = sup.declaration();
+        assert_eq!(d.issue, IssueApplication::Echec);
+        assert_eq!(d.application, 2, "le refus compte comme un appel");
+        assert_eq!(d.politique, None);
+
+        // Meme exigence pour le retrait: un desarmement refuse n'est pas un
+        // retrait, et la politique d'avant n'est pas redeclaree.
+        let mut sup = superviseur_declarant(Box::new(KillSwitchQuiCede {
+            acceptes: 2,
+            vues: Arc::new(Mutex::new(Vec::new())),
+        }));
+        sup.connect(cfg_embarque()).expect("connexion");
+        let _ = sup.disconnect();
+        let d = sup.declaration();
+        assert_eq!(d.issue, IssueApplication::Echec);
+        assert_eq!(d.application, 3);
+        assert_eq!(d.politique, None);
+    }
+
+    /// Une deconnexion declare le retrait, avec son propre numero.
+    #[test]
+    fn une_deconnexion_declare_le_retrait() {
+        let vues = Arc::new(Mutex::new(Vec::new()));
+        let mut sup = superviseur_declarant(Box::new(FauxKillSwitch { vues: vues.clone() }));
+        sup.connect(cfg_embarque()).expect("connexion");
+        // Le resultat est ignore: la doublure se dit armee des qu'elle a vu une
+        // politique, retrait ou non, et `disconnect` le relit apres coup. Ce
+        // qui est mesure ici est ce que le superviseur a note du retrait.
+        let _ = sup.disconnect();
+        let d = sup.declaration();
+        assert_eq!(d.issue, IssueApplication::Retiree);
+        assert_eq!(d.application, 3);
+        assert_eq!(d.politique, None);
+    }
+
+    /// Lire ne compte pas: ni appel au moteur, ni numero qui avance.
+    #[test]
+    fn lire_la_declaration_ne_change_rien() {
+        let vues = Arc::new(Mutex::new(Vec::new()));
+        let mut sup = superviseur_declarant(Box::new(FauxKillSwitch { vues: vues.clone() }));
+        sup.connect(cfg_embarque()).expect("connexion");
+        let avant = vues.lock().unwrap().len();
+        let premiere = sup.declaration();
+        let seconde = sup.declaration();
+        assert_eq!(premiere, seconde);
+        assert_eq!(vues.lock().unwrap().len(), avant);
     }
 
     #[test]

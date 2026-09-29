@@ -25,9 +25,9 @@ La CI automatique couvre Linux; Windows est lance uniquement sur demande
 Windows saute n'atteste rien sur cette plateforme. Voir le README pour le
 lancement avant une livraison Windows et la revision effectivement mesuree.
 
-Les comptes ci-dessous ont ete pris le 29/09/2026 apres le portage des
-corrections du tableau de survie et des abstentions; ils comptent les recettes
-de `prove` jusqu'a D1b.3a. L'hote qui tient le role `essai-linux` a change le
+Les comptes ci-dessous ont ete pris le 29/09/2026 sur l'arbre qui porte le
+portage des corrections du tableau de survie et des abstentions, puis D1b.3b;
+ils comptent les recettes de `prove` jusqu'a D1b.3b. L'hote qui tient le role `essai-linux` a change le
 29/09: ses comptes ne se comparent pas a ceux d'avant cette date.
 
 Compte honnete des recettes cargo, par hote. La colonne `reelles` est ce qui a
@@ -35,11 +35,12 @@ verifie quelque chose: `annoncees` moins `abstentions` moins `rouges`.
 
 | Hote | Annoncees | Abstentions | Rouges | Reelles |
 |---|---|---|---|---|
-| dev-windows | 1259 | 19 | 0 | 1240 |
-| essai-linux | 1264 | 26 | 0 | 1238 |
+| dev-windows | 1270 | 19 | 0 | 1251 |
+| essai-linux | 1286 | 26 | 0 | 1260 |
 
 Les deux lignes ont ete prises par `scripts/recettes-strict.sh`, chacune sur son
-hote, avant et apres le portage: +14 recettes des deux cotes. Sur `essai-linux`
+hote: le portage a ajoute 14 recettes des deux cotes, D1b.3b 11 sur
+dev-windows et 22 sur `essai-linux`. Sur `essai-linux`
 une recette de plus est ignoree par construction
 (elle pose une route et ne tourne qu'en espace de noms reseau), et la garde des
 modes de scripts s'y abstient parce que la copie mesuree n'a pas de `.git` (elle
@@ -59,7 +60,7 @@ la prochaine action. Une cellule vide signalerait une tranche non finie.
 | 05 | Anonymat et chainage. Document redige; le chainage Tor et Nym n'est pas commence, et le document lui-meme le place apres les trois objectifs | Chainage Tor ou Nym, apres les objectifs 1 a 3 |
 | 06 | Architecture logicielle et packaging. Daemon, IPC authentifie, machine a etats et scripts d'installation faits (Linux et Windows, comptes dedies, ACL); ni interface graphique, ni MSI, ni .deb/.rpm, ni mise a jour TUF, ni provisioning; SBOM en CI | Interface graphique en jalon propre apres J2; paquets signes et mise a jour TUF |
 | 07 | Programme de securite produit. fmt, clippy, recettes, suite de fuite, cargo audit, cargo deny et SBOM en CI; politique de divulgation publiee (SECURITY.md, security.txt); inventaire unsafe ferme; cargo vet et fuzz absents, aucune cle PGP | Publier une cle PGP (champ Encryption); ajouter cargo vet et un harnais fuzz |
-| 09 | Souverainete verifiable. D1a: `prove binaire`. D1b.1: comparaison nft hors ligne. D1b.2: collecte Linux passive encadree par GETGEN. D1b.3a: `prove nft --politique` engendre la reference produit depuis une intention v1 explicite; 64 combinaisons confrontees au rendu applique en banc jetable. Ni preuve globale du VPN ni validation Windows | D1b.3b: liaison de l'intention au profil actif, objets nft restants et collecte WFP |
+| 09 | Souverainete verifiable. D1a: `prove binaire`. D1b.1: comparaison nft hors ligne. D1b.2: collecte Linux passive encadree par GETGEN. D1b.3a: `prove nft --politique` engendre la reference produit depuis une intention v1 explicite; 64 combinaisons confrontees au rendu applique en banc jetable. D1b.3b: `prove nft --politique-daemon --actif` prend pour attendu la politique que le daemon declare avoir posee (requete IPC en lecture, relue avant et apres la collecte); daemon reel en banc jetable: correspondance, quatre alterations en ecart, droits retires et daemon arrete non mesures. Ni preuve globale du VPN ni validation Windows | D1b.3c: authentification du daemon par le client, objets nft hors perimetre, collecte WFP |
 
 ## Scripts
 
@@ -73,7 +74,7 @@ Sous `scripts/`:
 | recettes-strict.sh | Compte honnete des recettes cargo (vertes, abstentions, rouges); `--strict` echoue aussi sur abstention |
 | abstentions-budget.sh | Exige que chaque abstention de la CI figure dans la liste attendue du job |
 | check-strict.sh | Exige que les dix vecteurs de fuite soient PASSED |
-| preuve-nft-linux.sh | Collecte nft passive, ecart et refus de privileges dans un namespace jetable; sudo bash ./scripts/preuve-nft-linux.sh |
+| preuve-nft-linux.sh | Collecte nft passive, ecart, refus de privileges et confrontation a la declaration d'un daemon reel, dans des namespaces jetables (apres cargo build --workspace); sudo bash ./scripts/preuve-nft-linux.sh |
 | check-cibles.sh | Construit et verifie les cibles sur l'hote courant |
 | e2e-linux.sh | Bout en bout Linux: daemon reel, capture, montee du tunnel et etancheite |
 | banc-coeur-e2e.sh | Banc bout en bout d'un coeur anti-censure |

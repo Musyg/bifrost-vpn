@@ -258,10 +258,21 @@ mod imp {
         }
 
         pub async fn request(&mut self, request: &Request) -> Result<Response> {
+            let bytes = self.request_raw(request).await?;
+            Ok(serde_json::from_slice(&bytes)?)
+        }
+
+        /// La reponse telle qu'elle est arrivee, sans la desserialiser.
+        ///
+        /// Pour un lecteur qui doit refuser ce que serde accepte en silence
+        /// (cle dupliquee, cle inconnue d'une variante): la preuve nft relit
+        /// la declaration du daemon avec son propre analyseur strict. Le
+        /// cadrage reste celui de `request`, borne a `MAX_FRAME_BYTES`, et une
+        /// reponse sans fin de ligne est une erreur, jamais une trame.
+        pub async fn request_raw(&mut self, request: &Request) -> Result<Vec<u8>> {
             let bytes = serde_json::to_vec(request)?;
             write_frame(&mut self.writer, &bytes).await?;
-            let bytes = read_frame(&mut self.reader).await?;
-            Ok(serde_json::from_slice(&bytes)?)
+            read_frame(&mut self.reader).await
         }
     }
 }
@@ -450,10 +461,15 @@ mod imp {
         }
 
         pub async fn request(&mut self, request: &Request) -> Result<Response> {
+            let bytes = self.request_raw(request).await?;
+            Ok(serde_json::from_slice(&bytes)?)
+        }
+
+        /// Meme contrat que la version Unix: la reponse brute, cadrage borne.
+        pub async fn request_raw(&mut self, request: &Request) -> Result<Vec<u8>> {
             let bytes = serde_json::to_vec(request)?;
             write_frame(&mut self.writer, &bytes).await?;
-            let bytes = read_frame(&mut self.reader).await?;
-            Ok(serde_json::from_slice(&bytes)?)
+            read_frame(&mut self.reader).await
         }
     }
 
