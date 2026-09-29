@@ -254,8 +254,13 @@ echouer, le rapport rend UNMEASURED/2 avec sa raison.
 `expected_source=daemon-declared-active-policy` distingue cet attendu d'une
 intention fournie. Ni les parametres de la politique ni le numero d'application
 ne sont exportes. MATCH dit que le noyau porte ce que le daemon dit avoir pose:
-une declaration confrontee au noyau, pas une preuve d'etancheite du VPN, et le
-client n'authentifie pas encore le processus qui repond sur le socket.
+une declaration confrontee au noyau, pas une preuve d'etancheite du VPN.
+Avant de lire, le client exige que le processus qui ecoute sur le socket soit
+root (SO_PEERCRED); sinon le rapport rend UNMEASURED avec
+`failed_input=daemon-identity`, sans rien lui envoyer. `daemon_identity` nomme
+la regle appliquee (`root-peer-credentials`), jamais un uid. Un processus root
+qui n'est pas le daemon reste admis: la regle dit qui ecoute, pas que c'est le
+daemon.
 
 ## Tester
 

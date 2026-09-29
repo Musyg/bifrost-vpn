@@ -9,6 +9,10 @@
 //! - Le cadrage est borne. Une trame sans fin de ligne est refusee au-dela de
 //!   [`protocol::MAX_FRAME_BYTES`] plutot que de faire grossir le tampon du
 //!   daemon indefiniment.
+//!
+//! Et, dans l'autre sens, sur demande: [`IpcClient::connect_verified`] exige
+//! du SERVEUR une identite privilegiee (root par `SO_PEERCRED`, pipe
+//! appartenant a LocalSystem) avant de lui ecrire quoi que ce soit.
 
 pub mod auth;
 pub mod protocol;
@@ -16,4 +20,7 @@ pub mod transport;
 
 pub use auth::{AuthError, AuthPolicy, PeerIdentity};
 pub use protocol::{Command, Request, Response};
-pub use transport::{Connection, IpcClient, IpcError, IpcServer, default_endpoint};
+pub use transport::{
+    Connection, IpcClient, IpcError, IpcServer, ServerIdentityError, ServerRequirement, ServerRule,
+    default_endpoint,
+};

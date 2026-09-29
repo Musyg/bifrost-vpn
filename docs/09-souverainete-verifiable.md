@@ -225,9 +225,8 @@ porte `expected_source=daemon-declared-active-policy`, et
 `failed_input=daemon-declaration` quand la declaration est en cause. Il
 n'exporte ni les parametres de la politique, ni le numero, ni l'alea. Une
 correspondance dit que le noyau porte ce que le daemon dit avoir pose;
-`network_security` reste `not-evaluated`. Une declaration du daemon n'est
-jamais une observation du noyau, et le client n'authentifie pas encore le
-processus qui repond sur le socket.
+`network_security` reste `not-evaluated`. Une declaration du daemon n'est jamais une observation du noyau. Depuis D1b.3c,
+le client verifie qui la sert (voir D1b.3c).
 
 Etats du daemon sous Linux, qui n'a pas de filtre de demarrage: au demarrage,
 rien n'est pose; la connexion pose sans interface puis, interface montee, avec
@@ -248,7 +247,36 @@ UNMEASURED. Aucun processus ne survit aux namespaces. Non mesures en banc:
 etat connecte, montee de l'interface, reconnexion, chemin WireGuard (marque),
 resolveur embarque reel.
 
-#### D1b.3c - Autres objets, authentification du daemon et WFP (a faire)
+#### D1b.3c - Identite du serveur livree; autres objets et WFP (a faire)
+
+Identite du serveur de la declaration, livree. Avant d'ecrire le moindre octet,
+`prove nft --politique-daemon` exige du processus qui sert `--socket` une
+identite privilegiee (`IpcClient::connect_verified`). Linux: `SO_PEERCRED` sur
+le socket du client rend l'uid effectif du processus qui a appele `listen(2)`,
+fige a cet instant et traduit dans l'espace de noms utilisateur du client; il
+doit valoir 0 (regle `root-peer-credentials`). Le daemon tourne toujours en
+root: il le verifie avant d'ecouter, et l'unite livree n'a pas de `User=`.
+Windows: le proprietaire du pipe, lu sur la poignee du client, doit etre
+LocalSystem (regle `windows-system-pipe-owner`). Le jeton du processus serveur
+n'est pas lisible sans privilege; le proprietaire l'est, et un compte non
+privilegie ne peut ni creer un pipe possede par SYSTEM ou les Administrateurs,
+ni le lui attribuer apres coup (ERROR_INVALID_OWNER, mesure). Sinon: UNMEASURED,
+`failed_input=daemon-identity`, sans rien envoyer au serveur. Le rapport porte
+`daemon_identity`: le nom de la regle, ou `null` tant qu'elle n'est pas
+etablie; jamais un uid, un pid ou un SID.
+
+Limites: la regle dit qui ecoute, pas que c'est le daemon. Un serveur root, ou un
+pipe de LocalSystem, qui n'est pas le daemon est admis (mesure: un rejeu sous
+root correspond). Un socket d'ecoute cree par root puis confie a un autre
+processus garde les identifiants de root. Un pipe de LocalSystem dont la DACL
+laisse d'autres comptes creer des instances peut etre servi par un tiers; celui
+du daemon ne le permet pas. Un daemon Windows lance en console eleve cree un pipe
+possede par les Administrateurs et n'est pas admis. Les autres commandes de la
+CLI ne verifient pas encore le serveur.
+
+Acceptation, banc jetable: un faux daemon qui rejoue la vraie declaration sur un
+`--socket` choisi, noyau conforme, rend MATCH sous root et UNMEASURED
+`daemon-identity` sous un autre compte, sans recevoir une seule requete.
 
 Collecteurs dedies en lecture seule: enumeration WFP sur Windows. Comparer
 famille, couches/hooks, priorites, filtres, exceptions, interface, destinations
@@ -265,9 +293,9 @@ Eprouver sur machines jetables; ne pas couper le reseau du poste de travail.
 
 La collecte Linux D1b.2 encadre le dump par la generation nftables (`getgen`/`id`),
 pas par deux horodatages. Deux captures identiques seules ne prouvent pas
-l'absence d'un changement transitoire. D1b reste incomplet: sous Linux,
-l'attendu peut venir de la declaration du daemon, mais le client ne verifie pas
-encore qui la sert, les objets hors perimetre et la couverture WFP manquent. Une
+l'absence d'un changement transitoire. D1b reste incomplet: sous Linux, l'attendu peut venir de la declaration d'un serveur root, que le
+client verifie avant de la lire, mais rien n'etablit que ce serveur est le
+daemon; les objets hors perimetre et la couverture WFP manquent. Une
 intention permissive ou obsolete n'est pas rendue fiable par le fait que le
 produit sait la representer, ni par le fait que le daemon la declare.
 
