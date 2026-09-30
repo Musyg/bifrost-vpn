@@ -17,9 +17,13 @@ use bifrost_core::ports::{
     DnsManager, EnvironnementMoteur, FirewallPolicy, KillSwitch, TunnelDevice,
 };
 use bifrost_core::profil::{Profil, Profils};
+use bifrost_core::routage::{Chemin, RoutagePose};
 use bifrost_core::state::{Action, Event, State, StateMachine, TunnelStatus};
 use bifrost_core::{Error, Result, TunnelConfig};
-use bifrost_ipc::protocol::{DECLARATION_PARE_FEU_VERSION, DeclarationPareFeu, IssueApplication};
+use bifrost_ipc::protocol::{
+    CheminRoutage, DECLARATION_PARE_FEU_VERSION, DECLARATION_ROUTAGE_VERSION, DeclarationPareFeu,
+    DeclarationRoutage, EtatRoutage, IssueApplication, PlanRoutage,
+};
 
 use bifrost_evasion::course::{Course, Echec, Pas};
 use bifrost_evasion::observation::{self, Echantillon, Observateur, Perte, Sonde, Verdict};
@@ -81,6 +85,10 @@ pub enum Cmd {
     /// pare-feu. Servi sur CE thread, celui qui appelle le moteur: une lecture
     /// ne peut donc jamais tomber au milieu d'une application.
     Declaration(Reply<DeclarationPareFeu>),
+    /// Le plan de routage que le peripherique a pose en dernier. Servi sur CE
+    /// thread, celui qui fait monter et demonter le tunnel: une lecture ne peut
+    /// donc jamais tomber au milieu d'un montage.
+    DeclarationRoutage(Reply<DeclarationRoutage>),
     /// La machine sort d'une mise en veille. Sans reponse: personne n'attend
     /// derriere, et la source est un rappel du systeme qui ne doit surtout pas
     /// se retrouver a attendre le superviseur.
@@ -219,6 +227,76 @@ impl Declaration {
     }
 }
 
+/// Ce que le dernier montage/demontage a laisse comme plan de routage, pour
+/// `Command::DeclarationRoutage`.
+///
+/// Ecrit au seul endroit ou le superviseur fait monter ou demonter le tunnel
+/// (`apply`), avec ce que le PERIPHERIQUE declare avoir pose
+/// (`TunnelDevice::routage_pose`). Le superviseur n'y recalcule rien depuis le
+/// profil: le plan vient du peripherique, qui le retient de sa pose. L'alea
+/// d'instance est celui de
+/// [`Declaration`] (une seule vie du daemon); ce suivi ne tient que son propre
+/// compteur.
+struct SuiviRoutage {
+    /// Numero du dernier montage/demontage, monotone sur la vie du daemon; zero
+    /// tant que rien n'a ete pose. Chaque montage et chaque demontage
+    /// l'incremente, meme vers un plan identique: deux lectures qui voient le
+    /// meme numero n'ont vu passer aucun changement.
+    application: u64,
+    retenue: RoutagePose,
+}
+
+impl SuiviRoutage {
+    fn nouveau(retenue: RoutagePose) -> Self {
+        Self {
+            application: 0,
+            retenue,
+        }
+    }
+
+    fn noter(&mut self, retenue: RoutagePose) {
+        self.application = self.application.saturating_add(1);
+        self.retenue = retenue;
+    }
+
+    fn publier(&self, instance: String) -> DeclarationRoutage {
+        let (issue, plan) = match &self.retenue {
+            RoutagePose::NonApplicable => (EtatRoutage::NonApplicable, None),
+            RoutagePose::Aucun => (EtatRoutage::Aucun, None),
+            RoutagePose::Pose(p) => (EtatRoutage::Pose, Some(projeter_plan(p))),
+        };
+        DeclarationRoutage {
+            schema_version: DECLARATION_ROUTAGE_VERSION,
+            instance,
+            application: self.application,
+            issue,
+            plan,
+        }
+    }
+}
+
+/// La projection d'un plan pose: ce qui suffit a le reconstruire, et rien
+/// d'autre. Le chemin donne les champs derives du profil (marque et table pour
+/// WireGuard, compte pour le coeur); l'interface vient du plan.
+fn projeter_plan(plan: &bifrost_core::routage::Plan) -> PlanRoutage {
+    match plan.chemin {
+        Chemin::WireGuard { marque, table } => PlanRoutage {
+            chemin: CheminRoutage::Wireguard,
+            interface: plan.interface.clone(),
+            fwmark: Some(marque),
+            table: Some(table),
+            coeur_uid: None,
+        },
+        Chemin::Coeur { compte } => PlanRoutage {
+            chemin: CheminRoutage::Coeur,
+            interface: plan.interface.clone(),
+            fwmark: None,
+            table: None,
+            coeur_uid: compte,
+        },
+    }
+}
+
 /// La projection que lit le moteur NOMME: chaque moteur ne lit pas les memes
 /// champs, et une projection d'un autre moteur ne decrirait pas ce qui a ete
 /// pose.
@@ -351,6 +429,10 @@ pub struct Supervisor {
     /// Ce que le dernier appel au moteur de pare-feu a laisse, pour
     /// `Command::DeclarationPareFeu`. Voir [`Declaration`].
     declaration: Declaration,
+    /// Ce que le dernier montage/demontage a laisse comme plan de routage, pour
+    /// `Command::DeclarationRoutage`. Voir [`SuiviRoutage`]. Il partage l'alea
+    /// d'instance de [`Declaration`]: une seule vie du daemon.
+    routage: SuiviRoutage,
 }
 
 /// Comment le superviseur tient le carnet des reseaux.
@@ -700,6 +782,10 @@ impl Supervisor {
             ),
             None => (None, None, None, None),
         };
+        // L'etat de routage initial, lu au peripherique AVANT qu'il ne soit
+        // deplace: rien n'est encore monte, donc `aucun` (Linux) ou
+        // `non-applicable` (Windows), jamais un plan invente.
+        let routage_initial = tunnel.routage_pose();
         Self {
             machine: StateMachine::new(),
             firewall,
@@ -728,6 +814,7 @@ impl Supervisor {
             retry_at: None,
             last_error: None,
             declaration: Declaration::nouvelle(),
+            routage: SuiviRoutage::nouveau(routage_initial),
         }
     }
 
@@ -748,6 +835,9 @@ impl Supervisor {
                 }
                 Ok(Cmd::Check(reply)) => {
                     let _ = reply.send(crate::checks::run_all());
+                }
+                Ok(Cmd::DeclarationRoutage(reply)) => {
+                    let _ = reply.send(self.declaration_routage());
                 }
                 Ok(Cmd::Declaration(reply)) => {
                     let _ = reply.send(self.declaration());
@@ -1375,6 +1465,13 @@ impl Supervisor {
         self.declaration.publier(self.firewall.backend())
     }
 
+    /// Le plan de routage retenu, sans rien interroger: ni le peripherique, ni
+    /// le noyau. `&self` le garantit au compilateur. L'alea d'instance est celui
+    /// de la declaration du pare-feu: une seule vie du daemon.
+    fn declaration_routage(&self) -> DeclarationRoutage {
+        self.routage.publier(self.declaration.instance.clone())
+    }
+
     fn status(&mut self) -> TunnelStatus {
         let engaged = self.firewall.is_engaged().unwrap_or(false);
         let cfg = self.machine.config().cloned();
@@ -1757,6 +1854,12 @@ impl Supervisor {
                     self.lancer_le_coeur(profils)?;
                 }
                 self.tunnel.up(&cfg)?;
+                // Retenu ICI, apres une montee reussie et depuis le
+                // PERIPHERIQUE qui vient de poser: le plan qu'il retient de sa
+                // pose (`TunnelDevice::routage_pose`), pas un plan que le
+                // superviseur recalculerait depuis `cfg`. Un montage en echec sort
+                // par `?` avant, sans rien noter (le peripherique nettoie).
+                self.routage.noter(self.tunnel.routage_pose());
                 Ok(vec![Event::TunnelUp])
             }
             Action::BringTunnelDown(cfg) => {
@@ -1779,6 +1882,10 @@ impl Supervisor {
                     while s.ramasser().is_some() {}
                 }
                 self.tunnel.down(&cfg)?;
+                // Demonte: le peripherique ne pose plus rien, la declaration le
+                // dit. Note apres le `?`: un demontage en echec garde l'ancien
+                // plan plutot que d'annoncer un retrait qui n'a pas eu lieu.
+                self.routage.noter(self.tunnel.routage_pose());
                 Ok(Vec::new())
             }
             Action::ApplyDns(cfg) => {
@@ -2211,11 +2318,17 @@ mod tests {
 
     /// Un superviseur minimal, juste de quoi verser des compteurs.
     fn superviseur_nu() -> Supervisor {
+        superviseur_avec_tunnel(Box::new(FauxTunnel { luid: None }))
+    }
+
+    /// Le meme, mais avec un peripherique choisi: de quoi verifier ce que le
+    /// superviseur lit de sa declaration de routage.
+    fn superviseur_avec_tunnel(tunnel: Box<dyn TunnelDevice>) -> Supervisor {
         Supervisor::new(
             Box::new(FauxKillSwitch {
                 vues: Arc::new(Mutex::new(Vec::new())),
             }),
-            Box::new(FauxTunnel { luid: None }),
+            tunnel,
             Box::new(FauxDns),
             IdentiteCoeur::default(),
             Resolveur {
@@ -2229,6 +2342,101 @@ mod tests {
                 chemin_coeur: None,
             },
         )
+    }
+
+    /// Device de doublure qui declare un plan de routage pose, sans rien poser:
+    /// de quoi verifier la projection du superviseur (`SuiviRoutage`) sans noyau.
+    struct TunnelRoutant {
+        pose: RoutagePose,
+    }
+
+    impl TunnelDevice for TunnelRoutant {
+        fn up(&mut self, _cfg: &TunnelConfig) -> Result<()> {
+            Ok(())
+        }
+        fn down(&mut self, _cfg: &TunnelConfig) -> Result<()> {
+            Ok(())
+        }
+        fn handshake(
+            &self,
+            _cfg: &TunnelConfig,
+        ) -> Result<Option<bifrost_core::ports::HandshakeInfo>> {
+            Ok(None)
+        }
+        fn routage_pose(&self) -> RoutagePose {
+            self.pose.clone()
+        }
+    }
+
+    /// Le suivi du routage projette ce que le PERIPHERIQUE declare avoir pose, au
+    /// meme constructeur que le produit; son compteur monte a chaque note, et un
+    /// demontage retire le plan. Le superviseur ne recalcule rien depuis un
+    /// profil.
+    #[test]
+    fn le_suivi_du_routage_projette_le_plan_du_peripherique() {
+        // L'etat initial ne compte pas comme une application.
+        let na = SuiviRoutage::nouveau(RoutagePose::NonApplicable).publier("i".into());
+        assert_eq!(na.issue, EtatRoutage::NonApplicable);
+        assert_eq!(na.application, 0);
+        assert!(na.plan.is_none());
+        let aucun = SuiviRoutage::nouveau(RoutagePose::Aucun).publier("i".into());
+        assert_eq!(aucun.issue, EtatRoutage::Aucun);
+        assert!(aucun.plan.is_none());
+
+        // Un montage WireGuard: compteur a 1, plan projete.
+        let mut s = SuiviRoutage::nouveau(RoutagePose::Aucun);
+        s.noter(RoutagePose::Pose(bifrost_core::routage::Plan::wireguard(
+            "bfwg0", 777_001, 30_303,
+        )));
+        let d = s.publier("ff".into());
+        assert_eq!(d.application, 1);
+        assert_eq!(d.issue, EtatRoutage::Pose);
+        assert_eq!(d.instance, "ff");
+        let p = d.plan.unwrap();
+        assert_eq!(p.chemin, CheminRoutage::Wireguard);
+        assert_eq!(
+            (p.interface.as_str(), p.fwmark, p.table, p.coeur_uid),
+            ("bfwg0", Some(777_001), Some(30_303), None)
+        );
+
+        // Un demontage: compteur a 2, plan retire.
+        s.noter(RoutagePose::Aucun);
+        let d = s.publier("ff".into());
+        assert_eq!(d.application, 2);
+        assert_eq!(d.issue, EtatRoutage::Aucun);
+        assert!(d.plan.is_none());
+
+        // La projection du coeur: ni marque ni table, le compte s'il y en a un.
+        let pc = projeter_plan(&bifrost_core::routage::Plan::coeur("bftun0", Some(4242)));
+        assert_eq!(pc.chemin, CheminRoutage::Coeur);
+        assert_eq!(
+            (pc.interface.as_str(), pc.fwmark, pc.table, pc.coeur_uid),
+            ("bftun0", None, None, Some(4242))
+        );
+    }
+
+    /// A sa creation, le superviseur lit le plan que le peripherique declare
+    /// deja porter, sans le compter comme une application, et partage l'alea
+    /// d'instance avec la declaration du pare-feu.
+    #[test]
+    fn le_superviseur_lit_le_plan_initial_du_peripherique() {
+        let sup = superviseur_avec_tunnel(Box::new(TunnelRoutant {
+            pose: RoutagePose::Pose(bifrost_core::routage::Plan::wireguard(
+                "bfwg0", 777_001, 30_303,
+            )),
+        }));
+        let d = sup.declaration_routage();
+        assert_eq!(d.issue, EtatRoutage::Pose);
+        assert_eq!(d.application, 0, "l'etat initial n'est pas une application");
+        assert_eq!(d.plan.unwrap().chemin, CheminRoutage::Wireguard);
+        assert_eq!(d.instance, sup.declaration().instance);
+
+        // Un peripherique qui ne pose rien de routage (defaut du trait): non
+        // applicable, sans plan.
+        let sup = superviseur_nu();
+        let d = sup.declaration_routage();
+        assert_eq!(d.issue, EtatRoutage::NonApplicable);
+        assert!(d.plan.is_none());
     }
 
     /// Une poignee de sonde dont les deux autres bouts restent tenus.

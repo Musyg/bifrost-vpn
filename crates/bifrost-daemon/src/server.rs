@@ -104,6 +104,14 @@ async fn dispatch(command: Command, tx: &Sender<Cmd>, profil: &std::path::Path) 
             Ok(declaration) => Response::DeclarationPareFeu(Box::new(declaration)),
             Err(e) => Response::error(e),
         },
+        // Meme voie que `DeclarationPareFeu` et pour la meme raison: la reponse
+        // vient du thread qui fait monter et demonter le tunnel, donc elle ne
+        // peut pas etre lue au milieu d'un montage. Un seul controle d'acces, a
+        // l'acceptation, vaut pour toutes les commandes.
+        Command::DeclarationRoutage => match ask(tx, Cmd::DeclarationRoutage).await {
+            Ok(declaration) => Response::DeclarationRoutage(Box::new(declaration)),
+            Err(e) => Response::error(e),
+        },
         // Rien a attendre: le superviseur range le verdict et poursuit. Lui
         // demander de confirmer ferait patienter le client derriere une
         // eventuelle connexion en cours, pour une reponse qui ne peut pas

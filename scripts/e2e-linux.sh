@@ -751,6 +751,39 @@ else
   sed 's/^/        /' "$WORK/preuve.json" "$WORK/preuve.err"
 fi
 
+step "Le plan de routage que le daemon declare est celui que le noyau porte"
+# Le pendant de la preuve nft ci-dessus, sur les regles de routage et les
+# routes. Le daemon a pose son plan WireGuard (netcfg::add_routing, avec
+# l'etiquette du produit `proto 177`); `prove routes --politique-daemon` lit ce
+# que le PERIPHERIQUE declare avoir pose (commande IPC distincte de la
+# declaration du pare-feu), le reconstruit au meme constructeur que le produit,
+# et le confronte au noyau. Lecture seule des deux cotes. Le mode daemon exige
+# l'etiquette du produit sur les objets du plan: elle y est, donc MATCH, dans
+# les deux familles. Le routage est un fait du namespace RESEAU: `ip netns
+# exec` suffit, pas besoin d'entrer dans le montage du daemon.
+prouver_routes() {
+  ip netns exec "$NS_CLI" "$CLI" --socket "$SOCKET" --json prove routes \
+    --politique-daemon --actif >"$WORK/routes.json" 2>"$WORK/routes.err" || true
+  jq -e '.verdict == "MATCH"
+     and .source == "kernel-rtnetlink-read-twice"
+     and .expected_source == "daemon-declared-active-routing-plan"
+     and .tunnel_interface_present == true
+     and .daemon_identity == "root-peer-credentials"
+     and .differences == []
+     and .intention_schema_version == null
+     and .expected_counts.ipv4.product_rules >= 1
+     and .expected_counts.ipv6.product_rules >= 1
+     and .observed_counts.ipv4.product_rules_found >= 1
+     and .observed_counts.ipv6.product_rules_found >= 1' \
+    "$WORK/routes.json" >/dev/null 2>&1
+}
+if prouver_routes; then
+  ok "plan de routage declare et noyau concordent (MATCH), les deux familles"
+else
+  fail "le plan de routage declare ne concorde pas avec le noyau"
+  sed 's/^/        /' "$WORK/routes.json" "$WORK/routes.err"
+fi
+
 step "Reprise apres veille: la politique est reposee, l'etat ne bouge pas"
 # Le chemin du hook systemd-sleep, sans endormir la machine: la meme commande,
 # avec les memes arguments que systemd lui donnerait au reveil.
@@ -772,6 +805,12 @@ if prouver; then
 else
   fail "apres la reprise, la declaration ne concorde plus"
   sed 's/^/        /' "$WORK/preuve.json" "$WORK/preuve.err"
+fi
+if prouver_routes; then
+  ok "apres la reprise, plan de routage declare et noyau concordent encore"
+else
+  fail "apres la reprise, le plan de routage ne concorde plus"
+  sed 's/^/        /' "$WORK/routes.json" "$WORK/routes.err"
 fi
 
 # --- DoD 2 ---------------------------------------------------------------
@@ -866,6 +905,21 @@ if ip netns exec "$NS_CLI" nft list table inet bifrost >/dev/null 2>&1; then
   fail "la table nftables est encore en place apres disconnect"
 else
   ok "kill switch retire"
+fi
+# Le demontage a retire le plan de routage: le daemon ne declare plus rien de
+# pose (issue `aucun`), et prove routes le DIT sans jamais comparer, plutot que
+# de rendre une correspondance fortuite avec un namespace vide. Le daemon
+# repond encore: c'est le plan qui est retire, pas le daemon.
+ip netns exec "$NS_CLI" "$CLI" --socket "$SOCKET" --json prove routes \
+  --politique-daemon --actif >"$WORK/routes-apres.json" 2>"$WORK/routes-apres.err" || true
+if jq -e '.verdict == "UNMEASURED"
+     and .reason == "aucun plan de routage pose par ce daemon: rien a comparer"
+     and (.live_kernel | not)
+     and .differences == []' "$WORK/routes-apres.json" >/dev/null 2>&1; then
+  ok "apres disconnect, le daemon ne declare aucun plan et prove routes ne compare rien"
+else
+  fail "apres disconnect, prove routes n'a pas dit 'aucun plan a comparer'"
+  sed 's/^/        /' "$WORK/routes-apres.json" "$WORK/routes-apres.err"
 fi
 # Le daemon arrete le resolveur, qui tourne sous un AUTRE compte: sans
 # CAP_KILL il le lancerait sans jamais pouvoir l'arreter.

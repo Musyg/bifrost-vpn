@@ -53,6 +53,7 @@ use std::time::SystemTime;
 use tokio::sync::watch;
 
 use bifrost_core::ports::{HandshakeInfo, TunnelDevice};
+use bifrost_core::routage::RoutagePose;
 use bifrost_core::{Error, Result, TunnelConfig};
 
 use super::brut;
@@ -62,6 +63,8 @@ use crate::coeurs::passage;
 use super::aiguillage;
 #[cfg(target_os = "linux")]
 use super::netcfg::{self, Cmd};
+#[cfg(target_os = "linux")]
+use bifrost_core::routage::Plan;
 #[cfg(target_os = "linux")]
 use std::process::{Command, Stdio};
 
@@ -96,6 +99,16 @@ pub struct CoeurTunnel {
     coeur_actif: watch::Receiver<Option<crate::coeurs::atelier::CoeurPublie>>,
     /// Le nom de l'interface tant qu'elle est montee.
     monte: Option<String>,
+    /// Le plan de routage de la derniere pose reussie de l'aiguillage, retenu
+    /// pour la declaration que sert `prove routes --politique-daemon`. `None`
+    /// quand rien n'est monte. Une seconde evaluation de `aiguillage::plan` sur
+    /// l'aiguillage de la pose, retenue apres sa derniere etape reussie: egale
+    /// par construction au plan dont les commandes sont tirees, pas une capture
+    /// de ces commandes. Linux seulement: sous Windows l'echappement du coeur passe
+    /// par la configuration du coeur (liaison de socket), pas par un plan de
+    /// routage de ce genre, et la declaration rend `non-applicable`.
+    #[cfg(target_os = "linux")]
+    routage: Option<Plan>,
 }
 
 impl CoeurTunnel {
@@ -120,6 +133,8 @@ impl CoeurTunnel {
             luid: None,
             coeur_actif,
             monte: None,
+            #[cfg(target_os = "linux")]
+            routage: None,
         }
     }
 
@@ -230,6 +245,12 @@ impl CoeurTunnel {
                 Error::Tunnel(e)
             })?;
 
+        // Retenir, apres la derniere etape reussie, le plan de la pose: une
+        // seconde evaluation de la fonction pure dont `poser` a tire les
+        // commandes (`aiguillage::plan`), sur le meme `aiguillage`. Egale par
+        // construction au plan des commandes, ce n'est pas une capture des
+        // commandes.
+        self.routage = Some(aiguillage::plan(&aiguillage));
         self.monte = Some(nom);
         Ok(())
     }
@@ -282,6 +303,8 @@ impl CoeurTunnel {
             let _ = Self::run(&cmd);
         }
         self.monte = None;
+        // Plus rien de pose: la declaration ne rend plus l'ancien plan.
+        self.routage = None;
 
         ferme.map_err(Error::Tunnel)
     }
@@ -325,6 +348,23 @@ impl TunnelDevice for CoeurTunnel {
 
     fn down(&mut self, cfg: &TunnelConfig) -> Result<()> {
         self.demonter_ici(cfg)
+    }
+
+    /// Le plan de routage pose par l'aiguillage, sous Linux; sous Windows,
+    /// `non-applicable` (l'echappement du coeur y passe par la configuration du
+    /// coeur, pas par un plan de routage de ce genre).
+    fn routage_pose(&self) -> RoutagePose {
+        #[cfg(target_os = "linux")]
+        {
+            match &self.routage {
+                Some(p) => RoutagePose::Pose(p.clone()),
+                None => RoutagePose::Aucun,
+            }
+        }
+        #[cfg(windows)]
+        {
+            RoutagePose::NonApplicable
+        }
     }
 
     /// Ce que le port demande vraiment: ce tunnel est-il vivant, et depuis
