@@ -3,7 +3,7 @@
 //! Avec `--politique-daemon`, l'attendu est la declaration du daemon: elle est
 //! relue avant et apres la collecte, et reste un attendu, jamais une mesure.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::File;
 use std::io::Read;
@@ -15,6 +15,10 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 
 use crate::declaration::IdentiteDaemon;
+
+mod nommes;
+#[cfg(test)]
+mod recettes_objets;
 
 const MAX_OCTETS: u64 = 2 * 1024 * 1024;
 const LIMITE: &str =
@@ -28,6 +32,10 @@ struct Capture {
     tables: BTreeMap<Table, Value>,
     chaines: BTreeMap<Chaine, Value>,
     regles: BTreeMap<Chaine, Vec<Value>>,
+    /// Objets nommes (`nommes`), declaration sans elements.
+    objets: BTreeMap<nommes::Objet, Value>,
+    /// Elements des sets et des maps, dans l'ordre canonique.
+    elements: BTreeMap<nommes::Objet, Vec<Value>>,
 }
 
 #[derive(Serialize)]
@@ -35,6 +43,7 @@ struct Compte {
     tables: usize,
     chains: usize,
     rules: usize,
+    objects: usize,
 }
 
 impl Capture {
@@ -43,6 +52,7 @@ impl Capture {
             tables: self.tables.len(),
             chains: self.chaines.len(),
             rules: self.regles.values().map(Vec::len).sum(),
+            objects: self.objets.len(),
         }
     }
 }
@@ -175,6 +185,7 @@ fn analyser(octets: &[u8]) -> Result<Capture, &'static str> {
         .ok_or("enveloppe nftables absente ou inconnue")?;
     let mut capture = Capture::default();
     let mut schema_vu = false;
+    let mut espaces = BTreeSet::new();
     for (index, entree) in objets.iter().enumerate() {
         let objet = entree
             .as_object()
@@ -191,7 +202,10 @@ fn analyser(octets: &[u8]) -> Result<Capture, &'static str> {
         if !schema_vu {
             return Err("version de schema nft absente");
         }
-        if !matches!(genre.as_str(), "table" | "chain" | "rule") {
+        // Un type que le comparateur ne sait pas lire n'est jamais omis: la
+        // capture entiere reste non mesuree.
+        let nomme = nommes::lisible(genre);
+        if nomme.is_none() && !matches!(genre.as_str(), "table" | "chain" | "rule") {
             return Err("type d'objet nft non pris en charge");
         }
         let mut v = contenu.clone();
@@ -207,6 +221,21 @@ fn analyser(octets: &[u8]) -> Result<Capture, &'static str> {
             && handle.as_u64().is_none()
         {
             return Err("handle nft invalide");
+        }
+        if let Some(g) = nomme {
+            let table = texte(&v, "table")?;
+            let nom = texte(&v, "name")?;
+            if !espaces.insert((g.espace(), famille.clone(), table.clone(), nom.clone())) {
+                return Err("objet nomme duplique");
+            }
+            let lu = nommes::lire(g, v)?;
+            capture.ordre.push(serde_json::json!({genre: lu.complet()}));
+            let cle = (g.nom.to_owned(), famille, table, nom);
+            if let Some(elements) = lu.elements {
+                capture.elements.insert(cle.clone(), elements);
+            }
+            capture.objets.insert(cle, lu.declaration);
+            continue;
         }
         match genre.as_str() {
             "table" => {
@@ -245,20 +274,10 @@ fn analyser(octets: &[u8]) -> Result<Capture, &'static str> {
                         .as_object_mut()
                         .filter(|m| m.len() == 1)
                         .ok_or("instruction nft invalide")?;
-                    if let Some(compteur) = instruction.get_mut("counter") {
-                        let chiffres = compteur
-                            .as_object_mut()
-                            .filter(|m| {
-                                m.len() == 2
-                                    && m.get("packets").and_then(Value::as_u64).is_some()
-                                    && m.get("bytes").and_then(Value::as_u64).is_some()
-                            })
-                            .ok_or("compteur non pris en charge")?;
-                        // Seuls ces deux nombres sont volatils. Conserver le
-                        // compteur lui-meme et sa position dans les expressions.
-                        chiffres.insert("packets".into(), 0.into());
-                        chiffres.insert("bytes".into(), 0.into());
-                    }
+                    // Seules les valeurs d'etat sont neutralisees (voir
+                    // `nommes`): l'instruction elle-meme et sa position dans
+                    // les expressions restent comparees.
+                    nommes::instruction(instruction)?;
                 }
                 capture.regles.entry(cle).or_default().push(v.clone());
             }
@@ -271,10 +290,13 @@ fn analyser(octets: &[u8]) -> Result<Capture, &'static str> {
     if !schema_vu {
         return Err("version de schema nft absente");
     }
-    if capture
-        .chaines
-        .keys()
-        .any(|(f, t, _)| !capture.tables.contains_key(&(f.clone(), t.clone())))
+    let table_absente =
+        |f: &String, t: &String| !capture.tables.contains_key(&(f.clone(), t.clone()));
+    if capture.chaines.keys().any(|(f, t, _)| table_absente(f, t))
+        || capture
+            .objets
+            .keys()
+            .any(|(_, f, t, _)| table_absente(f, t))
         || capture
             .regles
             .keys()
@@ -358,6 +380,11 @@ fn confronter(r: &mut Rapport, a: Capture, octets: &[u8]) -> Result<(), &'static
     if a.regles != b.regles {
         r.differences.push("rules");
     }
+    nommes::ecarts(
+        (&a.objets, &a.elements),
+        (&b.objets, &b.elements),
+        &mut r.differences,
+    );
     if r.differences.is_empty() && a.ordre != b.ordre {
         r.differences.push("object-order");
     }
@@ -372,7 +399,7 @@ fn confronter(r: &mut Rapport, a: Capture, octets: &[u8]) -> Result<(), &'static
 fn terminer(mut r: Rapport, debut: Instant, resultat: Result<(), &'static str>) -> Rapport {
     r.reason = match resultat {
         Ok(()) => {
-            "comparaison structurelle; seuls handles et valeurs des compteurs anonymes sont ignores"
+            "comparaison structurelle; seuls handles et valeurs d'etat (compteurs, consommation des quotas, dernier passage, expiration des elements) sont ignores"
         }
         Err(raison) => raison,
     };
