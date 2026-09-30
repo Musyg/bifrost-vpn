@@ -30,7 +30,8 @@ routing_table = 51820
 
 # Autoriser le trafic vers les prefixes prives hors tunnel. Faux par defaut:
 # c'est un trou volontaire dans l'etancheite, a n'ouvrir qu'en connaissance de
-# cause (imprimante, NAS).
+# cause (imprimante, NAS). Le DNS (:53) vers ces prefixes reste refuse, sauf
+# vers `local_resolver` (section `[dns]`).
 allow_lan = false
 
 [peer]

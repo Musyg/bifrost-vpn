@@ -200,6 +200,7 @@ impl Politique {
                         regles.push(accepter(vec![meta("skuid", json!(uid))]));
                     }
                     if p.allow_lan {
+                        lan_sans_dns(&mut regles);
                         lan(&mut regles, "daddr");
                     }
                 }
@@ -268,13 +269,35 @@ fn ndp() -> Vec<Value> {
         json!({"set":[133,134,135,136,137]}),
     )])
 }
+/// Les prefixes du LAN d'une famille, dans l'ordre ou nft les liste.
+fn prefixes_lan(famille: &str) -> Value {
+    if famille == "ip" {
+        json!({"set":[prefixe("10.0.0.0",8),prefixe("169.254.0.0",16),prefixe("172.16.0.0",12),prefixe("192.168.0.0",16)]})
+    } else {
+        json!({"set":[prefixe("fc00::",7),prefixe("fe80::",10)]})
+    }
+}
 fn lan(regles: &mut Vec<Vec<Value>>, champ: &str) {
-    regles.push(accepter(vec![charge("ip", champ, json!({"set":[prefixe("10.0.0.0",8),prefixe("169.254.0.0",16),prefixe("172.16.0.0",12),prefixe("192.168.0.0",16)]}))]));
-    regles.push(accepter(vec![charge(
-        "ip6",
-        champ,
-        json!({"set":[prefixe("fc00::",7),prefixe("fe80::",10)]}),
-    )]));
+    for famille in ["ip", "ip6"] {
+        regles.push(accepter(vec![charge(
+            famille,
+            champ,
+            prefixes_lan(famille),
+        )]));
+    }
+}
+/// Le :53 du LAN, qui tombe avant son acceptation: deux familles, UDP et TCP,
+/// dans l'ordre du rendu (`render_lan_permit`).
+fn lan_sans_dns(regles: &mut Vec<Vec<Value>>) {
+    for famille in ["ip", "ip6"] {
+        for proto in ["udp", "tcp"] {
+            regles.push(vec![
+                charge(famille, "daddr", prefixes_lan(famille)),
+                charge(proto, "dport", json!(53)),
+                json!({"drop":null}),
+            ]);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -402,6 +425,64 @@ mod tests {
             let relue = Politique::projeter(&remise).firewall_policy().unwrap();
             assert_eq!(render(&remise), render(&relue), "cas {n}");
         }
+    }
+
+    /// Sous `allow_lan`, la reference fait tomber le :53 du LAN AVANT
+    /// l'acceptation du LAN, dans les deux familles et les deux protocoles, et
+    /// garde le permit du resolveur declare avant eux: la box declaree reste
+    /// servie. Le banc confronte cette forme au rendu reel pose par nft; cette
+    /// recette en garde l'ordre sans lui, et l'entree reste sans drop.
+    #[test]
+    fn sous_allow_lan_la_reference_fait_tomber_le_53_du_lan_avant_lui() {
+        let mut v = intention();
+        v["allow_lan"] = json!(true);
+        v["dns_resolver"] = json!("192.168.1.1");
+        let attendu = Politique::lire(v).unwrap().reference().unwrap();
+        let regles = |chaine: &str| -> Vec<Value> {
+            attendu["nftables"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|v| v.get("rule"))
+                .filter(|r| r["chain"] == chaine)
+                .map(|r| r["expr"].clone())
+                .collect()
+        };
+        let sortie = regles("output");
+        let position = |expr: Value| {
+            sortie
+                .iter()
+                .position(|e| *e == expr)
+                .unwrap_or_else(|| panic!("regle absente de la reference: {expr}"))
+        };
+        for famille in ["ip", "ip6"] {
+            let acceptation = position(json!(accepter(vec![charge(
+                famille,
+                "daddr",
+                prefixes_lan(famille)
+            )])));
+            for proto in ["udp", "tcp"] {
+                let permit = position(json!(accepter(vec![
+                    charge("ip", "daddr", json!("192.168.1.1")),
+                    charge(proto, "dport", json!(53)),
+                ])));
+                let drop = position(json!([
+                    charge(famille, "daddr", prefixes_lan(famille)),
+                    charge(proto, "dport", json!(53)),
+                    {"drop": null}
+                ]));
+                assert!(drop < acceptation, "{famille}/{proto}: drop apres le LAN");
+                assert!(permit < drop, "{famille}/{proto}: resolveur declare bloque");
+            }
+        }
+        assert!(
+            regles("input").iter().all(|e| e
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|i| i.get("drop").is_none())),
+            "un drop est pose en entree"
+        );
     }
 
     #[test]
