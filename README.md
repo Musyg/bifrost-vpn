@@ -288,6 +288,65 @@ du moteur n'est exporte (ni chemin, ni SID, ni LUID, ni GUID). MATCH dit que le
 moteur porte ce que le daemon declare avoir pose et qu'aucun filtre tiers
 lisible ne peut le defaire: pas une preuve d'etancheite du VPN.
 
+## Comparer les regles de routage et les routes, Linux
+
+```sh
+bifrost-cli --json prove routes --intention intention.json --actif
+```
+
+L'intention dit quel chemin le produit a pose, avec les memes parametres que
+la configuration. Les six champs sont obligatoires, `null` compris:
+
+```json
+{"schema_version": 1, "chemin": "wireguard", "interface": "wg0", "fwmark": 51820, "table": 51820, "coeur_uid": null}
+```
+
+Pour le chemin par coeur, `chemin` vaut `coeur`, `fwmark` et `table` valent
+`null`, et `coeur_uid` porte le compte du coeur, ou `null` sans coeur tiers.
+L'attendu est le plan que le daemon pose lui-meme, pas une copie: les memes
+fonctions rendent les commandes du daemon et la reference de la preuve.
+
+La commande lit le noyau du namespace courant deux fois, sans elevation et
+sans rien changer, puis compare les deux familles:
+- les regles du produit, et leur ordre;
+- les regles tierces evaluees avant celle du tunnel;
+- la table du tunnel, dont la route doit etre utilisable: ni morte, ni sans
+  porteuse, ni echue;
+- les routes que `suppress_prefixlength 0` laisse passer avant le tunnel.
+
+Une route plus specifique que la route par defaut n'est admise que dans ces
+cas:
+- elle mene au tunnel;
+- elle livre a l'hote (`local`);
+- elle reste sur le lien, vers le reseau d'une adresse de l'interface: la
+  route connectee de cette adresse, ou une route hote `broadcast` ou
+  `anycast` de ce reseau;
+- elle est `multicast` vers une destination de multidiffusion (limite nommee
+  ci-dessous);
+- elle rejette, ou renvoie a la regle suivante (`throw`).
+
+Deux lectures differentes, un refus d'acces, une trame ou un drapeau non
+reconnu rendent UNMEASURED/2.
+
+Deux limites nommees rendent MATCH alors que du trafic sort par le lien:
+- une adresse a masque large, dont la route connectee couvre tout ce que le
+  masque couvre;
+- la multidiffusion, que le noyau envoie sur le lien par la route `ff00::/8`
+  qu'il pose sur chaque interface IPv6.
+
+Le rapport ne porte que des categories et des comptes: ni interface, ni
+adresse, ni table, ni marque, ni compte. L'intention est declaree par
+l'appelant: ce n'est pas le profil actif du daemon.
+
+Ce qui n'est pas prouve:
+- les routes deja en cache dans les sockets;
+- les connexions deja ouvertes;
+- ce qui est pose apres la collecte;
+- le pare-feu et le DNS.
+
+MATCH n'est pas une preuve d'etancheite du VPN. Voir
+[D1c.1 dans les specifications](docs/09-souverainete-verifiable.md#d1c1---regles-de-routage-et-routes-linux-par-intention-livrees).
+
 ## Tester
 
 ### Quota de CI et validation Windows

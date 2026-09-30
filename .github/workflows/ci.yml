@@ -202,6 +202,11 @@ jobs:
           cargo build --locked -p bifrost-firewall --example politique_nft
           sudo bash ./scripts/preuve-nft-linux.sh
 
+      - name: Preuve des regles de routage et des routes dans des namespaces jetables
+        run: |
+          cargo build --locked -p bifrost-daemon --example routage_produit
+          sudo bash ./scripts/preuve-routes-linux.sh
+
       # Les DEUX BRAS de `doh-bypass`, que ce vecteur n'avait pas.
       #
       # Tous les autres vecteurs de la suite mesurent un ECART: un cas sans

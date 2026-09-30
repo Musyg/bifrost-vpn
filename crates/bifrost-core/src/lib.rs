@@ -16,6 +16,9 @@ pub mod ports;
 /// Le profil de coeur: un serveur, une technique, et de quoi s'y authentifier.
 /// Pur, comme le reste du crate: il lit un lien de partage, il ne joint rien.
 pub mod profil;
+/// Le plan de routage Linux du produit, en donnees pures: le daemon en tire ses
+/// commandes `ip`, la preuve `prove routes` son attendu. Une seule source.
+pub mod routage;
 pub mod state;
 
 pub use checks::{CheckOutcome, CheckReport, CheckVector, Verdict};

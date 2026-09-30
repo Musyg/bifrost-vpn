@@ -34,6 +34,16 @@ impl Cmd {
         }
     }
 
+    /// Une etape du plan de routage pur (`bifrost_core::routage`), telle
+    /// qu'elle s'execute: jamais toleree en echec, comme les poses d'avant.
+    pub(crate) fn ip_plan(args: Vec<String>) -> Self {
+        Self {
+            program: "ip",
+            args,
+            tolerate_failure: false,
+        }
+    }
+
     pub fn display(&self) -> String {
         format!("{} {}", self.program, self.args.join(" "))
     }
@@ -82,6 +92,12 @@ pub fn configure_link(cfg: &TunnelConfig) -> Vec<Cmd> {
 /// qui porte la marque, echappe a cette regle et sort par l'interface physique.
 /// `suppress_prefixlength 0` fait ignorer la seule route par defaut de la table
 /// main, ce qui preserve les routes LAN specifiques.
+///
+/// Depuis D1c.1, les commandes sont celles du plan pur
+/// (`bifrost_core::routage::Plan::wireguard`), que la preuve `prove routes`
+/// compare au noyau: une seule source pour la pose et pour l'attendu. Les
+/// argv sont ceux d'avant, a l'octet pres (recette
+/// `la_pose_wireguard_est_celle_de_la_base_a_l_octet_pres`).
 pub fn add_routing(cfg: &TunnelConfig) -> Vec<Cmd> {
     // Ces commandes n'existent que pour WireGuard: c'est sa marque qui echappe
     // a la regle, et sa table dediee qui porte la route par defaut. Le chemin
@@ -91,38 +107,15 @@ pub fn add_routing(cfg: &TunnelConfig) -> Vec<Cmd> {
     let Some(wg) = cfg.portage.wireguard() else {
         return Vec::new();
     };
-    let table = wg.routing_table.to_string();
-    let mark = wg.fwmark.to_string();
-    let mut cmds = Vec::new();
-
     // Les deux familles sont traitees meme si le tunnel n'a pas d'adresse IPv6:
     // sans route par defaut IPv6 dans le tunnel, l'IPv6 sortirait par
-    // l'interface physique. C'est le vecteur de fuite IPv6 classique.
-    for (family, default_route) in [("-4", "0.0.0.0/0"), ("-6", "::/0")] {
-        cmds.push(Cmd::ip(&[
-            family,
-            "route",
-            "add",
-            default_route,
-            "dev",
-            &cfg.interface,
-            "table",
-            &table,
-        ]));
-        cmds.push(Cmd::ip(&[
-            family, "rule", "add", "not", "fwmark", &mark, "table", &table,
-        ]));
-        cmds.push(Cmd::ip(&[
-            family,
-            "rule",
-            "add",
-            "table",
-            "main",
-            "suppress_prefixlength",
-            "0",
-        ]));
-    }
-    cmds
+    // l'interface physique. C'est le vecteur de fuite IPv6 classique. Le plan
+    // les pose toutes les deux (`Famille::TOUTES`).
+    bifrost_core::routage::Plan::wireguard(&cfg.interface, wg.fwmark, wg.routing_table)
+        .arguments_ip()
+        .into_iter()
+        .map(Cmd::ip_plan)
+        .collect()
 }
 
 /// Retrait des regles et de l'interface.
@@ -257,6 +250,49 @@ mod tests {
         assert!(l.contains(&"ip -4 rule add not fwmark 51820 table 51820".to_owned()));
         assert!(l.contains(&"ip -4 rule add table main suppress_prefixlength 0".to_owned()));
         assert!(l.contains(&"ip -4 route add 0.0.0.0/0 dev wg0 table 51820".to_owned()));
+    }
+
+    /// La pose, commande par commande et dans l'ordre, a l'octet pres.
+    ///
+    /// Depuis D1c.1 ces commandes sont rendues par le plan pur de
+    /// `bifrost_core::routage`, que la preuve `prove routes` lit aussi. Cette
+    /// recette fige la liste telle que la base `6e9a200` la rendait: toute
+    /// difference d'un seul argument, ou de l'ordre (qui decide des priorites
+    /// que le noyau attribue a des regles posees sans `pref`), la fait rougir.
+    #[test]
+    fn la_pose_wireguard_est_celle_de_la_base_a_l_octet_pres() {
+        assert_eq!(
+            lignes(&add_routing(&cfg())),
+            [
+                "ip -4 route add 0.0.0.0/0 dev wg0 table 51820",
+                "ip -4 rule add not fwmark 51820 table 51820",
+                "ip -4 rule add table main suppress_prefixlength 0",
+                "ip -6 route add ::/0 dev wg0 table 51820",
+                "ip -6 rule add not fwmark 51820 table 51820",
+                "ip -6 rule add table main suppress_prefixlength 0",
+            ]
+        );
+        let mut c = cfg();
+        c.interface = "bf-wg_9".into();
+        wg(&mut c).fwmark = 0x1f2e3d;
+        wg(&mut c).routing_table = 30303;
+        assert_eq!(
+            lignes(&add_routing(&c)),
+            [
+                "ip -4 route add 0.0.0.0/0 dev bf-wg_9 table 30303",
+                "ip -4 rule add not fwmark 2043453 table 30303",
+                "ip -4 rule add table main suppress_prefixlength 0",
+                "ip -6 route add ::/0 dev bf-wg_9 table 30303",
+                "ip -6 rule add not fwmark 2043453 table 30303",
+                "ip -6 rule add table main suppress_prefixlength 0",
+            ]
+        );
+        assert!(
+            add_routing(&c)
+                .iter()
+                .all(|cmd| cmd.program == "ip" && !cmd.tolerate_failure),
+            "la pose n'est jamais toleree en echec"
+        );
     }
 
     /// Sans route par defaut IPv6 dans le tunnel, l'IPv6 fuit par l'interface

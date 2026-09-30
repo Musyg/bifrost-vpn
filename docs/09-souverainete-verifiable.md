@@ -447,7 +447,7 @@ etablir non plus que son serveur est le daemon. Deux types d'objets nft
 intention permissive ou obsolete n'est pas rendue fiable par le fait que le
 produit sait la representer, ni par le fait que le daemon la declare.
 
-### D1c - Routes, DNS et provenance
+### D1c - Routes, DNS et provenance (en cours)
 
 Ajouter les routes IPv4/IPv6, regles de routage, resolvers effectifs, exceptions
 DNS et empreintes des composants charges. Comparer configuration attendue et
@@ -455,6 +455,172 @@ etat OS; conserver les limites propres aux caches et connexions deja ouvertes.
 Pour la provenance, une reference de confiance doit venir d'un manifeste signe
 verifie contre une racine obtenue independamment, avec cible, version et taille.
 Une signature de profil ne couvre pas les executables.
+
+#### D1c.1 - Regles de routage et routes Linux, par intention, livrees
+
+`bifrost-cli --json prove routes --intention intention.json --actif`
+
+L'intention v1 porte exactement `schema_version=1`, `chemin` (`wireguard` ou
+`coeur`), `interface`, `fwmark`, `table` et `coeur_uid`, tous obligatoires.
+WireGuard exige une marque non nulle et une table hors de celles que le noyau
+se reserve (0, 253, 254, 255), sans compte de coeur; le coeur n'a ni marque ni
+table (la sienne est fixee par le produit) et un compte non nul ou null. Le nom
+d'interface suit la regle du produit, sans `lo`. Champs inconnus ou manquants,
+cles dupliquees, nombres non entiers et version inconnue sont refuses avant
+toute lecture du noyau, avec les plafonds de lecture de D1b.1. Les deux
+familles sont toujours attendues: le produit pose toujours les deux.
+
+L'attendu est le plan que le produit pose, `bifrost_core::routage::Plan`: depuis
+D1c.1, `netcfg::add_routing` (WireGuard) et `aiguillage::poser` (coeur) tirent
+leurs commandes `ip` de ce plan, au lieu de les ecrire chacun. Les commandes
+executees sont celles d'avant, a l'octet pres et dans le meme ordre (recettes
+de reference du daemon). Il n'y a pas de seconde implementation. Les regles de
+WireGuard sont posees sans priorite: le plan en deduit l'ordre d'evaluation,
+l'inverse de l'ordre de pose (`fib_default_rule_pref` du noyau), et le banc le
+mesure.
+
+Collecte: rtnetlink en lecture, sans shell, sans programme externe, sans
+elevation. Un compte ordinaire lit ces dumps: mesure sur essai-linux. Le lien du
+tunnel est lu par son nom, puis les adresses, les regles et les routes de toutes
+les tables, dans les deux familles. Le controle strict des requetes est active
+(`NETLINK_GET_STRICT_CHK`), et les routes sont demandees sans leurs exceptions.
+Les cas suivants rendent UNMEASURED:
+- un attribut, un type, une action ou un drapeau non reconnu;
+- un drapeau de route dont l'effet sur l'emission n'a pas ete mesure, comme le
+  delestage ou le piegeage materiel;
+- une longueur fausse ou un attribut duplique;
+- `NLM_F_DUMP_INTR`, une troncature;
+- un refus d'acces ou une famille absente du noyau.
+
+Le noyau ne pose pas `NLM_F_DUMP_INTR` sur les dumps de regles et de routes, et
+il n'offre aucune generation lisible. La collecte entiere est donc faite deux
+fois, et les deux lectures doivent etre identiques, sinon UNMEASURED. Cela ne
+prouve pas qu'un instant a porte exactement cet etat: un changement qui
+s'annule entre les deux lectures echappe. `ip -j` est ecarte, car iproute2
+6.1.0 rend 0 sur un dump interrompu ou tronque.
+
+Comparaison, famille par famille, avec les ecarts dans cet ordre:
+- `<famille>-product-rules`: chaque regle du plan est presente une seule fois,
+  avec son contenu exact, sa priorite quand le produit la fixe, et dans l'ordre
+  d'evaluation du plan.
+- `<famille>-rules-before-tunnel`: une regle tierce evaluee avant celle du
+  tunnel, qui consulte une autre table ou qui saute. La table `local` est
+  l'exception ecrite: c'est son contenu qui est juge. Une regle neutre, une
+  regle qui rejette, ou une regle qui consulte la table du tunnel n'est pas un
+  ecart.
+- `<famille>-tunnel-table`: exactement la route par defaut du plan, vers
+  l'interface du tunnel, sans passerelle, utilisable, et rien d'autre. Le
+  noyau ignore une route dont le prochain saut est mort (`dead`), ou sans
+  porteuse (`linkdown`) des que `ignore_routes_with_linkdown` vaut 1, et une
+  route echue alors que le dump la montre encore: le trafic sort alors par le
+  lien. Chacune est un ecart, et une route qui porte une echeance aussi.
+  `onlink` n'en est pas un: il ne change pas l'emission.
+- `<famille>-routes-before-tunnel`: ce que `local`, et `main` au travers de
+  `suppress_prefixlength 0`, laissent passer avant le tunnel.
+
+La legitimite de ces routes se decide par une regle, pas par une liste
+d'adresses. Chaque cas admis a ete confronte au banc a un temoin d'emission.
+Une route est admise dans sept cas:
+- elle mene a l'interface du tunnel;
+- elle est de type `local`: livree a l'hote, rien n'est emis;
+- elle est la route connectee d'une adresse de l'interface, c'est-a-dire
+  unicast, sans passerelle ni prefixe source, vers le reseau exact d'une
+  adresse portee par la meme interface: elle emet sur le lien, vers ce
+  reseau. Pour une adresse point a point, ce reseau est celui de son pair
+  (`peer`, lu comme adresse de destination): sa route connectee est admise
+  aussi, et emet sur le lien (mesure);
+- elle est une route hote `broadcast` (IPv4 seulement) ou `anycast` vers une
+  adresse de ce meme reseau exact, comme le noyau en pose: elle emet vers ce
+  reseau, ou livre a l'hote;
+- elle est `multicast` vers une destination de multidiffusion: elle emet sur
+  le lien, c'est une limite nommee;
+- elle rejette: `blackhole`, `unreachable` ou `prohibit`;
+- elle est `throw`, qui renvoie a la regle suivante.
+
+Tout le reste est un ecart. `broadcast` et `anycast` ne livrent pas a l'hote:
+poses par un tiers, ils emettent sur le lien vers toute leur destination, dans
+`main` comme dans `local`. Une telle route hors du reseau du lien est donc un
+ecart, et `broadcast` en IPv6 aussi, car la famille n'a pas de diffusion et le
+noyau traite la route en unicast. Une route par objet de prochain saut,
+multichemin ou encapsulee est aussi un ecart: le comparateur ne la resout pas,
+et ne l'admet jamais. Les drapeaux d'une route consultee avant le tunnel ne
+changent pas son jugement: morte, elle est inerte, mais elle peut revivre a
+tout instant.
+
+Deux limites nommees, mesurees au banc, rendent MATCH alors que du trafic sort
+par le lien:
+- une route connectee est admise quelle que soit la largeur du reseau de son
+  adresse. Une adresse a masque large met sur le lien tout ce que son masque
+  couvre: un bail DHCP a masque large, un prefixe annonce sur le lien par un
+  routeur IPv6, ou une adresse posee a la main;
+- la multidiffusion part sur le lien. Le noyau pose `ff00::/8` sur chaque
+  interface IPv6, dans `local`, consultee avant le tunnel: une destination de
+  multidiffusion IPv6, de toute portee, sort par le lien physique avec la
+  seule pose du produit.
+
+Le perimetre est `linux-routing-comparison`, la source
+`kernel-rtnetlink-read-twice`, et
+`expected_source=bifrost-routing-plan-v1-user-declared`. Le rapport ne porte que
+des categories et des comptes: ni interface, ni adresse, ni table, ni marque, ni
+compte. `network_security` reste `not-evaluated`.
+
+Limites:
+- l'intention est declaree, ce n'est pas le profil actif du daemon;
+- seul le namespace courant est lu;
+- un changement qui s'annule entre les deux lectures, ou ce qui est pose apres
+  la collecte, n'est pas vu;
+- ne sont pas prouves: les routes deja en cache dans les sockets, les
+  connexions deja ouvertes, les exceptions de route (PMTU, redirections), le
+  pare-feu et le DNS;
+- les deux limites nommees ci-dessus: masque large et multidiffusion;
+- un compte ou une marque que l'intention ne declare pas n'est pas devine.
+
+MATCH n'est pas une preuve d'etancheite du VPN.
+
+Acceptation, banc jetable `scripts/preuve-routes-linux.sh` (un namespace par
+cas). Les commandes que le produit rend, appliquees telles quelles,
+correspondent pour les deux chemins, en root comme sans privilege, et la preuve
+ne change pas l'etat du namespace. Un temoin d'emission accompagne les cas: un
+datagramme envoye dans le namespace, diffusion permise, et les compteurs
+d'emission de l'interface physique et de celle du tunnel. Chacune des
+alterations suivantes donne un ecart de sa seule categorie:
+- une regle retiree, l'ordre inverse, la famille IPv6 oubliee;
+- une regle tierce ou un saut avant le tunnel;
+- une route du tunnel retiree, changee ou en trop;
+- la route du tunnel sans porteuse, morte ou qui expire, sur les deux chemins;
+- une route plus specifique par une passerelle dans `main` ou dans `local`,
+  dont `0.0.0.0/1` et `128.0.0.0/1`;
+- une route `unicast`, `broadcast`, `anycast` ou `multicast` vers une
+  destination hors du reseau du lien, dans `main` puis dans `local`, dans les
+  deux familles, et une route hote de ces types hors de ce reseau;
+- la priorite du coeur changee;
+- l'interface du tunnel absente.
+
+Pour chaque ecart que le temoin peut montrer, il montre le trafic sorti par le
+lien, ou perdu quand le tunnel n'a plus de porteuse. Correspondent, et le
+temoin confirme que rien ne sort par le lien hors de son reseau:
+- des routes `local`, `blackhole`, `unreachable`, `prohibit` et `throw`, dans
+  `main` puis dans `local`;
+- une route vers le tunnel, la route connectee d'une seconde adresse du lien;
+- les routes hote du reseau du lien, et `onlink` sur la route du tunnel;
+- le lien physique sans porteuse ou mort.
+
+Les deux limites nommees sont mesurees: MATCH, et le temoin sort par le lien.
+Une regle qui bascule pendant la collecte rend UNMEASURED: le banc exige au
+moins une collecte instable en cent essais, et jamais une correspondance.
+
+Mode face au daemon: non livre. `DeclarationPareFeu` a sept cles lues
+strictement et ne porte pas le plan de routage. Ce plan est pose par le
+peripherique du tunnel, pas par le moteur que le superviseur declare.
+
+Tranche suivante:
+- une commande IPC distincte, avec le meme lecteur (identite, N1, mesure, N2);
+- le plan rendu par le peripherique qui l'a pose;
+- un banc qui isole le DNS, parce que monter un tunnel touche le DNS de l'hote.
+
+D1c reste incomplet. Ne sont pas livres: les resolveurs effectifs, les
+exceptions DNS, la provenance, le mode face au daemon, et le jumeau Windows
+(table de routage IP Helper).
 
 ## D2 - Distribution reproductible et mises a jour verifiables
 
@@ -552,3 +718,33 @@ pas effacee par ce plan. Chaque tranche met a jour ETAT.md et ses limites.
   sorties JSON, compteurs variables, handles, politiques et priorites.
 - [Noyau Linux, nftables netlink](https://docs.kernel.org/netlink/specs/nftables.html):
   operation getgen et identifiant de generation pour la collecte D1b.2.
+
+## Sources primaires relues le 30 septembre 2026, pour D1c.1
+
+- [Noyau Linux v7.0, `net/core/fib_rules.c`](https://raw.githubusercontent.com/torvalds/linux/v7.0/net/core/fib_rules.c):
+  dump des regles sans `NLM_F_DUMP_INTR`, attributs ecrits, et priorite
+  choisie pour une regle posee sans `pref` (`fib_default_rule_pref`).
+- [Noyau Linux v7.0, `net/core/rtnetlink.c`](https://raw.githubusercontent.com/torvalds/linux/v7.0/net/core/rtnetlink.c):
+  CAP_NET_ADMIN exige seulement hors des lectures.
+- [Noyau Linux v7.0, `net/ipv4/fib_trie.c`](https://raw.githubusercontent.com/torvalds/linux/v7.0/net/ipv4/fib_trie.c)
+  et [`net/ipv6/ip6_fib.c`](https://raw.githubusercontent.com/torvalds/linux/v7.0/net/ipv6/ip6_fib.c):
+  dumps de routes sans `NLM_F_DUMP_INTR`, reprise silencieuse d'un dump IPv6
+  dont l'arbre change; `fib_lookup_good_nhc` ignore un prochain saut mort, ou
+  sans porteuse quand `ignore_routes_with_linkdown` le demande.
+- [Noyau Linux v7.0, `net/ipv4/fib_semantics.c`](https://raw.githubusercontent.com/torvalds/linux/v7.0/net/ipv4/fib_semantics.c):
+  `fib_nexthop_info`, les seuls drapeaux de prochain saut qu'un dump porte
+  (`dead`, `linkdown`, `onlink`, delestage et piegeage materiels).
+- [Noyau Linux v7.0, `net/ipv6/route.c`](https://raw.githubusercontent.com/torvalds/linux/v7.0/net/ipv6/route.c):
+  une route `anycast` ou `broadcast` posee par un tiers garde son type dans le
+  dump sans livrer a l'hote (`rtm_to_fib6_config`, `ip6_rt_get_dev_rcu`);
+  l'echeance d'une route n'est ecrite que dans `RTA_CACHEINFO`
+  (`rt6_fill_node`).
+- [Noyau Linux v7.0, `net/ipv4/route.c`](https://raw.githubusercontent.com/torvalds/linux/v7.0/net/ipv4/route.c):
+  `__mkroute_output`, une route `broadcast` ou `multicast` emet sur son
+  interface.
+- [Noyau Linux v7.0, `net/netlink/af_netlink.c`](https://raw.githubusercontent.com/torvalds/linux/v7.0/net/netlink/af_netlink.c):
+  `NLM_F_DUMP_INTR` sur le message de fin, seulement la ou le dump suit une
+  sequence.
+- [iproute2 6.1.0, `lib/libnetlink.c`](https://raw.githubusercontent.com/iproute2/iproute2/v6.1.0/lib/libnetlink.c):
+  un dump interrompu ou tronque est signale sur la sortie d'erreur, avec un
+  code de sortie 0.

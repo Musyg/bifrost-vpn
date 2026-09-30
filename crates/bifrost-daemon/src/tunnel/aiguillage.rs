@@ -63,14 +63,17 @@ use super::netcfg::Cmd;
 /// de Tailscale sur cette flotte, wg-quick prend son port d'ecoute (51820), et
 /// sing-tun utilise 2022. Une collision ne se verrait pas: elle melangerait nos
 /// routes a celles d'un autre.
-pub const TABLE: u32 = 0xb1f;
+///
+/// Depuis D1c.1 la valeur vit dans le plan pur (`bifrost_core::routage`), que
+/// la preuve `prove routes` lit aussi; elle est reexportee ici sans changer.
+pub const TABLE: u32 = bifrost_core::routage::TABLE_COEUR;
 
 /// Le coeur sort dehors. En premier, sinon il n'en aurait jamais l'occasion.
-pub const PREF_COEUR: u32 = 9100;
+pub const PREF_COEUR: u32 = bifrost_core::routage::PREF_COEUR;
 /// Le LAN garde ses routes connectees, mais pas la route par defaut.
-pub const PREF_LAN: u32 = 9110;
+pub const PREF_LAN: u32 = bifrost_core::routage::PREF_LAN;
 /// Tout le reste entre dans le TUN.
-pub const PREF_TUNNEL: u32 = 9120;
+pub const PREF_TUNNEL: u32 = bifrost_core::routage::PREF_TUNNEL;
 
 /// L'ordre EST la politique: une inversion ferait entrer le coeur dans le TUN,
 /// ou rendrait Internet joignable en clair par la route par defaut de `main`.
@@ -102,56 +105,18 @@ pub struct Aiguillage {
 const FAMILLES: [&str; 2] = ["-4", "-6"];
 
 /// Pose l'aiguillage.
+///
+/// Depuis D1c.1, les commandes sont celles du plan pur
+/// (`bifrost_core::routage::Plan::coeur`), que la preuve `prove routes`
+/// compare au noyau: une seule source pour la pose et pour l'attendu. Les
+/// argv sont ceux d'avant, a l'octet pres (recette
+/// `la_pose_par_coeur_est_celle_de_la_base_a_l_octet_pres`).
 pub fn poser(a: &Aiguillage) -> Vec<Cmd> {
-    let table = TABLE.to_string();
-    let mut cmds = Vec::new();
-    for f in FAMILLES {
-        cmds.push(Cmd::ip(&[
-            f,
-            "route",
-            "add",
-            "default",
-            "dev",
-            &a.interface,
-            "table",
-            &table,
-        ]));
-        if let Some(uid) = a.coeur_uid {
-            let plage = format!("{uid}-{uid}");
-            cmds.push(Cmd::ip(&[
-                f,
-                "rule",
-                "add",
-                "uidrange",
-                &plage,
-                "lookup",
-                "main",
-                "pref",
-                &PREF_COEUR.to_string(),
-            ]));
-        }
-        cmds.push(Cmd::ip(&[
-            f,
-            "rule",
-            "add",
-            "lookup",
-            "main",
-            "suppress_prefixlength",
-            "0",
-            "pref",
-            &PREF_LAN.to_string(),
-        ]));
-        cmds.push(Cmd::ip(&[
-            f,
-            "rule",
-            "add",
-            "lookup",
-            &table,
-            "pref",
-            &PREF_TUNNEL.to_string(),
-        ]));
-    }
-    cmds
+    bifrost_core::routage::Plan::coeur(&a.interface, a.coeur_uid)
+        .arguments_ip()
+        .into_iter()
+        .map(Cmd::ip_plan)
+        .collect()
 }
 
 /// Retire l'aiguillage.
@@ -234,6 +199,51 @@ mod tests {
         assert!(l.contains(&format!(
             "ip -4 rule add lookup main suppress_prefixlength 0 pref {PREF_LAN}"
         )));
+    }
+
+    /// La pose, commande par commande et dans l'ordre, a l'octet pres, avec et
+    /// sans coeur.
+    ///
+    /// Depuis D1c.1 ces commandes sont rendues par le plan pur de
+    /// `bifrost_core::routage`, que la preuve `prove routes` lit aussi. Cette
+    /// recette fige la liste telle que la base `6e9a200` la rendait: toute
+    /// difference d'un seul argument, ou de l'ordre, la fait rougir.
+    #[test]
+    fn la_pose_par_coeur_est_celle_de_la_base_a_l_octet_pres() {
+        assert_eq!(
+            lignes(&poser(&avec_coeur())),
+            [
+                "ip -4 route add default dev bftun0 table 2847",
+                "ip -4 rule add uidrange 4242-4242 lookup main pref 9100",
+                "ip -4 rule add lookup main suppress_prefixlength 0 pref 9110",
+                "ip -4 rule add lookup 2847 pref 9120",
+                "ip -6 route add default dev bftun0 table 2847",
+                "ip -6 rule add uidrange 4242-4242 lookup main pref 9100",
+                "ip -6 rule add lookup main suppress_prefixlength 0 pref 9110",
+                "ip -6 rule add lookup 2847 pref 9120",
+            ]
+        );
+        let sans = Aiguillage {
+            interface: "bf-t_1".to_owned(),
+            coeur_uid: None,
+        };
+        assert_eq!(
+            lignes(&poser(&sans)),
+            [
+                "ip -4 route add default dev bf-t_1 table 2847",
+                "ip -4 rule add lookup main suppress_prefixlength 0 pref 9110",
+                "ip -4 rule add lookup 2847 pref 9120",
+                "ip -6 route add default dev bf-t_1 table 2847",
+                "ip -6 rule add lookup main suppress_prefixlength 0 pref 9110",
+                "ip -6 rule add lookup 2847 pref 9120",
+            ]
+        );
+        assert!(
+            poser(&avec_coeur())
+                .iter()
+                .all(|cmd| cmd.program == "ip" && !cmd.tolerate_failure),
+            "la pose n'est jamais toleree en echec"
+        );
     }
 
     /// Un chemin sans coeur tiers n'a personne a faire sortir. Poser la regle
