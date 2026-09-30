@@ -473,8 +473,14 @@ familles sont toujours attendues: le produit pose toujours les deux.
 L'attendu est le plan que le produit pose, `bifrost_core::routage::Plan`: depuis
 D1c.1, `netcfg::add_routing` (WireGuard) et `aiguillage::poser` (coeur) tirent
 leurs commandes `ip` de ce plan, au lieu de les ecrire chacun. Les commandes
-executees sont celles d'avant, a l'octet pres et dans le meme ordre (recettes
-de reference du daemon). Il n'y a pas de seconde implementation. Les regles de
+executees sont celles d'avant, dans le meme ordre, et depuis le 30/09/2026
+chacune porte en dernier l'etiquette du produit (`protocol 177` sur une regle,
+`proto 177` sur une route; recettes de reference du daemon). L'etiquette ne
+change aucune decision de routage et la preuve ne la compare pas: une regle ou
+une route tierce identique a celle du plan, sans etiquette, passe donc pour
+celle du produit. L'etiquette sert au demontage, qui tire du meme plan le
+retrait exact de chaque commande de pose et ne retire rien qui ne la porte pas.
+Il n'y a pas de seconde implementation. Les regles de
 WireGuard sont posees sans priorite: le plan en deduit l'ordre d'evaluation,
 l'inverse de l'ordre de pose (`fib_default_rule_pref` du noyau), et le banc le
 mesure.

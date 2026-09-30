@@ -2,6 +2,11 @@
 
 pub mod netcfg;
 
+/// Ce qu'un tiers occupe deja de ce que le produit va poser, lu dans le noyau
+/// avant la premiere commande. Sa lecture des trames est pure et compilee
+/// partout; le canal netlink n'existe que sous Linux.
+mod occupation;
+
 /// Qui entre dans le TUN et qui en sort, pour le chemin par coeur. Pur, comme
 /// `netcfg`: il rend des commandes, il n'execute rien.
 #[cfg(target_os = "linux")]
