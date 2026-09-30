@@ -27,8 +27,8 @@ lancement avant une livraison Windows et la revision effectivement mesuree.
 
 Les comptes ci-dessous ont ete pris le 30/09/2026 sur l'arbre qui porte le
 portage des corrections du tableau de survie et des abstentions, puis D1b.3b,
-l'identite du serveur de D1b.3c et sa verification par toutes les commandes de
-la CLI. L'hote qui tient le role `essai-linux` a change le
+l'identite du serveur de D1b.3c, sa verification par toutes les commandes de
+la CLI et la correction du permis DNS Windows par famille. L'hote qui tient le role `essai-linux` a change le
 29/09: ses comptes ne se comparent pas a ceux d'avant cette date.
 
 Compte honnete des recettes cargo, par hote. La colonne `reelles` est ce qui a
@@ -36,14 +36,16 @@ verifie quelque chose: `annoncees` moins `abstentions` moins `rouges`.
 
 | Hote | Annoncees | Abstentions | Rouges | Reelles |
 |---|---|---|---|---|
-| dev-windows | 1283 | 19 | 0 | 1264 |
-| essai-linux | 1298 | 26 | 0 | 1272 |
+| dev-windows | 1291 | 19 | 0 | 1272 |
+| essai-linux | 1304 | 26 | 0 | 1278 |
 
 Les deux lignes ont ete prises par `scripts/recettes-strict.sh`, chacune sur son
 hote: le portage a ajoute 14 recettes des deux cotes, D1b.3b 11 sur dev-windows et 22
 sur `essai-linux`, D1b.3c (identite du serveur de la declaration) 4 sur
 dev-windows et 5 sur `essai-linux`, la verification du serveur par les commandes
-9 sur dev-windows et 7 sur `essai-linux`. Sur `essai-linux`
+9 sur dev-windows et 7 sur `essai-linux`, le permis DNS par famille 8 sur
+dev-windows et 6 sur `essai-linux` (ses deux recettes de traduction reelle ne
+tournent que sous Windows). Sur `essai-linux`
 une recette de plus est ignoree par construction
 (elle pose une route et ne tourne qu'en espace de noms reseau), et la garde des
 modes de scripts s'y abstient parce que la copie mesuree n'a pas de `.git` (elle
@@ -57,7 +59,7 @@ la prochaine action. Une cellule vide signalerait une tranche non finie.
 | Chantier | Etat et derniere mesure | Prochaine action |
 |---|---|---|
 | 01 | Architecture technique. Cadre du plan, redige; ce n'est pas un livrable | - |
-| 02 | Kill switch WFP et nftables. Specification de reference, a jour | - |
+| 02 | Kill switch WFP et nftables. Specification de reference, a jour. 30/09/2026: le permis DNS Windows ne se pose plus que sur la couche de la famille du resolveur, et la traduction refuse une condition inapplicable a sa couche au lieu de l'ecarter (elle compte les conditions posees). Mesure sur essai-windows avant (filtre sans adresse sur l'autre couche; resolveur `::1`, une requete DNS IPv4 vers un resolveur public obtenait sa reponse, kill switch arme) et apres (un seul permis, l'autre famille refusee par `block-dns`). La fuite IPv6 hors LAN reste inferee: pas d'IPv6 globale sur le site | - |
 | 03 | Anti-telemetrie OS. Couche DNS livree; couches Windows registre et WFP par service a finir | Finir les couches Windows registre et WFP par service |
 | 04 | Anti-censure DPI. Tableau de survie rafraichi le 20/09/2026 (une cellule); inerte a partir du 30/09/2026 (`TABLEAU_INERTE_A_PARTIR_DU`, gardee par `selection::planifier`): il classe encore, il n'ecarte plus rien | Rafraichir le tableau, en priorite la colonne Turkmenistan, sans source depuis juillet |
 | 05 | Anonymat et chainage. Document redige; le chainage Tor et Nym n'est pas commence, et le document lui-meme le place apres les trois objectifs | Chainage Tor ou Nym, apres les objectifs 1 a 3 |
