@@ -33,29 +33,30 @@ depuis le 30/09/2026 (`defaults.run.shell: bash`): avant, le shell implicite
 Les comptes ci-dessous ont ete pris le 30/09/2026 sur l'arbre qui porte le
 portage des corrections du tableau de survie et des abstentions, puis D1b.3b,
 l'identite du serveur de D1b.3c, sa verification par toutes les commandes de
-la CLI et la correction du permis DNS Windows par famille, puis la garde des
-tubes sous pipefail. L'hote qui tient le role `essai-linux` a change le 29/09: ses comptes ne se comparent pas a ceux d'avant cette date.
+la CLI, la correction du permis DNS Windows par famille, la garde des tubes
+sous pipefail, puis la preuve WFP par declaration. L'hote qui tient le role `essai-linux` a change le 29/09: ses comptes ne se comparent pas a ceux d'avant cette date.
 
 Compte honnete des recettes cargo, par hote. La colonne `reelles` est ce qui a
 verifie quelque chose: `annoncees` moins `abstentions` moins `rouges`.
 
 | Hote | Annoncees | Abstentions | Rouges | Reelles |
 |---|---|---|---|---|
-| dev-windows | 1297 | 19 | 0 | 1278 |
-| essai-linux | 1310 | 26 | 0 | 1284 |
+| dev-windows | 1348 | 19 | 0 | 1329 |
+| essai-linux | 1358 | 25 | 0 | 1333 |
 
 Les deux lignes ont ete prises par `scripts/recettes-strict.sh`, chacune sur son
 hote: le portage a ajoute 14 recettes des deux cotes, D1b.3b 11 sur dev-windows et 22
 sur `essai-linux`, D1b.3c (identite du serveur de la declaration) 4 sur
 dev-windows et 5 sur `essai-linux`, la verification du serveur par les commandes
 9 sur dev-windows et 7 sur `essai-linux`, le permis DNS par famille 8 sur
-dev-windows et 6 sur `essai-linux` (ses deux recettes de traduction reelle ne
-tournent que sous Windows), la garde des tubes sous pipefail 6 des deux cotes.
-Sur `essai-linux`
-une recette de plus est ignoree par construction
-(elle pose une route et ne tourne qu'en espace de noms reseau), et la garde des
-modes de scripts s'y abstient parce que la copie mesuree n'a pas de `.git` (elle
-lit l'index; dans un clone elle mesure).
+dev-windows et 6 sur `essai-linux` (ses deux recettes de traduction sont devenues pures avec la preuve WFP et
+tournent sur les deux hotes), la garde des tubes sous pipefail 6 des deux
+cotes, la preuve WFP par declaration 51 sur dev-windows et 48 sur
+`essai-linux`. Sur `essai-linux` une recette de plus est ignoree par
+construction (elle pose une route et ne tourne qu'en espace de noms reseau).
+La ligne `essai-linux` a ete prise dans un clone, ou la garde des modes de
+scripts mesure (elle lit l'index); dans une copie sans `.git` elle s'abstient,
+d'ou les 26 abstentions des comptes precedents.
 
 ## Ce qui est ouvert, document par document
 
@@ -71,7 +72,7 @@ la prochaine action. Une cellule vide signalerait une tranche non finie.
 | 05 | Anonymat et chainage. Document redige; le chainage Tor et Nym n'est pas commence, et le document lui-meme le place apres les trois objectifs | Chainage Tor ou Nym, apres les objectifs 1 a 3 |
 | 06 | Architecture logicielle et packaging. Daemon, IPC authentifie, machine a etats et scripts d'installation faits (Linux et Windows, comptes dedies, ACL); ni interface graphique, ni MSI, ni .deb/.rpm, ni mise a jour TUF, ni provisioning; SBOM en CI | Interface graphique en jalon propre apres J2; paquets signes et mise a jour TUF |
 | 07 | Programme de securite produit. fmt, clippy, recettes, suite de fuite, cargo audit, cargo deny et SBOM en CI; politique de divulgation publiee (SECURITY.md, security.txt); inventaire unsafe ferme; cargo vet et fuzz absents, aucune cle PGP | Publier une cle PGP (champ Encryption); ajouter cargo vet et un harnais fuzz |
-| 09 | Souverainete verifiable. D1a: `prove binaire`. D1b.1: comparaison nft hors ligne. D1b.2: collecte Linux passive encadree par GETGEN. D1b.3a: `prove nft --politique` engendre la reference produit depuis une intention v1 explicite; 64 combinaisons confrontees au rendu applique en banc jetable. D1b.3b: `prove nft --politique-daemon --actif` prend pour attendu la politique que le daemon declare avoir posee (requete IPC en lecture, relue avant et apres la collecte); daemon reel en banc jetable: correspondance, quatre alterations en ecart, droits retires et daemon arrete non mesures. D1b.3c (identite): le client exige un serveur root (SO_PEERCRED) avant de lire la declaration, sinon UNMEASURED daemon-identity; regle Windows (proprietaire du pipe LocalSystem) livree dans bifrost-ipc, sans preuve Windows qui l'appelle encore. Toutes les commandes de la CLI verifient aussi le serveur avant d'ecrire (root; Windows LocalSystem ou Administrateurs), refus en code 4, rien envoye; un compte ordinaire refuse sans rien recevoir en banc jetable. Ni preuve globale du VPN ni validation Windows | D1b.3c: objets nft hors perimetre, collecte WFP |
+| 09 | Souverainete verifiable. D1a: `prove binaire`. D1b.1: comparaison nft hors ligne. D1b.2: collecte Linux passive encadree par GETGEN. D1b.3a: `prove nft --politique` engendre la reference produit depuis une intention v1 explicite; 64 combinaisons confrontees au rendu applique en banc jetable. D1b.3b: `prove nft --politique-daemon --actif` prend pour attendu la politique que le daemon declare avoir posee (requete IPC en lecture, relue avant et apres la collecte); daemon reel en banc jetable: correspondance, quatre alterations en ecart, droits retires et daemon arrete non mesures. D1b.3c (identite): le client exige un serveur root (SO_PEERCRED) avant de lire la declaration, sinon UNMEASURED daemon-identity; regle Windows (proprietaire du pipe LocalSystem) livree dans bifrost-ipc et exigee par `prove wfp`. D1b.3c (WFP): `prove wfp --politique-daemon --actif` confronte le moteur WFP a la politique que le daemon declare avoir posee, par le meme lecteur de declaration que `prove nft` (identite, N1, mesure, N2); projection WFP v1 distincte de la nft; reference rendue par la traduction de la pose; enumeration en lecture seule dans une transaction unique; arbitrage des filtres tiers au poids effectif rendu par le moteur; banc jetable Windows avant fusion: MATCH, trois alterations en ecart, verrou non mesure, puis MATCH apres reprise; apres fusion, un daemon en console elevee est refuse par la preuve (UNMEASURED daemon-identity) et admis par `status`. Toutes les commandes de la CLI verifient aussi le serveur avant d'ecrire (root; Windows LocalSystem ou Administrateurs), refus en code 4, rien envoye; un compte ordinaire refuse sans rien recevoir en banc jetable. Ni preuve globale du VPN ni validation Windows | D1b.3c: objets nft hors perimetre; prove wfp face au service reel sous LocalSystem, en banc |
 
 ## Scripts
 

@@ -14,6 +14,8 @@ use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 
+use crate::declaration::IdentiteDaemon;
+
 const MAX_OCTETS: u64 = 2 * 1024 * 1024;
 const LIMITE: &str =
     "Comparaison de fichiers fournis, pas une preuve du pare-feu actif ni de son etancheite.";
@@ -41,36 +43,6 @@ impl Capture {
             tables: self.tables.len(),
             chains: self.chaines.len(),
             rules: self.regles.values().map(Vec::len).sum(),
-        }
-    }
-}
-
-/// L'identite du serveur de la declaration, telle que le rapport la dit.
-///
-/// Absente du rapport hors de la preuve par declaration: une comparaison de
-/// fichiers n'a pas de serveur. Dans cette preuve, `null` tant qu'elle n'est
-/// pas etablie, puis le NOM de la regle qui l'a admise; jamais une valeur.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum IdentiteDaemon {
-    HorsPerimetre,
-    NonVerifiee,
-    // Hors Linux la preuve par declaration s'arrete avant toute lecture:
-    // aucune regle ne peut y etre verifiee.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    Verifiee(&'static str),
-}
-
-impl IdentiteDaemon {
-    fn hors_perimetre(&self) -> bool {
-        *self == IdentiteDaemon::HorsPerimetre
-    }
-}
-
-impl Serialize for IdentiteDaemon {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        match self {
-            IdentiteDaemon::Verifiee(regle) => s.serialize_str(regle),
-            _ => s.serialize_none(),
         }
     }
 }
@@ -109,11 +81,7 @@ impl Rapport {
     }
 
     pub fn texte(&self) -> String {
-        let identite = match self.daemon_identity {
-            IdentiteDaemon::HorsPerimetre => String::new(),
-            IdentiteDaemon::NonVerifiee => "identite du daemon: non verifiee\n".to_owned(),
-            IdentiteDaemon::Verifiee(regle) => format!("identite du daemon: {regle}\n"),
-        };
+        let identite = self.daemon_identity.ligne();
         format!(
             "{}  {}\n{}\n{identite}entree non mesuree: {}\necarts: {}\n\n{}\n",
             self.verdict,
@@ -496,7 +464,7 @@ pub async fn verifier_declaration(socket: &str) -> Rapport {
     #[cfg(target_os = "linux")]
     {
         verifier_declaration_avec(
-            move || crate::preuve_nft_daemon::lire(socket),
+            move || crate::declaration::lire(socket),
             crate::preuve_nft_linux::collecter,
         )
         .await
@@ -526,73 +494,70 @@ fn commencer_declaration() -> Rapport {
     r
 }
 
+impl crate::declaration::Suivi for Rapport {
+    fn entree_manquante(&mut self, entree: &'static str) {
+        self.failed_input = Some(entree);
+    }
+    fn identite(&mut self, identite: IdentiteDaemon) {
+        self.daemon_identity = identite;
+    }
+}
+
+/// Le moteur dont cette preuve lit la projection: les six champs projetes
+/// sont ceux que lit le rendu nft; pour un autre moteur ils ne decrivent pas
+/// ce qui a ete pose, et une correspondance serait fortuite.
+#[cfg(target_os = "linux")]
+const PERIMETRE: crate::declaration::Perimetre = crate::declaration::Perimetre {
+    moteur: "nftables",
+    autre_moteur: "moteur de pare-feu du daemon hors perimetre de la reference nft",
+    echec: "derniere application du daemon en echec: etat du noyau inconnu du daemon",
+};
+
 /// Le protocole, separe de ses deux sources pour que les recettes sans
 /// privilege le jouent avec un faux daemon et une fausse capture.
 ///
-/// Ordre impose: declaration (N1), collecte encadree par deux GETGEN,
-/// declaration (N2). N1 et N2 doivent etre IDENTIQUES en entier (instance,
-/// numero, issue, politique): une application glissee entre les deux, meme
-/// vers la meme politique, rend la capture non attribuable. Rien de la
-/// declaration n'entre dans le rapport, hors la version de schema: ni les
-/// parametres, ni le numero, ni l'instance.
-///
-/// Chaque lecture exige l'identite du serveur AVANT de lui ecrire (voir
-/// `preuve_nft_daemon::lire`). Le rapport en garde le NOM de la regle, et
-/// `failed_input = daemon-identity` quand c'est elle qui manque, a N1 comme a
-/// N2: une declaration dont le second serveur n'est pas admis n'est pas
-/// attribuable non plus.
+/// N1, collecte encadree par deux GETGEN, N2: le protocole commun des preuves
+/// par declaration (`declaration::encadrer`), avec son exigence d'identite et
+/// ce qu'il en dit au rapport. Seule la mesure est propre a nft.
 #[cfg(target_os = "linux")]
 pub(crate) async fn verifier_declaration_avec<L, FL, C, FC>(
-    mut lire_declaration: L,
+    lire_declaration: L,
     collecter: C,
 ) -> Rapport
 where
     L: FnMut() -> FL,
-    FL: std::future::Future<
-            Output = Result<crate::preuve_nft_daemon::Lue, crate::preuve_nft_daemon::Refus>,
-        >,
+    FL: std::future::Future<Output = Result<crate::declaration::Lue, crate::declaration::Refus>>,
     C: FnOnce() -> FC,
     FC: std::future::Future<Output = Result<Vec<u8>, &'static str>>,
 {
-    use crate::preuve_nft_daemon::Refus;
     let debut = Instant::now();
     let mut r = commencer_declaration();
     let resultat = async {
-        let (premiere, regle) = lire_declaration().await.map_err(|refus| {
-            r.failed_input = Some(refus.entree());
-            refus.raison()
-        })?;
-        r.daemon_identity = IdentiteDaemon::Verifiee(regle);
-        let politique = crate::preuve_nft_daemon::politique_posee(&premiere)?;
-        // Le meme lecteur strict que `--politique`: la declaration ne passe pas
-        // par un chemin plus indulgent que celui d'un fichier. Ce qu'il refuse
-        // (interface `lo`, UID root ou partage, DNS hors boucle locale avec un
-        // resolveur) est hors du perimetre de la reference: NON MESURE.
-        let p = bifrost_firewall::politique_nft::Politique::lire(politique.clone())
-            .map_err(|_| "politique declaree hors du perimetre de la reference nft v1")?;
-        let octets = serde_json::to_vec(&p.reference()?).map_err(|_| "reference impossible")?;
-        let a = analyser(&octets)?;
-        r.policy_schema_version = Some(1);
-        r.expected_counts = Some(a.compte());
-        r.failed_input = Some("observed");
-        let b = collecter().await?;
-        r.live_kernel = true;
-        r.generation_verified = true;
-        r.failed_input = Some("daemon-declaration");
-        let (seconde, _) = lire_declaration().await.map_err(|refus| match refus {
-            Refus::Identite(raison) => {
-                r.failed_input = Some(refus.entree());
-                r.daemon_identity = IdentiteDaemon::NonVerifiee;
-                raison
-            }
-            Refus::Declaration(_) => {
-                "declaration du daemon illisible ou injoignable apres la collecte"
-            }
-        })?;
-        if seconde != premiere {
-            return Err("declaration du daemon modifiee pendant la collecte");
-        }
-        r.failed_input = Some("observed");
+        let (a, b) = crate::declaration::encadrer(
+            &mut r,
+            lire_declaration,
+            &PERIMETRE,
+            async move |r: &mut Rapport, politique: &Value| {
+                // Le meme lecteur strict que `--politique`: la declaration ne
+                // passe pas par un chemin plus indulgent que celui d'un
+                // fichier. Ce qu'il refuse (interface `lo`, UID root ou
+                // partage, DNS hors boucle locale avec un resolveur) est hors
+                // du perimetre de la reference: NON MESURE.
+                let p = bifrost_firewall::politique_nft::Politique::lire(politique.clone())
+                    .map_err(|_| "politique declaree hors du perimetre de la reference nft v1")?;
+                let octets =
+                    serde_json::to_vec(&p.reference()?).map_err(|_| "reference impossible")?;
+                let a = analyser(&octets)?;
+                r.policy_schema_version = Some(1);
+                r.expected_counts = Some(a.compte());
+                r.failed_input = Some("observed");
+                let b = collecter().await?;
+                r.live_kernel = true;
+                r.generation_verified = true;
+                Ok((a, b))
+            },
+        )
+        .await?;
         confronter(&mut r, a, &b)
     }
     .await;

@@ -2,6 +2,9 @@
 
 #![forbid(unsafe_code)]
 
+/// Le lecteur de la declaration du daemon, commun a `prove nft` et a
+/// `prove wfp`: identite du serveur, N1, mesure, N2.
+mod declaration;
 mod inspection;
 mod pilote;
 mod preuve;
@@ -10,6 +13,7 @@ mod preuve_nft;
 mod preuve_nft_daemon;
 #[cfg(target_os = "linux")]
 mod preuve_nft_linux;
+mod preuve_wfp;
 mod profile;
 mod render;
 /// La source des reprises sous Linux. Ici et pas dans le daemon: le producteur
@@ -190,6 +194,20 @@ enum CmdPreuve {
         observe: Option<std::path::PathBuf>,
         /// Linux: lecture seule du noyau, sans elevation ni changement de regles.
         #[arg(long, conflicts_with = "observe")]
+        actif: bool,
+    },
+    /// Windows: compare le moteur WFP a la politique que le daemon (--socket)
+    /// declare avoir posee, relue avant et apres une lecture transactionnelle
+    /// du moteur. Sans elevation, le moteur refuse la lecture: NON MESURE. Un
+    /// pipe qui n'appartient pas a LocalSystem n'est pas le service: NON
+    /// MESURE, et rien ne lui est envoye.
+    Wfp {
+        /// L'attendu est la declaration du daemon. Seule forme pour l'instant,
+        /// exigee pour que la ligne dise d'ou vient l'attendu.
+        #[arg(long = "politique-daemon", required = true)]
+        politique_daemon: bool,
+        /// Lecture seule du moteur courant, sans elevation ni changement.
+        #[arg(long, required = true)]
         actif: bool,
     },
     /// Compare un fichier a un SHA-256 fourni. N'authentifie pas son editeur.
@@ -873,6 +891,17 @@ async fn run(args: Args) -> anyhow::Result<i32> {
                     observe.as_ref().expect("valide par clap"),
                 )
             };
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&rapport)?);
+            } else {
+                print!("{}", rapport.texte());
+            }
+            return Ok(rapport.code());
+        }
+        Cmd::Prove {
+            quoi: CmdPreuve::Wfp { .. },
+        } => {
+            let rapport = preuve_wfp::verifier_declaration(&args.socket).await;
             if args.json {
                 println!("{}", serde_json::to_string_pretty(&rapport)?);
             } else {

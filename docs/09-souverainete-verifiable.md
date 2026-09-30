@@ -247,10 +247,11 @@ UNMEASURED. Aucun processus ne survit aux namespaces. Non mesures en banc:
 etat connecte, montee de l'interface, reconnexion, chemin WireGuard (marque),
 resolveur embarque reel.
 
-#### D1b.3c - Identite du serveur livree; autres objets et WFP (a faire)
+#### D1b.3c - Identite du serveur et preuve WFP livrees; objets nft hors perimetre (a faire)
 
 Identite du serveur de la declaration, livree. Avant d'ecrire le moindre octet,
-`prove nft --politique-daemon` exige du processus qui sert `--socket` une
+`prove nft --politique-daemon` et `prove wfp --politique-daemon` exigent du
+processus qui sert `--socket` une
 identite privilegiee (`IpcClient::connect_verified`). Linux: `SO_PEERCRED` sur
 le socket du client rend l'uid effectif du processus qui a appele `listen(2)`,
 fige a cet instant et traduit dans l'espace de noms utilisateur du client; il
@@ -312,24 +313,66 @@ Acceptation, banc jetable: un faux daemon qui rejoue la vraie declaration sur un
 `--socket` choisi, noyau conforme, rend MATCH sous root et UNMEASURED
 `daemon-identity` sous un autre compte, sans recevoir une seule requete.
 
-Collecteurs dedies en lecture seule: enumeration WFP sur Windows. Comparer
-famille, couches/hooks, priorites, filtres, exceptions, interface, destinations
-autorisees et persistance a une politique attendue versionnee. Documenter les
-effets de composition avec les regles tierces. Lire avant/apres l'identite de
-la generation active; si elle change pendant la collecte, rendre NON MESURE. Ne
-pas confondre absence de table et acces refuse. Verifier cote client
-l'identite du processus qui sert la declaration.
+Politique WFP confrontee a la declaration, livree.
+`bifrost-cli --json prove wfp --politique-daemon --actif` est le pendant
+Windows de `prove nft --politique-daemon`, et passe par le meme lecteur: meme
+exigence d'identite (LocalSystem seul), meme protocole N1, mesure, N2, memes
+raisons, memes champs `failed_input` et `daemon_identity`. Quand le moteur est
+WFP, la declaration porte une projection distincte (`projection = wfp`,
+version 1): les champs que lit le plan WFP, plus ce que le moteur a lu de son
+hote pour poser (binaire du daemon, SID de son jeton, LUID de l'interface). Ces
+valeurs ne vont qu'a un appelant admis sur le canal du daemon, et la preuve ne
+les recopie jamais dans son rapport. La projection nft des autres moteurs est
+inchangee; les deux ne se lisent jamais l'une pour l'autre.
 
-Acceptation: regle retiree, exception trop large, filtre tiers prioritaire,
-interface remplacee, donnees tronquees, acces refuse, generation modifiee.
-Chaque alteration doit supprimer la conformite, avec le controle en cause.
-Eprouver sur machines jetables; ne pas couper le reseau du poste de travail.
+La reference est rendue par le plan WFP du produit et par la MEME traduction
+que la pose, jamais par une copie ecrite a la main: une condition inapplicable a
+sa couche fait echouer la reference comme elle fait echouer la pose. Elle a
+besoin de deux valeurs de l'hote qui prouve (identifiant d'application d'un
+chemin, identite en liste de controle d'acces), et le dit. L'observe est
+enumere en lecture seule, sans elevation implicite, dans une seule transaction
+en lecture seule qui tient le role du GETGEN: WFP ne publie pas de numero de
+generation. Sous-couches et filtres des quatre couches ALE, desactives compris.
+Un appelant sans droit recoit un refus, jamais une liste vide.
+
+Trois controles: les objets de Bifrost (multi-ensemble normalise), la
+sous-couche et le fournisseur, l'arbitrage. Un filtre tiers defait un blocage de
+Bifrost s'il est evalue avant lui et que son action ne se laisse pas ecraser
+(autorisation dure, callout terminal ou inconnu), dans une sous-couche de poids
+au moins egal au poids EFFECTIF que le moteur a rendu a celle de Bifrost: le
+moteur rebat un poids de sous-couche qui entre en collision, si bien qu'une
+valeur demandee maximale peut atterrir sous une sous-couche tierce. Tout ce que
+la reference ne sait pas decrire rend UNMEASURED, jamais MATCH. Codes MATCH/0,
+MISMATCH/1, UNMEASURED/2; `expected_source=daemon-declared-active-policy`; ni
+chemin, ni SID, ni LUID, ni GUID dans le rapport. MATCH dit que le moteur porte
+les filtres que le daemon declare avoir poses et qu'aucun filtre tiers lisible
+des quatre couches ALE ne peut defaire leurs blocages; les filtres illisibles
+par l'appelant et les callouts noyau echappent a la lecture. Ce n'est pas une
+preuve d'etancheite du VPN.
+
+Acceptation, banc jetable Windows le 30/09/2026, avant la fusion avec l'identite
+du serveur et le permis DNS par famille: daemon reel, kill switch pose avec le
+LAN ouvert, sans filtre de demarrage ni redemarrage: MATCH; regle retiree,
+exception trop large, filtre tiers prioritaire en ecart puis MATCH apres
+reprise; verrou de transaction tenu par un tiers: UNMEASURED puis MATCH. Par
+recette: regle desactivee, interface remplacee, action hors reference,
+declaration changee entre les deux lectures, acces refuse, donnees tronquees,
+serveur non admis a la premiere ou a la seconde lecture. Apres la fusion, banc jetable Windows le 30/09/2026: un daemon
+lance en console elevee, kill switch pose, 25 filtres; `status` est admis par
+la regle des commandes, la preuve rend UNMEASURED `daemon-identity` et le
+daemon ne journalise aucune requete de sa part. Non mesure en banc apres la
+fusion: la preuve face au service reel sous LocalSystem, dont le MATCH n'est
+etabli que par recette.
+
+Reste a faire: objets nft hors perimetre du comparateur.
 
 La collecte Linux D1b.2 encadre le dump par la generation nftables (`getgen`/`id`),
 pas par deux horodatages. Deux captures identiques seules ne prouvent pas
 l'absence d'un changement transitoire. D1b reste incomplet: sous Linux, l'attendu peut venir de la declaration d'un serveur root, que le
 client verifie avant de la lire, mais rien n'etablit que ce serveur est le
-daemon; les objets hors perimetre et la couverture WFP manquent. Une
+daemon; sous Windows, la preuve n'admet que le pipe de LocalSystem, sans
+etablir non plus que son serveur est le daemon. Les objets nft hors perimetre
+manquent. Une
 intention permissive ou obsolete n'est pas rendue fiable par le fait que le
 produit sait la representer, ni par le fait que le daemon la declare.
 

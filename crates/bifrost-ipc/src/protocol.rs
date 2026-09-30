@@ -127,7 +127,7 @@ pub enum Command {
     ///
     /// Aucun parametre, aucun effet: elle ne pose rien, ne change aucun etat,
     /// et passe par le meme controle d'acces que `Status`. Elle ne transporte
-    /// ni cle ni profil, seulement les six champs que le moteur nft lit (voir
+    /// ni cle ni profil, seulement les champs que le moteur appele lit (voir
     /// [`DeclarationPareFeu`]).
     DeclarationPareFeu,
 }
@@ -219,13 +219,22 @@ pub struct DeclarationPareFeu {
     /// `KillSwitch::backend` du moteur appele, par exemple `nftables`.
     pub moteur: String,
     pub issue: IssueApplication,
-    /// Presente si et seulement si `issue` vaut `posee`: la projection v1
-    /// (`bifrost_firewall::politique_nft::Politique::projeter`) de la
-    /// politique EXACTE remise au moteur, soit les six champs que le rendu nft
-    /// lit. Aucune cle, aucun point d'acces, aucun chemin: ni le profil ni les
-    /// executables n'en font partie. Pour un autre moteur que `nftables`, ces
-    /// six champs ne decrivent pas ce que le moteur lit, et un lecteur doit
-    /// refuser de s'en servir.
+    /// Presente si et seulement si `issue` vaut `posee`: la projection de la
+    /// politique EXACTE remise au moteur, sur les champs que CE moteur lit.
+    ///
+    /// - `moteur` = `wfp`: la projection WFP v1
+    ///   (`bifrost_firewall::politique_wfp::PolitiqueWfp::projeter`), onze cles
+    ///   dont `projection` = `wfp`: les six champs que le plan WFP lit, et ce
+    ///   que le moteur a lu de son hote pour poser (binaire du daemon, SID de
+    ///   son jeton, LUID autorise). Des chemins d'executables et un SID en font
+    ///   donc partie: ils ne sont transmis qu'a un appelant admis sur le canal
+    ///   du daemon, et une preuve ne les recopie jamais dans son rapport.
+    /// - tout autre moteur: la projection nft v1
+    ///   (`bifrost_firewall::politique_nft::Politique::projeter`), les six
+    ///   champs que le rendu nft lit, sans aucun chemin.
+    ///
+    /// Aucune cle ni point d'acces dans l'une ou l'autre. Un lecteur lit la
+    /// projection du moteur qu'il sait comparer, et refuse toute autre.
     pub politique: Option<serde_json::Value>,
 }
 

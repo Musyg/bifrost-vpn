@@ -32,6 +32,14 @@ pub mod regles_nft;
 /// Reference nft pure, versionnee et derivee d'une intention explicite.
 pub mod politique_nft;
 
+/// Projection WFP de la politique remise au moteur, et reference pure rendue
+/// par [`wfp_plan`]: le pendant de [`politique_nft`] pour `prove wfp`.
+pub mod politique_wfp;
+
+/// Ce qu'une lecture du moteur WFP rend, en donnee pure: pour que la preuve et
+/// ses recettes a enumerateur factice compilent et comptent sur les deux hotes.
+pub mod instantane_wfp;
+
 #[cfg(target_os = "linux")]
 pub mod linux;
 

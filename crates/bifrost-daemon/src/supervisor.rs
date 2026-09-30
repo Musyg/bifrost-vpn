@@ -13,7 +13,9 @@ use std::time::{Duration, Instant, SystemTime};
 
 use bifrost_core::checks::CheckReport;
 use bifrost_core::config::Portage;
-use bifrost_core::ports::{DnsManager, FirewallPolicy, KillSwitch, TunnelDevice};
+use bifrost_core::ports::{
+    DnsManager, EnvironnementMoteur, FirewallPolicy, KillSwitch, TunnelDevice,
+};
 use bifrost_core::profil::{Profil, Profils};
 use bifrost_core::state::{Action, Event, State, StateMachine, TunnelStatus};
 use bifrost_core::{Error, Result, TunnelConfig};
@@ -143,8 +145,13 @@ enum Retenue {
     Aucune,
     /// La politique EXACTE remise au moteur, apres que le superviseur l'a
     /// completee (handle du tunnel, identite du coeur, restriction du
-    /// resolveur), et que le moteur a acceptee.
-    Posee(Box<FirewallPolicy>),
+    /// resolveur), et que le moteur a acceptee; avec ce que le moteur dit
+    /// avoir lu de son hote pour la poser (`KillSwitch::environnement`), lu
+    /// juste apres sa reponse.
+    Posee {
+        politique: Box<FirewallPolicy>,
+        environnement: Option<EnvironnementMoteur>,
+    },
     Retiree,
     /// Le moteur a refuse. On ne garde PAS la politique precedente: rien ne
     /// dit ce que le noyau porte apres un refus, et la declarer encore serait
@@ -191,9 +198,12 @@ impl Declaration {
     fn publier(&self, moteur: &str) -> DeclarationPareFeu {
         let (issue, politique) = match &self.retenue {
             Retenue::Aucune => (IssueApplication::Aucune, None),
-            Retenue::Posee(p) => (
+            Retenue::Posee {
+                politique,
+                environnement,
+            } => (
                 IssueApplication::Posee,
-                serde_json::to_value(bifrost_firewall::politique_nft::Politique::projeter(p)).ok(),
+                projeter(moteur, politique, environnement.as_ref()),
             ),
             Retenue::Retiree => (IssueApplication::Retiree, None),
             Retenue::Echec => (IssueApplication::Echec, None),
@@ -206,6 +216,32 @@ impl Declaration {
             issue,
             politique,
         }
+    }
+}
+
+/// La projection que lit le moteur NOMME: chaque moteur ne lit pas les memes
+/// champs, et une projection d'un autre moteur ne decrirait pas ce qui a ete
+/// pose.
+///
+/// Pour WFP, la projection exige ce que le moteur a lu de son hote. S'il ne
+/// l'a pas rendu, aucune politique n'est jointe: le lecteur strict refuse
+/// alors la declaration (issue `posee` sans politique) plutot que de comparer
+/// une politique incomplete. Tout autre moteur garde la projection nft v1,
+/// telle que D1b.3b l'a livree.
+fn projeter(
+    moteur: &str,
+    politique: &FirewallPolicy,
+    environnement: Option<&EnvironnementMoteur>,
+) -> Option<serde_json::Value> {
+    if moteur == bifrost_firewall::politique_wfp::MOTEUR {
+        let projection =
+            bifrost_firewall::politique_wfp::PolitiqueWfp::projeter(politique, environnement?)?;
+        serde_json::to_value(projection).ok()
+    } else {
+        serde_json::to_value(bifrost_firewall::politique_nft::Politique::projeter(
+            politique,
+        ))
+        .ok()
     }
 }
 
@@ -1695,7 +1731,10 @@ impl Supervisor {
                 // copie reconstruite, et un refus n'est jamais note comme pose.
                 let pose = self.firewall.engage(&policy);
                 self.declaration.noter(match pose {
-                    Ok(()) => Retenue::Posee(policy),
+                    Ok(()) => Retenue::Posee {
+                        politique: policy,
+                        environnement: self.firewall.environnement(),
+                    },
                     Err(_) => Retenue::Echec,
                 });
                 pose?;
@@ -4059,6 +4098,97 @@ mod tests {
         let d = sup.declaration();
         assert_eq!(d.issue, IssueApplication::Retiree);
         assert_eq!(d.application, 3);
+        assert_eq!(d.politique, None);
+    }
+
+    /// Doublure du moteur WFP: elle note la politique recue et rend, comme le
+    /// vrai moteur, ce qu'elle a lu de son hote pour la poser. Le LUID rendu
+    /// est celui de la politique, comme `resolve_luid` quand le device en
+    /// fournit un.
+    struct FauxWfp {
+        vues: Arc<Mutex<Vec<FirewallPolicy>>>,
+        muet: bool,
+        derniere: Option<EnvironnementMoteur>,
+    }
+
+    impl FauxWfp {
+        fn environnement_de(p: &FirewallPolicy) -> EnvironnementMoteur {
+            EnvironnementMoteur {
+                executable: std::path::PathBuf::from(r"C:\Bifrost\bifrost-daemon.exe"),
+                identite: "S-1-5-18".into(),
+                interface: p.tunnel_luid,
+            }
+        }
+    }
+
+    impl KillSwitch for FauxWfp {
+        fn engage(&mut self, policy: &FirewallPolicy) -> Result<()> {
+            self.vues.lock().unwrap().push(policy.clone());
+            self.derniere = (!self.muet).then(|| Self::environnement_de(policy));
+            Ok(())
+        }
+        fn disengage(&mut self) -> Result<()> {
+            self.derniere = None;
+            Ok(())
+        }
+        fn is_engaged(&self) -> Result<bool> {
+            Ok(!self.vues.lock().unwrap().is_empty())
+        }
+        fn backend(&self) -> &'static str {
+            bifrost_firewall::politique_wfp::MOTEUR
+        }
+        fn environnement(&self) -> Option<EnvironnementMoteur> {
+            self.derniere.clone()
+        }
+    }
+
+    /// Sous WFP, la declaration est la projection WFP de la politique RECUE,
+    /// avec l'environnement que le moteur a rendu: jamais la projection nft,
+    /// qui ne dit rien de ce que WFP lit, et jamais une politique recalculee.
+    #[test]
+    fn un_moteur_wfp_declare_sa_projection_avec_son_environnement() {
+        use bifrost_firewall::politique_wfp::PolitiqueWfp;
+        let vues = Arc::new(Mutex::new(Vec::new()));
+        let mut sup = superviseur_declarant(Box::new(FauxWfp {
+            vues: vues.clone(),
+            muet: false,
+            derniere: None,
+        }));
+        sup.connect(cfg_embarque()).expect("connexion");
+        let vues = vues.lock().unwrap().clone();
+        assert_eq!(vues.len(), 2, "deux armements attendus: {vues:?}");
+        let d = sup.declaration();
+        assert_eq!(d.moteur, "wfp");
+        assert_eq!(d.issue, IssueApplication::Posee);
+        assert_eq!(d.application, 2);
+        let politique = d.politique.expect("une politique posee est jointe");
+        let attendue =
+            PolitiqueWfp::projeter(&vues[1], &FauxWfp::environnement_de(&vues[1])).unwrap();
+        assert_eq!(politique, serde_json::to_value(&attendue).unwrap());
+        assert_eq!(politique["tunnel_luid"], 0xdead_beef_u64);
+        assert_eq!(politique["identite"], "S-1-5-18");
+        assert_eq!(
+            politique["coeur_executable"],
+            "/opt/bifrost/coeurs/sing-box"
+        );
+        // Relue par le lecteur strict de la preuve, jamais par celui de nft.
+        assert_eq!(PolitiqueWfp::lire(politique.clone()).unwrap(), attendue);
+        assert!(bifrost_firewall::politique_nft::Politique::lire(politique).is_err());
+    }
+
+    /// Un moteur WFP qui ne rend pas son environnement ne fait pas declarer
+    /// une politique incomplete: aucune n'est jointe, et la preuve refusera
+    /// la declaration plutot que de comparer ce qui manque.
+    #[test]
+    fn un_moteur_wfp_sans_environnement_ne_joint_aucune_politique() {
+        let mut sup = superviseur_declarant(Box::new(FauxWfp {
+            vues: Arc::new(Mutex::new(Vec::new())),
+            muet: true,
+            derniere: None,
+        }));
+        sup.connect(cfg_embarque()).expect("connexion");
+        let d = sup.declaration();
+        assert_eq!(d.issue, IssueApplication::Posee);
         assert_eq!(d.politique, None);
     }
 
