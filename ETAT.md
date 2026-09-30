@@ -24,20 +24,25 @@ La CI automatique couvre Linux; Windows est lance uniquement sur demande
 (`workflow_dispatch`, option `windows=true`) pour maitriser le quota. Un job
 Windows saute n'atteste rien sur cette plateforme. Voir le README pour le
 lancement avant une livraison Windows et la revision effectivement mesuree.
+Les etapes des jobs `controles` et `fuite` tournent sous `bash -eo pipefail`
+depuis le 30/09/2026 (`defaults.run.shell: bash`): avant, le shell implicite
+`bash -e` rendait le code du dernier element d'un tube, et
+`recettes-strict.sh | tee` restait vert quand une recette rougissait. La recette
+`tubes_sous_pipefail.rs` exige `shell: bash` de toute etape qui porte un tube.
 
 Les comptes ci-dessous ont ete pris le 30/09/2026 sur l'arbre qui porte le
 portage des corrections du tableau de survie et des abstentions, puis D1b.3b,
 l'identite du serveur de D1b.3c, sa verification par toutes les commandes de
-la CLI et la correction du permis DNS Windows par famille. L'hote qui tient le role `essai-linux` a change le
-29/09: ses comptes ne se comparent pas a ceux d'avant cette date.
+la CLI et la correction du permis DNS Windows par famille, puis la garde des
+tubes sous pipefail. L'hote qui tient le role `essai-linux` a change le 29/09: ses comptes ne se comparent pas a ceux d'avant cette date.
 
 Compte honnete des recettes cargo, par hote. La colonne `reelles` est ce qui a
 verifie quelque chose: `annoncees` moins `abstentions` moins `rouges`.
 
 | Hote | Annoncees | Abstentions | Rouges | Reelles |
 |---|---|---|---|---|
-| dev-windows | 1291 | 19 | 0 | 1272 |
-| essai-linux | 1304 | 26 | 0 | 1278 |
+| dev-windows | 1297 | 19 | 0 | 1278 |
+| essai-linux | 1310 | 26 | 0 | 1284 |
 
 Les deux lignes ont ete prises par `scripts/recettes-strict.sh`, chacune sur son
 hote: le portage a ajoute 14 recettes des deux cotes, D1b.3b 11 sur dev-windows et 22
@@ -45,7 +50,8 @@ sur `essai-linux`, D1b.3c (identite du serveur de la declaration) 4 sur
 dev-windows et 5 sur `essai-linux`, la verification du serveur par les commandes
 9 sur dev-windows et 7 sur `essai-linux`, le permis DNS par famille 8 sur
 dev-windows et 6 sur `essai-linux` (ses deux recettes de traduction reelle ne
-tournent que sous Windows). Sur `essai-linux`
+tournent que sous Windows), la garde des tubes sous pipefail 6 des deux cotes.
+Sur `essai-linux`
 une recette de plus est ignoree par construction
 (elle pose une route et ne tourne qu'en espace de noms reseau), et la garde des
 modes de scripts s'y abstient parce que la copie mesuree n'a pas de `.git` (elle

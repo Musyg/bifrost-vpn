@@ -75,7 +75,7 @@ abstentions=0
 echecs=0
 
 for cible in $CIBLES; do
-    if ! printf '%s\n' "$INSTALLEES" | grep -qx "$cible"; then
+    if ! printf '%s\n' "$INSTALLEES" | grep -x "$cible" >/dev/null; then
         echo "ABSTENTION  $cible"
         echo "            non installee. Pour l'activer: rustup target add $cible"
         abstentions=$((abstentions + 1))
@@ -91,7 +91,7 @@ for cible in $CIBLES; do
     # c'est une chaine C absente pour cette cible. Le compter comme un echec
     # apprendrait a ignorer le rouge, ce qui coute plus cher que l'abstention.
     natif=$(grep -oE "failed to run custom build command for .[a-z0-9_-]+" \
-        "/tmp/check-$cible.log" | head -1 | sed 's/.*for .//')
+        "/tmp/check-$cible.log" | sed -n 1p | sed 's/.*for .//')
     if [ -n "$natif" ]; then
         echo "ABSTENTION  $cible"
         echo "            '$natif' compile du C et son script echoue d'ici."
@@ -100,7 +100,7 @@ for cible in $CIBLES; do
         continue
     fi
     echo "ECHEC       $cible"
-    grep -E "^error" -A 4 "/tmp/check-$cible.log" | head -30 | sed 's/^/            /'
+    grep -E "^error" -A 4 "/tmp/check-$cible.log" | sed -n 1,30p | sed 's/^/            /'
     echecs=$((echecs + 1))
     verifiees=$((verifiees + 1))
 done

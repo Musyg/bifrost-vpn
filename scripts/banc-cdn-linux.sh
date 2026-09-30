@@ -183,7 +183,7 @@ fi
 curl -s --max-time 10 -o /dev/null https://api.cloudflare.com/ ||
 	manquant "premisses: api.cloudflare.com injoignable, ce banc a besoin d'Internet"
 for p in "$PORT_WS" "$PORT_HU" "$PORT_FRONT" "$PORT_BANNIERE"; do
-	if ss -lnt 2> /dev/null | grep -q ":$p "; then
+	if ss -lnt 2> /dev/null | grep ":$p " > /dev/null; then
 		manquant "premisses: le port $p est deja pris, le banc refuse de se meler a autre chose"
 	fi
 done
@@ -196,8 +196,8 @@ else
 	dire "   Le client partagera la boucle locale de la banniere: les quatre"
 	dire "   cellules restent valides, le temoin negatif est perdu."
 fi
-dire "   sing-box: $("$COEUR" version 2>&1 | head -1)"
-dire "   $("$CLOUDFLARED" --version 2>&1 | head -1)"
+dire "   sing-box: $("$COEUR" version 2>&1 | sed -n 1p)"
+dire "   $("$CLOUDFLARED" --version 2>&1 | sed -n 1p)"
 
 # ---------------------------------------------------------------------------
 # 1. L'etat, hors du depot. Les secrets naissent ici et n'en sortent pas.
@@ -478,11 +478,11 @@ fi
 nginx -c "$BASE/nginx/nginx.conf"
 
 for _ in $(seq 1 40); do
-	ss -lnt 2> /dev/null | grep -q ":$PORT_FRONT " &&
-		ss -lnt 2> /dev/null | grep -q ":$PORT_WS " && break
+	ss -lnt 2> /dev/null | grep ":$PORT_FRONT " > /dev/null &&
+		ss -lnt 2> /dev/null | grep ":$PORT_WS " > /dev/null && break
 	sleep 0.25
 done
-if curl -s --max-time 5 "http://127.0.0.1:$PORT_BANNIERE/" | grep -q "$ATTENDU"; then
+if curl -s --max-time 5 "http://127.0.0.1:$PORT_BANNIERE/" | grep "$ATTENDU" > /dev/null; then
 	passe "pile: la banniere repond sur la boucle locale de l'hote"
 else
 	casse "pile: la banniere ne repond pas, rien de ce qui suit n'aurait de sens"
@@ -518,7 +518,7 @@ echo $! >> "$PIDS"
 
 HOTE=""
 for _ in $(seq 1 60); do
-	HOTE=$(grep -oE "https://[a-z0-9-]+\.trycloudflare\.com" "$BASE/tunnel.log" 2> /dev/null | head -1)
+	HOTE=$(grep -oE "https://[a-z0-9-]+\.trycloudflare\.com" "$BASE/tunnel.log" 2> /dev/null | sed -n 1p)
 	[ -n "$HOTE" ] && break
 	sleep 1
 done
@@ -537,12 +537,12 @@ sleep 3
 dire
 dire "== 4. ce qu'un sondage actif voit =="
 ENTETES=$(curl -s -i --max-time 25 "$HOTE/" 2>&1)
-if printf '%s' "$ENTETES" | grep -qi "^server: cloudflare" &&
-	printf '%s' "$ENTETES" | grep -q "Carnet de bord"; then
+if printf '%s' "$ENTETES" | grep -i "^server: cloudflare" > /dev/null &&
+	printf '%s' "$ENTETES" | grep "Carnet de bord" > /dev/null; then
 	passe "facade: une vraie page repond a travers le CDN"
 else
 	casse "facade: le CDN n'a pas rendu la page attendue"
-	printf '%s' "$ENTETES" | head -6 | sed 's/^/        /'
+	printf '%s' "$ENTETES" | sed -n 1,6p | sed 's/^/        /'
 fi
 CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 25 "$HOTE/robots.txt")
 if [ "$CODE" = "404" ]; then
@@ -565,7 +565,7 @@ essayer_transport() {
 	echo "$pid" >> "$PIDS"
 	local pret=1
 	for _ in $(seq 1 40); do
-		"${DANS_NS[@]}" ss -lnt 2> /dev/null | grep -q ":$PORT_SOCKS " && {
+		"${DANS_NS[@]}" ss -lnt 2> /dev/null | grep ":$PORT_SOCKS " > /dev/null && {
 			pret=0
 			break
 		}
@@ -626,13 +626,13 @@ if essayer_transport cdn-hu httpupgrade "$CHEMIN_HU" "$DOMAINE" 443 oui; then
 	dire "        avant d'en tirer parti."
 else
 	MOTIF=$(sed 's/\x1b\[[0-9;]*m//g' "$BASE/client-cdn-hu.log" |
-		grep -o "unexpected status: [0-9]*" | head -1)
+		grep -o "unexpected status: [0-9]*" | sed -n 1p)
 	passe "CDN + httpupgrade: refuse comme attendu (${MOTIF:-motif non lu})"
 	# L'imputation, qui vaut plus que le refus lui-meme: si l'edge a rejete, le
 	# front n'a PAS vu la requete. Sans ce controle, une origine cassee se lirait
 	# comme un refus de l'edge.
 	if sed -n "$((LIGNES_AVANT + 1)),\$p" "$BASE/nginx/logs/access.log" 2> /dev/null |
-		grep -q "$CHEMIN_HU"; then
+		grep "$CHEMIN_HU" > /dev/null; then
 		casse "imputation: le front a VU la requete, le refus ne vient donc pas de l'edge"
 	else
 		passe "imputation: aucune ligne nouvelle chez le front, l'edge a bien rejete"

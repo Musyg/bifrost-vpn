@@ -200,10 +200,10 @@ setsid ip netns exec "$NS_SRV" "$DAEMON" \
   --faux-resolveur "$TUN_SRV:53" --faux-resolveur-adresse "$DNS_ATTENDU" \
   >"$WORK/resolveur.log" 2>&1 &
 for _ in $(seq 1 20); do
-  ip netns exec "$NS_SRV" ss -lun 2>/dev/null | grep -q "$TUN_SRV:53" && break
+  ip netns exec "$NS_SRV" ss -lun 2>/dev/null | grep "$TUN_SRV:53" >/dev/null && break
   sleep 0.25
 done
-if ip netns exec "$NS_SRV" ss -lun 2>/dev/null | grep -q "$TUN_SRV:53"; then
+if ip netns exec "$NS_SRV" ss -lun 2>/dev/null | grep "$TUN_SRV:53" >/dev/null; then
   ok "faux resolveur en ecoute sur $TUN_SRV:53"
 else
   fail "le faux resolveur n'ecoute pas"; cat "$WORK/resolveur.log"
@@ -275,7 +275,7 @@ for _ in $(seq 1 40); do [ -S "$SOCKET" ] && break; sleep 0.25; done
 # Le PID du daemon lui-meme, et non celui de setsid: les sondes de resolution
 # doivent entrer dans SON namespace de montage pour voir le meme resolv.conf.
 # Le motif est le chemin du socket, unique a cette execution.
-DAEMON_REEL=$(pgrep -f "bifrost-daemon --socket $SOCKET" | head -1)
+DAEMON_REEL=$(pgrep -f "bifrost-daemon --socket $SOCKET" | sed -n 1p)
 [ -n "$DAEMON_REEL" ] || { echo "daemon introuvable"; cat "$DAEMON_LOG"; exit 1; }
 ok "daemon en ecoute (pid $DAEMON_REEL), resolv.conf isole de la machine"
 
@@ -301,10 +301,10 @@ setsid ip netns exec "$NS_CLI" setpriv \
   "$DAEMON" --faux-resolveur "127.0.0.1:53" --faux-resolveur-amont "$TUN_SRV:53" \
   >"$WORK/resolveur-local.log" 2>&1 &
 for _ in $(seq 1 20); do
-  ip netns exec "$NS_CLI" ss -lun 2>/dev/null | grep -q "127.0.0.1:53" && break
+  ip netns exec "$NS_CLI" ss -lun 2>/dev/null | grep "127.0.0.1:53" >/dev/null && break
   sleep 0.25
 done
-if ip netns exec "$NS_CLI" ss -lun 2>/dev/null | grep -q "127.0.0.1:53"; then
+if ip netns exec "$NS_CLI" ss -lun 2>/dev/null | grep "127.0.0.1:53" >/dev/null; then
   ok "resolveur embarque en ecoute sur 127.0.0.1:53 sous l'uid $RESOLVEUR_UID"
 else
   fail "le resolveur embarque n'ecoute pas"; cat "$WORK/resolveur-local.log"
@@ -322,14 +322,14 @@ fi
 for _ in $(seq 1 20); do
   ip netns exec "$NS_CLI" ping -c1 -W1 "$TUN_SRV" >/dev/null 2>&1 || true
   STATUS=$(ip netns exec "$NS_CLI" "$CLI" --socket "$SOCKET" --json status)
-  echo "$STATUS" | grep -q '"connected"' && break
+  echo "$STATUS" | grep '"connected"' >/dev/null && break
   sleep 0.5
 done
 
 echo "$STATUS" | sed 's/^/    /'
-echo "$STATUS" | grep -q '"state": *"connected"' && ok "status = connected" \
+echo "$STATUS" | grep '"state": *"connected"' >/dev/null && ok "status = connected" \
   || fail "status n'est pas connected"
-echo "$STATUS" | grep -q '"kill_switch_engaged": *true' && ok "kill switch arme" \
+echo "$STATUS" | grep '"kill_switch_engaged": *true' >/dev/null && ok "kill switch arme" \
   || fail "kill switch non arme alors que le tunnel est monte"
 
 if ip netns exec "$NS_CLI" ping -c2 -W2 "$TUN_SRV" >/dev/null 2>&1; then
@@ -351,7 +351,7 @@ step "Kill switch arme, la resolution de noms fonctionne toujours"
 # de l'hote, ce qui passerait toujours et ne prouverait rien.
 RESOLUTION=$(nsenter -t "$DAEMON_REEL" -m -n -- "$DAEMON" --resoudre "$NOM_RESOLU" 2>&1) \
   && RESOLU=oui || RESOLU=non
-if [ "$RESOLU" = oui ] && echo "$RESOLUTION" | grep -qx "$DNS_ATTENDU"; then
+if [ "$RESOLU" = oui ] && echo "$RESOLUTION" | grep -x "$DNS_ATTENDU" >/dev/null; then
   ok "$NOM_RESOLU resolu en $DNS_ATTENDU a travers le tunnel"
 else
   fail "resolution impossible avec le kill switch arme"
@@ -415,7 +415,7 @@ REGLES_DNS=$(ip netns exec "$NS_CLI" nft list chain inet bifrost output 2>/dev/n
 # passerait sur une regle qui ne ferme rien pour les applications ordinaires.
 # Trouve par mutation le 17/08/2026: sans --resolveur-utilisateur, ce controle
 # restait vert.
-if echo "$REGLES_DNS" | grep -qE "^[[:space:]]*udp dport 53 drop"; then
+if echo "$REGLES_DNS" | grep -E "^[[:space:]]*udp dport 53 drop" >/dev/null; then
   ok "les regles vivantes ferment le :53"
 else
   fail "aucun drop du :53 dans les regles vivantes"
@@ -423,8 +423,8 @@ else
 fi
 # Et l'ordre, qui est toute la difference entre une regle utile et une regle
 # decorative. `nft` rend les regles dans l'ordre d'application.
-LIGNE_DROP=$(echo "$REGLES_DNS" | grep -nE "^[[:space:]]*udp dport 53 drop" | head -1 | cut -d: -f1)
-LIGNE_TUNNEL=$(echo "$REGLES_DNS" | grep -n "oifname \"wgc\"\|oifname \"wg0\"" | head -1 | cut -d: -f1)
+LIGNE_DROP=$(echo "$REGLES_DNS" | grep -nE "^[[:space:]]*udp dport 53 drop" | sed -n 1p | cut -d: -f1)
+LIGNE_TUNNEL=$(echo "$REGLES_DNS" | grep -n "oifname \"wgc\"\|oifname \"wg0\"" | sed -n 1p | cut -d: -f1)
 if [ -n "$LIGNE_DROP" ] && [ -n "$LIGNE_TUNNEL" ] && [ "$LIGNE_DROP" -lt "$LIGNE_TUNNEL" ]; then
   ok "le drop du :53 precede l'acceptation du tunnel (lignes $LIGNE_DROP < $LIGNE_TUNNEL)"
 else
@@ -432,7 +432,7 @@ else
   echo "$REGLES_DNS" | sed 's/^/        /'
 fi
 # L'exception, elle, doit designer le resolveur et lui seul.
-if echo "$REGLES_DNS" | grep -q "meta skuid $RESOLVEUR_UID .*dport 53 accept"; then
+if echo "$REGLES_DNS" | grep "meta skuid $RESOLVEUR_UID .*dport 53 accept" >/dev/null; then
   ok "seul l'uid $RESOLVEUR_UID garde le droit d'emettre du :53"
 else
   fail "le resolveur n'a pas d'exception: son bootstrap serait bloque"
@@ -446,7 +446,7 @@ step "L'identite declaree au daemon se retrouve dans les regles posees"
 # conduit: c'est ici, sur les regles que le noyau applique vraiment, que la
 # chaine se verifie de bout en bout.
 REGLES=$(ip netns exec "$NS_CLI" nft list table inet bifrost 2>/dev/null || true)
-if echo "$REGLES" | grep -q "meta skuid $COEUR_UID accept"; then
+if echo "$REGLES" | grep "meta skuid $COEUR_UID accept" >/dev/null; then
   ok "le compte declare au demarrage est exempte par les regles vivantes"
 else
   fail "aucune exemption pour l'uid $COEUR_UID: le daemon ne transmet pas l'identite"
@@ -457,7 +457,7 @@ fi
 # DNS sont poses plus haut dans la chaine, donc un skuid nu laisserait le
 # coeur interroger n'importe quel resolveur en clair.
 if echo "$REGLES" | grep -B2 "meta skuid $COEUR_UID accept" \
-     | grep -q "meta skuid $COEUR_UID .* dport 53 drop"; then
+     | grep "meta skuid $COEUR_UID .* dport 53 drop" >/dev/null; then
   ok "le :53 du coeur tombe avant son autorisation de sortie"
 else
   fail "l'exemption du coeur precede la restriction DNS: fuite DNS rouverte"

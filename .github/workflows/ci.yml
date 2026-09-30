@@ -32,6 +32,18 @@ jobs:
     name: format, lint et tests (Linux)
     if: github.event_name != 'workflow_dispatch' || !inputs.windows
     runs-on: ubuntu-latest
+    # `shell: bash` pour toutes les etapes: GitHub lance alors
+    # `bash --noprofile --norc -eo pipefail {0}`. Sans `shell`, il lance
+    # `bash -e {0}`, SANS pipefail (documentation << Workflow syntax >>, table
+    # des valeurs de `shell`, relevee le 30/09/2026): la pipeline
+    # `./scripts/recettes-strict.sh | tee` rendait le code de `tee`, donc une
+    # recette rouge laissait l'etape verte et l'artefact du journal
+    # (`if: failure()`) n'etait jamais depose. La recette
+    # `crates/bifrost-evasion/tests/tubes_sous_pipefail.rs` exige ce reglage de
+    # toute etape qui porte un tube.
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Outillage
@@ -164,6 +176,11 @@ jobs:
     # script, le job reste ouvert bien apres que ses etapes ont reussi. Cette
     # borne evite d'immobiliser un runner pendant des heures.
     timeout-minutes: 25
+    # Sous pipefail, comme le job `controles` (voir son commentaire): sans
+    # `shell`, `constater | tee` rendrait le code de `tee`.
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Dependances du harnais

@@ -38,7 +38,7 @@ fi
 
 step "Le binaire designe repond"
 if [ "$AVEC_BINAIRE" = oui ]; then
-  VERSION=$("$BINAIRE" -version 2>&1 | head -1)
+  VERSION=$("$BINAIRE" -version 2>&1 | sed -n 1p)
   [ -n "$VERSION" ] && ok "dnscrypt-proxy $VERSION" || fail "le binaire ne rend pas sa version"
 else
   echo "  SKIP  dnscrypt-proxy introuvable: le designer en argument ou via RESOLVEUR"
@@ -50,7 +50,7 @@ step "Le generateur produit une configuration"
 # echoue alors qu'aucun compilateur n'avait ete trouve. Elle n'a pas besoin de
 # root; le dire vaut mieux que de mentir sur la cause.
 if ! cargo --version >/dev/null 2>&1; then
-  echo "SKIPPED: cargo inutilisable ici ($(cargo --version 2>&1 | head -1))."
+  echo "SKIPPED: cargo inutilisable ici ($(cargo --version 2>&1 | sed -n 1p))."
   echo "         Cette recette n'exige pas root: la relancer en utilisateur ordinaire."
   exit 3
 fi

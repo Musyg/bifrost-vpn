@@ -115,15 +115,15 @@ verifier_liste() {
   # accepte << runner >> pour un numero de run ne garde rien.
   local entete
   entete=$(grep '^[[:space:]]*#' "$liste" || true)
-  if ! printf '%s' "$entete" | grep -Eq '[0-9]{4}-[0-9]{2}-[0-9]{2}'; then
+  if ! printf '%s' "$entete" | grep -E '[0-9]{4}-[0-9]{2}-[0-9]{2}' >/dev/null; then
     echo "ECHEC: en-tete sans date (AAAA-MM-JJ) du releve: $liste"
     souci=1
   fi
-  if ! printf '%s' "$entete" | grep -Eqi 'run[[:space:]]+[0-9]{6,}'; then
+  if ! printf '%s' "$entete" | grep -Ei 'run[[:space:]]+[0-9]{6,}' >/dev/null; then
     echo "ECHEC: en-tete qui ne cite aucun run de CI par son numero (<< run NNNNNN >>): $liste"
     souci=1
   fi
-  if ! printf '%s' "$entete" | grep -Eqi 'commit[[:space:]]+[0-9a-f]{7,}'; then
+  if ! printf '%s' "$entete" | grep -Ei 'commit[[:space:]]+[0-9a-f]{7,}' >/dev/null; then
     echo "ECHEC: en-tete qui ne cite aucun commit par son SHA (<< commit abcdef0 >>): $liste"
     souci=1
   fi

@@ -207,7 +207,7 @@ for ns in "$NS_A" "$NS_B"; do
 done
 echo "   client 10.79.0.2 / 10.79.1.2, serveurs .1, banniere $ADR_BANNIERE des deux cotes"
 echo "   le client a-t-il une route vers la banniere ?"
-sudo ip netns exec "$NS_C" ip route get "$ADR_BANNIERE" 2>&1 | head -1 || true
+sudo ip netns exec "$NS_C" ip route get "$ADR_BANNIERE" 2>&1 | sed -n 1p || true
 
 echo "== 2. secrets =="
 PAIRE=$("$COEURS/sing-box" generate reality-keypair)
@@ -215,7 +215,7 @@ CLE_PRIVEE=$(echo "$PAIRE" | awk '/PrivateKey/{print $2}')
 CLE_PUBLIQUE=$(echo "$PAIRE" | awk '/PublicKey/{print $2}')
 UUID=$("$COEURS/sing-box" generate uuid)
 SHORT_ID=$("$COEURS/sing-box" generate rand 8 --hex)
-MDP=$(head -c 24 /dev/urandom | base64 | tr -d '/+=' | head -c 24)
+MDP=$(head -c 24 /dev/urandom | base64 | tr -d '/+=' | cut -c 1-24)
 for duo in "b $SNI_B" "cible $SNI_A"; do
   set -- $duo
   openssl req -x509 -newkey rsa:2048 -sha256 -days 2 -nodes \
@@ -289,8 +289,8 @@ for trio in "$NS_A a BIFROST-A" "$NS_B b BIFROST-B"; do
     "$COEURS/sing-box" run -c "$BANC/$2.json" >"$BANC/$2-serveur.log" 2>&1 &
 done
 sleep 2
-sudo ip netns exec "$NS_A" ss -lnt | grep -q ":$PORT " || { echo "FAILED: A muet"; tail -3 "$BANC/a-serveur.log"; exit 1; }
-sudo ip netns exec "$NS_B" ss -lnu | grep -q ":$PORT " || { echo "FAILED: B muet"; tail -3 "$BANC/b-serveur.log"; exit 1; }
+sudo ip netns exec "$NS_A" ss -lnt | grep ":$PORT " >/dev/null || { echo "FAILED: A muet"; tail -3 "$BANC/a-serveur.log"; exit 1; }
+sudo ip netns exec "$NS_B" ss -lnu | grep ":$PORT " >/dev/null || { echo "FAILED: B muet"; tail -3 "$BANC/b-serveur.log"; exit 1; }
 echo "   A (REALITY/tcp) et B (Hysteria2/udp) ecoutent, bannieres BIFROST-A et BIFROST-B posees"
 echo "   verification locale des bannieres:"
 sudo ip netns exec "$NS_A" curl -s --max-time 3 "http://$ADR_BANNIERE:$PORT_BANNIERE/" && echo " <- dans A"
@@ -384,7 +384,7 @@ sudo ip netns exec "$NS_C" "$CLI" --socket "$SOCKET" connect --config "$BANC/pro
 CODE=$?
 set -e
 echo "   code: $CODE"
-sudo ip netns exec "$NS_C" "$CLI" --socket "$SOCKET" --json status 2>&1 | grep -E "state|kill_switch" | head -4 || true
+sudo ip netns exec "$NS_C" "$CLI" --socket "$SOCKET" --json status 2>&1 | grep -E "state|kill_switch" | sed -n 1,4p || true
 
 echo "== 7. par ou passe le trafic ? =="
 banniere() {
@@ -407,7 +407,7 @@ echo "   -> le compteur qui suit le telechargement est celui des octets RECUS"
 
 echo "== 8. regles du kill switch, avant le gel =="
 sudo ip netns exec "$NS_C" nft list ruleset 2>/dev/null | grep -cE "drop" | xargs echo "   regles de rejet:" || true
-sudo ip netns exec "$NS_C" nft list ruleset 2>/dev/null | grep -E "skuid|drop" | head -6 || true
+sudo ip netns exec "$NS_C" nft list ruleset 2>/dev/null | grep -E "skuid|drop" | sed -n 1,6p || true
 
 echo "== 8bis. temoin negatif: hors du tunnel, rien ne sort =="
 # Le kill switch n'exempte que le coeur, par identite (skuid 65534). Une requete
@@ -505,7 +505,7 @@ for i in $(seq 1 30); do
   # Meme regle, et c'est ici qu'elle mordait: si le client ne rend rien a cet
   # instant, `grep` ne trouve rien, `pipefail` fait rendre 1 au pipeline, et la
   # boucle s'arretait au tour suivant sans une ligne de journal.
-  ETAT=$(sudo ip netns exec "$NS_C" "$CLI" --socket "$SOCKET" --json status 2>/dev/null | grep -o '"state": *"[a-z]*"' | head -1 || true)
+  ETAT=$(sudo ip netns exec "$NS_C" "$CLI" --socket "$SOCKET" --json status 2>/dev/null | grep -o '"state": *"[a-z]*"' | sed -n 1p || true)
   echo "   t+$(( $(date +%s) - DEBUT ))s: banniere='$VU' drop=$RESTE rx=$RX $ETAT"
   if [ "$VU" = "BIFROST-B" ]; then
     break
