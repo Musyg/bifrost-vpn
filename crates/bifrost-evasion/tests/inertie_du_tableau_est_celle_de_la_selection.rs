@@ -16,15 +16,51 @@
 //! seule fonction qui elimine reellement, et lui demande ce qu'elle ecarte.
 //! Elle rougirait donc meme si `mord_encore` et la constante se trompaient
 //! ENSEMBLE, ce qui est exactement le cas qui s'est produit.
+//!
+//! # Ce que "inerte" veut dire, mesure le 30/09/2026
+//!
+//! Le jour annonce, la selection n'ecarte plus rien; c'est ce que la constante
+//! promet. Mais le releve du 30/09/2026 montre davantage, et deux recettes le
+//! fixent: le plan de chaque pays, dans chaque mode, ne change PLUS du tout a
+//! partir de ce jour. Le classement ne lit que le statut d'une cellule, jamais
+//! sa fraicheur; une fois la derniere cellule `Mort` perimee, plus rien dans le
+//! tableau ne depend du calendrier. "Il classe encore" est exact, mais son
+//! classement est fige jusqu'au prochain changement de STATUT ou jusqu'a une
+//! nouvelle date sur une cellule `Mort` - redater une cellule qui n'est pas
+//! `Mort` ne change aucun plan.
 
-use bifrost_evasion::selection::{Contexte, Mode, Refus, planifier};
+use bifrost_evasion::selection::{Contexte, Mode, Plan, Refus, planifier};
 use bifrost_evasion::survie::{Pays, TABLEAU_INERTE_A_PARTIR_DU};
-use bifrost_evasion::{Date, Environnement, MemoireReseau, Technique};
+use bifrost_evasion::{Date, Demarche, Environnement, MemoireReseau, Technique, demarche_parmi};
 
 const CENSEURS: [Pays; 4] = [Pays::Chine, Pays::Russie, Pays::Iran, Pays::Turkmenistan];
 
+/// Les quatre pays censeurs et le cas sans censure, qui ne doit jamais bouger.
+const TOUS_LES_PAYS: [Pays; 5] = [
+    Pays::NonCensure,
+    Pays::Chine,
+    Pays::Russie,
+    Pays::Iran,
+    Pays::Turkmenistan,
+];
+
+const MODES: [Mode; 3] = [Mode::Auto, Mode::Discret, Mode::Rapide];
+
 fn decale(jour: Date, jours: i64) -> Date {
     Date::depuis_numero_de_jour(jour.numero_de_jour() + jours)
+}
+
+/// Le plan complet, dans les memes conditions que [`ecartees_par_le_tableau`]:
+/// rien de sonde, memoire vide. Seuls le pays, le mode et le jour varient.
+fn plan(pays: Pays, mode: Mode, jour: Date) -> Plan {
+    let memoire = MemoireReseau::vierge();
+    planifier(&Contexte {
+        pays,
+        environnement: Environnement::rien_sonde(),
+        mode,
+        memoire: &memoire,
+        aujourd_hui: jour,
+    })
 }
 
 /// Les techniques que le tableau de survie ecarte ce jour-la dans ce pays.
@@ -142,5 +178,126 @@ fn la_chine_la_russie_et_l_iran_n_eliminent_plus_rien_depuis_le_1er_juillet_2026
             Vec::<Technique>::new(),
             "au 2026-07-01 en {pays:?}, plus aucune elimination: c'est la date que le document annonce"
         );
+    }
+}
+
+/// Ce que le passage du 29 au 30 septembre 2026 change, mesure et non deduit.
+///
+/// Releve du 30/09/2026, par `planifier` et `demarche_parmi` - la fonction que
+/// le daemon appelle pour arbitrer le profil de l'utilisateur. Des quinze plans
+/// (cinq pays, trois modes), seuls les trois plans turkmenes changent, et ils
+/// changent d'une seule facon: REALITY cesse d'etre ecartee et rentre dans le
+/// plan, sans en deloger la tete. Pour le produit, cela veut dire qu'un profil
+/// REALITY au Turkmenistan, refuse le 29 avec le motif "donnee morte dans ce
+/// pays, observation fraiche", est accepte le 30. C'est le dernier veto que le
+/// tableau de survie exercait; aucun autre couple pays et technique ne change
+/// de demarche ce jour-la.
+///
+/// Recette figee sur deux dates du calendrier, comme celles du 20/08 et du
+/// 20/09: le prochain rafraichissement qui redaterait REALITY/Turkmenistan la
+/// fera rougir, et c'est voulu - il devra dire ce que le 30/09 est devenu.
+#[test]
+fn le_30_septembre_2026_seul_le_turkmenistan_change_et_perd_son_dernier_veto() {
+    let veille = Date::new(2026, 9, 29);
+    let jour = Date::new(2026, 9, 30);
+
+    for pays in TOUS_LES_PAYS {
+        for mode in MODES {
+            let avant = plan(pays, mode, veille);
+            let apres = plan(pays, mode, jour);
+            if pays != Pays::Turkmenistan {
+                assert_eq!(
+                    avant, apres,
+                    "en {pays:?}/{mode:?}, le plan ne devait pas changer entre le 29 et le 30/09/2026"
+                );
+                continue;
+            }
+            assert_ne!(
+                avant, apres,
+                "au Turkmenistan/{mode:?}, le 30/09/2026 devait changer le plan"
+            );
+            assert!(
+                avant
+                    .ecartes
+                    .contains(&(Technique::RealityVision, Refus::MorteEtObservationFraiche)),
+                "au Turkmenistan/{mode:?}, REALITY devait encore etre ecartee le 29/09: {:?}",
+                avant.ecartes
+            );
+            assert!(
+                !apres
+                    .ecartes
+                    .iter()
+                    .any(|(_, r)| *r == Refus::MorteEtObservationFraiche),
+                "au Turkmenistan/{mode:?}, plus rien ne devait etre ecarte par le tableau le 30/09: {:?}",
+                apres.ecartes
+            );
+            assert!(
+                apres
+                    .candidats
+                    .iter()
+                    .any(|c| c.technique == Technique::RealityVision),
+                "au Turkmenistan/{mode:?}, REALITY devait rentrer dans le plan le 30/09"
+            );
+            assert_eq!(
+                avant.premier(),
+                apres.premier(),
+                "au Turkmenistan/{mode:?}, la tete du plan ne devait pas bouger: REALITY rentre par la queue"
+            );
+        }
+    }
+
+    // Le produit: le veto par profil, pour chaque couple pays et technique.
+    for pays in TOUS_LES_PAYS {
+        for t in Technique::TOUTES {
+            let avant = demarche_parmi(&plan(pays, Mode::Auto, veille), &[t]);
+            let apres = demarche_parmi(&plan(pays, Mode::Auto, jour), &[t]);
+            if (pays, t) == (Pays::Turkmenistan, Technique::RealityVision) {
+                assert_eq!(
+                    avant,
+                    Demarche::Ecartee {
+                        motifs: vec![(Technique::RealityVision, Refus::MorteEtObservationFraiche)]
+                    },
+                    "le 29/09/2026, un profil REALITY au Turkmenistan devait etre refuse par le tableau"
+                );
+                assert!(
+                    !matches!(apres, Demarche::Ecartee { .. }),
+                    "le 30/09/2026, un profil REALITY au Turkmenistan ne devait plus etre refuse: {apres:?}"
+                );
+            } else {
+                assert_eq!(
+                    avant,
+                    apres,
+                    "{pays:?}/{}: la demarche ne devait pas changer entre le 29 et le 30/09/2026",
+                    t.nom()
+                );
+            }
+        }
+    }
+}
+
+/// A partir du jour annonce, plus aucun plan ne change, dans aucun pays ni aucun
+/// mode, pendant un an.
+///
+/// Plus fort que "plus rien n'est ecarte", et c'est ce que "inerte" doit
+/// vouloir dire pour qui lit `ETAT.md`: le tableau classe encore, mais d'un
+/// classement FIGE. Cela tient parce que `rang_de_survie` ne lit que le statut
+/// d'une cellule; le jour ou le classement lirait aussi sa fraicheur (par
+/// exemple pour departager des ex aequo), cette recette rougira, et il faudra
+/// redire ce que la constante annonce.
+#[test]
+fn a_partir_du_jour_annonce_aucun_plan_ne_bouge_plus() {
+    for pays in TOUS_LES_PAYS {
+        for mode in MODES {
+            let reference = plan(pays, mode, TABLEAU_INERTE_A_PARTIR_DU);
+            for n in 1..365 {
+                let jour = decale(TABLEAU_INERTE_A_PARTIR_DU, n);
+                assert_eq!(
+                    plan(pays, mode, jour),
+                    reference,
+                    "en {pays:?}/{mode:?}, le plan change encore le {jour:?}, apres le jour annonce: \
+                     le tableau n'est pas inerte au sens ou la constante le dit"
+                );
+            }
+        }
     }
 }
