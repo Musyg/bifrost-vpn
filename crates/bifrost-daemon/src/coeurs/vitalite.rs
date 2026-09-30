@@ -45,9 +45,11 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 pub use bifrost_evasion::observation::Sonde;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
+use super::atelier::CoeurPublie;
 use super::clash;
+use super::proprietaire;
 
 /// Cible de la sonde. Voir l'en-tete: la banalite est le point.
 pub const CIBLE: &str = "https://www.gstatic.com/generate_204";
@@ -102,7 +104,15 @@ impl Poignee {
 }
 
 /// Ouvre la sonde. Le futur rendu doit tourner sur le runtime.
-pub fn ouvrir(adresse: Adresse) -> (Poignee, impl std::future::Future<Output = ()>) {
+///
+/// `coeur` est le canal ou l'atelier PUBLIE le coeur vivant. La sonde s'en sert
+/// pour VERIFIER, avant chaque envoi du secret, que l'API de controle est
+/// toujours tenue par le processus qu'on a lance - et non par un squatteur qui
+/// aurait repris le port apres une mort du coeur en cours de session.
+pub fn ouvrir(
+    adresse: Adresse,
+    coeur: watch::Receiver<Option<CoeurPublie>>,
+) -> (Poignee, impl std::future::Future<Output = ()>) {
     let (demandes, recevoir) = mpsc::channel(PROFONDEUR);
     let (rendre, resultats) = mpsc::channel(PROFONDEUR);
     (
@@ -110,7 +120,7 @@ pub fn ouvrir(adresse: Adresse) -> (Poignee, impl std::future::Future<Output = (
             demandes,
             resultats,
         },
-        tenir(adresse, recevoir, rendre),
+        tenir(adresse, coeur, recevoir, rendre),
     )
 }
 
@@ -139,11 +149,37 @@ pub fn en_deux_bouts(capacite: usize) -> (Poignee, mpsc::Receiver<Duration>, mps
 
 async fn tenir(
     adresse: Adresse,
+    coeur: watch::Receiver<Option<CoeurPublie>>,
     mut demandes: mpsc::Receiver<Duration>,
     rendre: mpsc::Sender<Sonde>,
 ) {
     while let Some(budget) = demandes.recv().await {
-        let issue = sonder(&adresse, CIBLE, budget).await;
+        // Verifier le proprietaire de l'API AVANT d'envoyer le secret. On copie
+        // le coeur publie hors du garde `watch` (il est `Copy`) pour ne pas le
+        // tenir a travers l'await de la sonde.
+        let publie = *coeur.borrow();
+        let issue = match publie {
+            Some(publie) => {
+                match proprietaire::exiger_le_coeur(
+                    adresse.api.port(),
+                    publie.attendu(),
+                    "l'API de controle",
+                ) {
+                    Ok(()) => sonder(&adresse, CIBLE, budget).await,
+                    Err(raison) => {
+                        // Un squatteur tient le port, ou le coeur n'est plus la:
+                        // pas de secret envoye. `Impossible` et non `Echouee`,
+                        // car la panne est chez nous, pas chez le pair - le
+                        // superviseur ne doit pas demonter un tunnel pour ca.
+                        tracing::debug!(%raison, "sonde refusee: l'API n'est plus tenue par le coeur lance");
+                        Sonde::Impossible
+                    }
+                }
+            }
+            // Aucun coeur publie: rien a sonder, et surtout aucun secret a
+            // envoyer a l'aveugle.
+            None => Sonde::Impossible,
+        };
         // Le superviseur a pu disparaitre entre-temps: c'est un arret, pas une
         // faute.
         if rendre.send(issue).await.is_err() {

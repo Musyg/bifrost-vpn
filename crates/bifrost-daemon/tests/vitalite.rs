@@ -471,7 +471,20 @@ fn la_poignee_rend_un_verdict_sans_jamais_faire_attendre_le_superviseur() {
     let secret = bifrost_daemon::coeurs::alea::secret().expect("un secret");
     let mort = lancer(&binaire, &repertoire, &secret, false);
 
-    let (mut poignee, veille) = vitalite::ouvrir(adresse(mort.api, &secret));
+    // Le coeur publie comme l'atelier le ferait: son API et le PID du sing-box
+    // qu'on vient de lancer. La sonde verifie desormais que l'API est tenue par
+    // ce PID avant d'y envoyer le secret; sans ce temoin, elle rendrait
+    // `Impossible` au lieu du `Echouee` que le transport mort doit produire. Le
+    // champ `socks` n'est pas lu par la sonde: on y remet l'API faute d'entree a
+    // publier ici.
+    let (_publier, coeur_rx) =
+        tokio::sync::watch::channel(Some(bifrost_daemon::coeurs::atelier::CoeurPublie {
+            socks: mort.api,
+            api: Some(mort.api),
+            pid: mort.enfant.id(),
+            uid: None,
+        }));
+    let (mut poignee, veille) = vitalite::ouvrir(adresse(mort.api, &secret), coeur_rx);
     let ex = executeur();
     let issue = ex.block_on(async move {
         let tache = tokio::spawn(veille);

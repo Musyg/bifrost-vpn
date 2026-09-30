@@ -1806,7 +1806,9 @@ fn chemin_par_coeur(
     args: &Args,
     facade: Option<std::net::SocketAddr>,
     _identite: &IdentiteCoeur,
-    _coeur_actif: tokio::sync::watch::Receiver<Option<std::net::SocketAddr>>,
+    _coeur_actif: tokio::sync::watch::Receiver<
+        Option<bifrost_daemon::coeurs::atelier::CoeurPublie>,
+    >,
 ) -> anyhow::Result<Option<bifrost_daemon::supervisor::CheminCoeur>> {
     let (Some(binaires), Some(facade)) = (args.coeurs_dans.clone(), facade) else {
         return Ok(None);
@@ -1842,13 +1844,21 @@ fn chemin_par_coeur(
             secret: secret.clone(),
             selecteur: bifrost_daemon::supervisor::SELECTEUR.to_owned(),
         };
-        let (sonde, veille) = bifrost_daemon::coeurs::vitalite::ouvrir(adresse_du_coeur.clone());
+        // La sonde et la bascule suivent le MEME coeur publie que la facade:
+        // avant d'envoyer le secret a l'API, elles verifient que le port est
+        // toujours tenu par le processus qu'on a lance. Un clone chacune, le
+        // dernier exemplaire allant au peripherique par coeur plus bas.
+        let (sonde, veille) = bifrost_daemon::coeurs::vitalite::ouvrir(
+            adresse_du_coeur.clone(),
+            _coeur_actif.clone(),
+        );
         tokio::spawn(veille);
 
         // La bascule a chaud vit au meme endroit et pour la meme raison: deux
         // allers-retours HTTP n'ont rien a faire sur le fil qui tient le kill
         // switch.
-        let (bascule, conduite) = bifrost_daemon::coeurs::bascule::ouvrir(adresse_du_coeur);
+        let (bascule, conduite) =
+            bifrost_daemon::coeurs::bascule::ouvrir(adresse_du_coeur, _coeur_actif.clone());
         tokio::spawn(conduite);
 
         // Le compte que le coeur exigera de son entree SOCKS. Engendre au

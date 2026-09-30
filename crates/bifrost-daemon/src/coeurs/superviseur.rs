@@ -22,6 +22,7 @@ use tokio::process::{Child, Command};
 
 use super::clash;
 use super::lancement::{Lancement, binaire_present};
+use super::proprietaire::{self, Proprietaire};
 
 /// Budget d'attente de la disponibilite de l'API.
 pub const BUDGET_DEMARRAGE: Duration = Duration::from_secs(10);
@@ -286,6 +287,11 @@ pub struct CoeurEnCours {
     api: Option<SocketAddr>,
     secret: String,
     journal: JournalErreur,
+    /// L'UID du compte dedie sous lequel le daemon a lance ce coeur, s'il en a
+    /// pose un. C'est ce qui identifie ses ecoutes quand ses descripteurs sont
+    /// illisibles au daemon - le cas de l'unite livree. Voir
+    /// [`super::proprietaire`].
+    uid: Option<u32>,
     /// Sous Windows, la poignee du Job doit vivre aussi longtemps que le
     /// superviseur: c'est sa fermeture qui tue le coeur.
     #[cfg(windows)]
@@ -306,6 +312,11 @@ impl std::fmt::Debug for CoeurEnCours {
 impl CoeurEnCours {
     pub fn pid(&self) -> Option<u32> {
         self.enfant.id()
+    }
+
+    /// Le compte dedie pose au lancement, s'il y en a un.
+    pub fn uid(&self) -> Option<u32> {
+        self.uid
     }
 
     pub fn api(&self) -> Option<SocketAddr> {
@@ -543,6 +554,9 @@ pub async fn demarrer(
             .map(|p| SocketAddr::from(([127, 0, 0, 1], p))),
         secret: secret.to_string(),
         journal,
+        // Ce que le daemon a lui-meme pose ci-dessus, et non ce qu'on lirait chez
+        // l'enfant. `None` sous Windows, ou le champ n'a pas d'effet.
+        uid: lancement.utilisateur.map(|u| u.uid),
         #[cfg(windows)]
         _job,
     };
@@ -592,12 +606,61 @@ async fn sursis_sans_api(en_cours: &mut CoeurEnCours) -> anyhow::Result<()> {
 /// Sonder pendant dix secondes un port que plus personne n'ecoute est le
 /// mauvais mode d'echec: le vrai diagnostic est la sortie d'erreur du coeur, et
 /// elle est perdue si on attend l'echeance.
+///
+/// # Le secret ne part qu'au coeur qu'on a lance
+///
+/// Avant CHAQUE `interroger_version` - la seule requete qui porte
+/// `Authorization: Bearer <secret>` - on verifie que l'ecoute de l'API
+/// appartient bien a l'enfant (son PID, ou son compte dedie quand ses
+/// descripteurs sont illisibles au daemon). Un port de la boucle locale a un numero
+/// fixe et previsible; un compte ordinaire qui le lie avant le coeur recevrait
+/// sinon le secret, et pourrait repondre a sa place - version, vitalite,
+/// selection - un coeur imposteur que le daemon croirait sien. La verification
+/// se fait ici, juste avant le premier octet, et se rejoue a chaque relance du
+/// coeur puisque `demarrer` passe par cette fonction a chaque fois. Voir
+/// [`super::proprietaire`] pour ce qui identifie le proprietaire et pour la
+/// course residuelle et sa borne.
 async fn attendre_api(en_cours: &mut CoeurEnCours, api: SocketAddr) -> anyhow::Result<()> {
     let secret = en_cours.secret.clone();
     let coeur = en_cours.coeur;
+    // Sans PID, on ne peut identifier personne: on refuse plutot que d'envoyer
+    // le secret a l'aveugle.
+    let pid = en_cours.pid().ok_or_else(|| {
+        anyhow::anyhow!(
+            "{} n'a pas de PID: impossible de verifier qui ecoute son API avant d'y envoyer le secret",
+            coeur.executable()
+        )
+    })?;
+    let attendu = proprietaire::Attendu {
+        pid,
+        uid: en_cours.uid,
+    };
 
     let sondage = async {
         loop {
+            match proprietaire::verifier_ecoute(api.port(), attendu) {
+                // L'ecoute est bien celle de l'enfant: le secret peut partir.
+                Proprietaire::Confirme => {}
+                // Le coeur n'a pas fini de lier: on attend, on ne conclut pas.
+                Proprietaire::PersonneEncore => {
+                    tokio::time::sleep(clash::PAS_DE_SONDAGE).await;
+                    continue;
+                }
+                // Quelqu'un d'autre tient le port: fail-closed, aucun octet.
+                Proprietaire::Autre { details } => {
+                    anyhow::bail!(
+                        "l'API de controle de {} sur {api} est ecoutee par un autre que le coeur lance: le secret ne lui sera pas envoye ({details})",
+                        coeur.executable()
+                    );
+                }
+                // On n'a pas pu verifier: par prudence, on n'envoie rien.
+                Proprietaire::Illisible { details } => {
+                    anyhow::bail!(
+                        "impossible de verifier qui ecoute l'API de controle de {} sur {api}: par prudence, le secret ne sera pas envoye ({details})",
+                        coeur.executable()
+                    );
+                }
+            }
             match clash::interroger_version(api, &secret).await {
                 Ok(v) => return Ok(v),
                 // Un refus d'autorisation ne se resorbera pas avec le temps.

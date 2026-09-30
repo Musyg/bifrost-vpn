@@ -213,8 +213,16 @@ fn dans_l_espace_de_noms_le_chemin_par_coeur_porte_le_trafic() {
 
     let cfg = cfg();
     // Le canal que l'atelier publie en exploitation. Tenu ici par la recette,
-    // pour pouvoir faire disparaitre le coeur sans en tuer un vrai.
-    let (publier, suivre) = tokio::sync::watch::channel(Some(facade));
+    // pour pouvoir faire disparaitre le coeur sans en tuer un vrai. Le
+    // peripherique par coeur ne lit que la PRESENCE du coeur publie; le pid
+    // porte est celui du processus de test, proprietaire reel du coeur fictif.
+    let coeur_publie = bifrost_daemon::coeurs::atelier::CoeurPublie {
+        socks: facade,
+        api: None,
+        pid: std::process::id(),
+        uid: None,
+    };
+    let (publier, suivre) = tokio::sync::watch::channel(Some(coeur_publie));
     let mut device = CoeurTunnel::new(
         poignee,
         bifrost_daemon::coeurs::socks::Mandataire::nouveau(facade, compte()),

@@ -48,7 +48,6 @@
 //! monter ce device. Ce module n'en voit rien, et c'est voulu - le coeur
 //! appartient a la technique, ce device a la connexion.
 
-use std::net::SocketAddr;
 use std::time::SystemTime;
 
 use tokio::sync::watch;
@@ -94,7 +93,7 @@ pub struct CoeurTunnel {
     /// Publie par [`crate::coeurs::atelier`], suivi par [`super::super::coeurs::facade`]
     /// pour mener les octets, et lu ici pour repondre a une question que
     /// l'interface ne sait pas trancher: ce tunnel est-il encore vivant.
-    coeur_actif: watch::Receiver<Option<SocketAddr>>,
+    coeur_actif: watch::Receiver<Option<crate::coeurs::atelier::CoeurPublie>>,
     /// Le nom de l'interface tant qu'elle est montee.
     monte: Option<String>,
 }
@@ -108,7 +107,7 @@ impl CoeurTunnel {
         passage: passage::Poignee,
         coeur: crate::coeurs::socks::Mandataire,
         coeur_uid: Option<u32>,
-        coeur_actif: watch::Receiver<Option<SocketAddr>>,
+        coeur_actif: watch::Receiver<Option<crate::coeurs::atelier::CoeurPublie>>,
     ) -> Self {
         #[cfg(windows)]
         let _ = coeur_uid;

@@ -34,6 +34,9 @@ pub mod passage;
 #[cfg(any(target_os = "linux", windows))]
 pub mod passeur;
 pub mod port;
+/// Qui detient une ecoute de boucle locale: le coeur qu'on a lance, ou un
+/// squatteur. Le daemon n'envoie ni secret ni octet sans cette reponse.
+pub mod proprietaire;
 pub mod selftest;
 pub mod socks;
 pub mod superviseur;

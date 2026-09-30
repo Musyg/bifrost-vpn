@@ -36,9 +36,11 @@
 //! sur la boucle locale, n'ont rien a y faire. La bascule est donc DEMANDEE
 //! d'un cote et RAMASSEE de l'autre.
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
+use super::atelier::CoeurPublie;
 use super::clash;
+use super::proprietaire;
 use super::vitalite::Adresse;
 
 /// Profondeur des deux files. Une seule bascule peut etre en vol - la course
@@ -93,7 +95,15 @@ impl Poignee {
 /// la meme valeur. Ce n'est pas une economie: si la sonde et la bascule
 /// visaient deux selecteurs, on basculerait l'un en sondant l'autre, et le
 /// tunnel paraitrait gele juste apres avoir ete repare.
-pub fn ouvrir(adresse: Adresse) -> (Poignee, impl std::future::Future<Output = ()>) {
+///
+/// `coeur` est le canal ou l'atelier PUBLIE le coeur vivant, comme pour
+/// [`super::vitalite::ouvrir`]: la bascule verifie que l'API est toujours tenue
+/// par le processus qu'on a lance AVANT d'y envoyer le secret, pour qu'un
+/// squatteur qui aurait repris le port ne recoive pas notre `Authorization`.
+pub fn ouvrir(
+    adresse: Adresse,
+    coeur: watch::Receiver<Option<CoeurPublie>>,
+) -> (Poignee, impl std::future::Future<Output = ()>) {
     let (demandes, recevoir) = mpsc::channel(PROFONDEUR);
     let (rendre, resultats) = mpsc::channel(PROFONDEUR);
     (
@@ -101,7 +111,7 @@ pub fn ouvrir(adresse: Adresse) -> (Poignee, impl std::future::Future<Output = (
             demandes,
             resultats,
         },
-        tenir(adresse, recevoir, rendre),
+        tenir(adresse, coeur, recevoir, rendre),
     )
 }
 
@@ -127,11 +137,33 @@ pub fn en_deux_bouts(capacite: usize) -> (Poignee, mpsc::Receiver<String>, mpsc:
 
 async fn tenir(
     adresse: Adresse,
+    coeur: watch::Receiver<Option<CoeurPublie>>,
     mut demandes: mpsc::Receiver<String>,
     rendre: mpsc::Sender<Issue>,
 ) {
     while let Some(sortie) = demandes.recv().await {
-        let issue = basculer(&adresse, &sortie).await;
+        // Verifier le proprietaire de l'API AVANT d'envoyer le secret. Le coeur
+        // publie est `Copy`: on le sort du garde `watch` avant l'await.
+        let publie = *coeur.borrow();
+        let issue = match publie {
+            Some(publie) => match proprietaire::exiger_le_coeur(
+                adresse.api.port(),
+                publie.attendu(),
+                "l'API de controle",
+            ) {
+                Ok(()) => basculer(&adresse, &sortie).await,
+                // Un squatteur tient le port, ou le coeur n'est plus la: la
+                // bascule est refusee sans qu'un octet de secret ne parte. C'est
+                // une panne LOCALE (voir [`Issue::Refusee`]), pas un tort du
+                // reseau: la course ne doit pas ecarter la technique pour ca.
+                Err(raison) => Issue::Refusee { sortie, raison },
+            },
+            None => Issue::Refusee {
+                sortie,
+                raison: "aucun coeur actif: la bascule n'envoie pas le secret a l'aveugle"
+                    .to_owned(),
+            },
+        };
         // Le superviseur a pu disparaitre entre-temps: c'est un arret, pas une
         // faute.
         if rendre.send(issue).await.is_err() {

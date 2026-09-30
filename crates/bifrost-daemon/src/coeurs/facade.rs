@@ -32,6 +32,28 @@
 //! reessayant hors du tunnel. Fermer est le refus que le plan demande partout
 //! ailleurs: echouer garde est le bon echec.
 //!
+//! # Qui peut partager son port
+//!
+//! Son seul client est le passeur du meme processus, qui frappe l'adresse
+//! exacte qu'[`ouvrir`](crate::coeurs::facade::ouvrir) a rendue. Ce qu'un tiers peut faire de ce port depend
+//! de la plateforme (mesure par `tests/proprietaire_squat.rs`):
+//!
+//! - **Linux**: tokio, par mio, pose `SO_REUSEADDR` et jamais `SO_REUSEPORT`.
+//!   Le noyau refuse deux ecoutes qui se recouvrent - la meme adresse, ou
+//!   `0.0.0.0` et `127.0.0.1` - tant qu'elles ne posent pas TOUTES DEUX
+//!   `SO_REUSEPORT`, sous le meme UID: aucun tiers ne partage le port, dans
+//!   aucun ordre. S'il le
+//!   tient d'abord, `ouvrir` echoue et le daemon le dit.
+//! - **Windows**: la meme adresse, tenue d'abord, fait echouer `ouvrir`. Une
+//!   ecoute LARGE (`0.0.0.0`), elle, se lie a cote de la facade dans les deux
+//!   ordres. C'est alors la facade, plus precise, qui recoit les connexions vers
+//!   `127.0.0.1`, tant qu'elle ecoute - donc tant que le daemon, et le passeur
+//!   avec lui, vit.
+//!
+//! Ce que la facade VERIFIE a chaque connexion est l'autre bout: l'entree SOCKS
+//! du coeur, que [`proprietaire`](crate::coeurs::proprietaire) authentifie
+//! avant le premier octet.
+//!
 //! # Ce qu'une bascule coute, et qu'il faut dire
 //!
 //! Les connexions DEJA ouvertes a travers l'ancien coeur tombent avec lui: il
@@ -47,6 +69,9 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 
+use super::atelier::CoeurPublie;
+use super::proprietaire;
+
 /// Delai d'etablissement vers le coeur.
 ///
 /// Court a dessein: le coeur ecoute sur la boucle locale de la meme machine.
@@ -58,10 +83,12 @@ pub const DELAI_VERS_LE_COEUR: Duration = Duration::from_secs(2);
 ///
 /// L'arriere est un canal `watch` et non une valeur: la facade doit voir un
 /// changement de coeur sans etre recreee, puisque ne pas etre recreee est
-/// precisement sa raison d'etre.
+/// precisement sa raison d'etre. Il porte un [`CoeurPublie`] et non une simple
+/// adresse: la facade a besoin du PID pour VERIFIER, avant chaque connexion,
+/// que l'entree SOCKS est toujours tenue par le coeur qu'on a lance.
 pub struct Facade {
     ecoute: TcpListener,
-    arriere: watch::Receiver<Option<SocketAddr>>,
+    arriere: watch::Receiver<Option<CoeurPublie>>,
 }
 
 /// Ouvre la facade et rend l'adresse REELLEMENT obtenue.
@@ -71,7 +98,7 @@ pub struct Facade {
 /// machine qui l'execute, et il faut alors savoir lequel le systeme a donne.
 pub async fn ouvrir(
     ecoute: SocketAddr,
-    arriere: watch::Receiver<Option<SocketAddr>>,
+    arriere: watch::Receiver<Option<CoeurPublie>>,
 ) -> std::io::Result<(SocketAddr, Facade)> {
     let ecoute = TcpListener::bind(ecoute).await?;
     let adresse = ecoute.local_addr()?;
@@ -100,21 +127,34 @@ impl Facade {
 }
 
 /// Fait passer les octets entre le client et le coeur.
-async fn relayer(mut client: TcpStream, arriere: Option<SocketAddr>) -> Result<(), String> {
-    let Some(arriere) = arriere else {
+async fn relayer(mut client: TcpStream, arriere: Option<CoeurPublie>) -> Result<(), String> {
+    let Some(coeur) = arriere else {
         // Fermer, pas attendre: voir l'en-tete du module.
         let _ = client.shutdown().await;
         return Err(
             "aucun coeur actif: connexion fermee au lieu d'etre mise en attente".to_owned(),
         );
     };
-    let coeur = tokio::time::timeout(DELAI_VERS_LE_COEUR, TcpStream::connect(arriere))
+    // AVANT de verser le moindre octet utilisateur - en clair, avant que le
+    // coeur ne le chiffre - verifier que l'entree SOCKS est TOUJOURS tenue par
+    // le coeur qu'on a lance. Entre la publication et cette connexion, le coeur
+    // a pu mourir et un squatteur reprendre le port; sans ce controle, la facade
+    // lui menerait le trafic. La verification precede immediatement la connexion,
+    // ce qui reduit la course a la borne que decrit `super::proprietaire`.
+    let arriere = coeur.socks;
+    if let Err(raison) =
+        proprietaire::exiger_le_coeur(arriere.port(), coeur.attendu(), "l'entree SOCKS")
+    {
+        let _ = client.shutdown().await;
+        return Err(raison);
+    }
+    let flux = tokio::time::timeout(DELAI_VERS_LE_COEUR, TcpStream::connect(arriere))
         .await
         .map_err(|_| format!("le coeur a {arriere} n'a pas repondu en {DELAI_VERS_LE_COEUR:?}"))?
         .map_err(|e| format!("le coeur a {arriere} est injoignable: {e}"))?;
 
-    let mut coeur = coeur;
-    tokio::io::copy_bidirectional(&mut client, &mut coeur)
+    let mut flux = flux;
+    tokio::io::copy_bidirectional(&mut client, &mut flux)
         .await
         .map_err(|e| format!("relais interrompu: {e}"))?;
     Ok(())
@@ -124,6 +164,23 @@ async fn relayer(mut client: TcpStream, arriere: Option<SocketAddr>) -> Result<(
 mod tests {
     use super::*;
     use tokio::io::AsyncReadExt;
+
+    /// Un coeur publie dont l'arriere est une ecoute du PROCESSUS DE TEST.
+    ///
+    /// Toutes les recettes de ce module font ecouter leur arriere dans le
+    /// processus de test lui-meme: son proprietaire est donc notre propre PID.
+    /// La facade verifie desormais la propriete avant de relayer; construire le
+    /// [`CoeurPublie`] avec `std::process::id()` fait passer ce controle comme le
+    /// vrai coeur le ferait en production, sans quoi la facade refuserait ses
+    /// propres arrieres de test.
+    fn coeur_en_test(socks: SocketAddr) -> CoeurPublie {
+        CoeurPublie {
+            socks,
+            api: None,
+            pid: std::process::id(),
+            uid: None,
+        }
+    }
 
     /// Un serveur qui renvoie ce qu'on lui envoie, prefixe de son etiquette.
     /// L'etiquette est ce qui permet de dire PAR QUEL arriere on est passe.
@@ -160,7 +217,7 @@ mod tests {
     #[tokio::test]
     async fn les_octets_passent_jusqu_au_coeur_et_reviennent() {
         let arriere = arriere_etiquete("A:").await;
-        let (_tx, rx) = watch::channel(Some(arriere));
+        let (_tx, rx) = watch::channel(Some(coeur_en_test(arriere)));
         let (adresse, facade) = ouvrir("127.0.0.1:0".parse().unwrap(), rx).await.unwrap();
         tokio::spawn(facade.servir());
 
@@ -174,13 +231,13 @@ mod tests {
     async fn l_adresse_ne_bouge_pas_quand_le_coeur_change() {
         let premier = arriere_etiquete("A:").await;
         let second = arriere_etiquete("B:").await;
-        let (tx, rx) = watch::channel(Some(premier));
+        let (tx, rx) = watch::channel(Some(coeur_en_test(premier)));
         let (adresse, facade) = ouvrir("127.0.0.1:0".parse().unwrap(), rx).await.unwrap();
         tokio::spawn(facade.servir());
 
         assert_eq!(aller_retour(adresse, "un").await.unwrap(), "A:un");
 
-        tx.send(Some(second)).unwrap();
+        tx.send(Some(coeur_en_test(second))).unwrap();
 
         assert_eq!(
             aller_retour(adresse, "deux").await.unwrap(),
@@ -214,6 +271,14 @@ mod tests {
     /// Un coeur declare mais mort ne doit pas non plus faire patienter. Le cas
     /// arrive vraiment: le processus meurt entre sa publication et la
     /// connexion suivante.
+    ///
+    /// Depuis la fermeture de la classe, ce cas est refuse PLUS TOT et plus
+    /// franchement: la facade verifie la propriete de l'entree avant de s'y
+    /// connecter, et un port qui n'est plus une ecoute tenue par le PID publie
+    /// n'est meme pas joint. Le delai `DELAI_VERS_LE_COEUR` reste comme filet de
+    /// la course residuelle (le coeur meurt APRES la verification, avant la
+    /// connexion); ici c'est la verification qui tranche. La propriete observable
+    /// est la meme qu'avant: aucune attente, rien qui revient.
     #[tokio::test]
     async fn un_coeur_declare_mais_injoignable_ne_fait_pas_attendre() {
         // Un port TENU sans ecoute: personne derriere, et personne ne peut s'y
@@ -226,7 +291,9 @@ mod tests {
         // 30/09/2026; 0 sur 314 avec le port tenu. Voir `super::super::port`.
         let tenu = super::super::port::port_sans_personne().unwrap();
         let mort = tenu.adresse();
-        let (_tx, rx) = watch::channel(Some(mort));
+        // Le PID publie est le notre (le port tenu est a nous), mais l'ecoute
+        // n'existe pas: la verification rend `PersonneEncore`, donc un refus.
+        let (_tx, rx) = watch::channel(Some(coeur_en_test(mort)));
         let (adresse, facade) = ouvrir("127.0.0.1:0".parse().unwrap(), rx).await.unwrap();
         tokio::spawn(facade.servir());
 
@@ -244,7 +311,7 @@ mod tests {
     #[tokio::test]
     async fn deux_clients_sont_servis_en_meme_temps() {
         let arriere = arriere_etiquete("A:").await;
-        let (_tx, rx) = watch::channel(Some(arriere));
+        let (_tx, rx) = watch::channel(Some(coeur_en_test(arriere)));
         let (adresse, facade) = ouvrir("127.0.0.1:0".parse().unwrap(), rx).await.unwrap();
         tokio::spawn(facade.servir());
 
