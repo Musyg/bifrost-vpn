@@ -603,7 +603,8 @@ async fn inspecter_le_tls(json: bool, annoncer: bool, socket: &str) -> anyhow::R
             match c {
                 Chaine::Publique => println!("{nom}: chaine ancree dans le jeu public"),
                 Chaine::Etrangere { empreinte } => println!(
-                    "{nom}: chaine ancree HORS du jeu public; empreinte SHA-256 du dernier                      certificat presente: {empreinte}"
+                    "{nom}: chaine ancree HORS du jeu public; empreinte SHA-256 du dernier \
+                     certificat presente: {empreinte}"
                 ),
                 Chaine::Douteuse { raison } => println!("{nom}: chaine refusee ({raison})"),
                 Chaine::Injoignable => println!("{nom}: injoignable"),
@@ -611,14 +612,12 @@ async fn inspecter_le_tls(json: bool, annoncer: bool, socket: &str) -> anyhow::R
         }
         match verdict {
             Mesure::Vu(true) => println!(
-                "
-mitm_tls = true: quelqu'un dechiffre le TLS qui sort d'ici.                  Comparez l'empreinte ci-dessus a celle de votre autorite interne."
+                "\nmitm_tls = true: quelqu'un dechiffre le TLS qui sort d'ici. \
+                 Comparez l'empreinte ci-dessus a celle de votre autorite interne."
             ),
-            Mesure::Vu(false) => println!("
-mitm_tls = false: rien n'intercepte ces chemins"),
+            Mesure::Vu(false) => println!("\nmitm_tls = false: rien n'intercepte ces chemins"),
             Mesure::NonMesure => println!(
-                "
-mitm_tls non mesure: {}",
+                "\nmitm_tls non mesure: {}",
                 inspection::raison_du_silence(&chaines)
             ),
         }

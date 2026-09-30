@@ -595,7 +595,8 @@ mod tests {
         let bits = LONGUEUR_PHRASE * 5;
         assert!(
             bits >= 120,
-            "{LONGUEUR_PHRASE} caracteres font {bits} bits: sous les 120 bits              annonces, la phrase redevient attaquable hors ligne"
+            "{LONGUEUR_PHRASE} caracteres font {bits} bits: sous les 120 bits \
+             annonces, la phrase redevient attaquable hors ligne"
         );
     }
 

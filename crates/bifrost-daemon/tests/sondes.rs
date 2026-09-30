@@ -46,7 +46,7 @@ fn un_chemin_etroit_est_vu_comme_tel() {
     // elle, le test ne s'execute pas et le dit, plutot que de passer sans rien
     // avoir mesure.
     let Ok(cible) = std::env::var("BIFROST_CHEMIN_ETROIT") else {
-        eprintln!(
+        println!(
             "SKIPPED un_chemin_etroit_est_vu_comme_tel: \
              BIFROST_CHEMIN_ETROIT absent, aucune interface a MTU reduit a viser"
         );

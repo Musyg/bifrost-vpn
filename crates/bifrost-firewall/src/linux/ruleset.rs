@@ -447,8 +447,7 @@ mod tests {
         // qu'une egalite de regle: elle attrape n'importe quelle marque.
         assert!(
             !r.contains("meta mark"),
-            "un permit de marque a ete emis sans marque a permettre:
-{r}"
+            "un permit de marque a ete emis sans marque a permettre:\n{r}"
         );
         // Et surtout pas la forme qui laisse tout passer. Absence par la
         // sous-chaine la plus large: la marque nulle, quelle que soit sa forme.

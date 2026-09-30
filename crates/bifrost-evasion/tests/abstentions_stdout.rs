@@ -30,6 +30,9 @@
 //!   ou `eprintln!` (regle centrale, sur TOUT `crates/`, code de test comme code
 //!   de production: le texte SKIPPED n'a rien a faire sur le stderr d'un binaire
 //!   livre non plus).
+//! - Aucun `.rs` sous `crates/` n'ouvre une ligne `SKIPPED` par `print!` sans
+//!   la finir: le litteral d'un `print!` qui commence une abstention finit par
+//!   `\n`. Voir << le trou FF >> plus bas.
 //! - Dans le code de TEST (fichiers sous un repertoire `tests/`), une abstention
 //!   imprimee par `print!`/`println!` COMMENCE la ligne: pas d'espace ni de
 //!   prefixe avant `SKIPPED`, car `abstentions-budget.sh` lit des lignes qui
@@ -41,12 +44,36 @@
 //! - Compte de controle: au moins 40 sites `println!("SKIPPED`/`print!("SKIPPED`.
 //!   En dessous, le parcours est casse et le vert ne garderait rien.
 //!
+//! # Le trou FF, et le trou de la ligne suivante (30/09/2026)
+//!
+//! Le premier, releve le 29/09 a la relecture de cette recette: une abstention
+//! ecrite en DEUX appels, `print!("SKIPPED ...")` puis `println!(...)`,
+//! passait verte. `print!` sans saut de ligne laisse le morceau dans le tampon
+//! de `Stdout` et relache son verrou en rendant la main; le `ok` du harnais, ou
+//! la ligne d'un autre fil, peut s'ecrire entre les deux morceaux, et la ligne lue par
+//! `abstentions-budget.sh` ne commence plus par `SKIPPED`. Un `print!` dont le
+//! litteral finit par `\n` ecrit, lui, sa ligne sous un seul verrou, comme
+//! `println!`. Aucune occurrence n'existait dans le depot ce jour-la.
+//!
+//! Le second a ete trouve en mesurant le premier: la recette lisait ligne par
+//! ligne, et ne voyait le litteral que s'il etait sur la ligne de la macro. Or
+//! rustfmt passe les arguments a la ligne des qu'ils sont longs. Sur 81 appels
+//! d'impression qui ouvrent une abstention, 25 etaient de cette forme,
+//! invisibles, et l'un d'eux, dans `crates/bifrost-daemon/tests/sondes.rs`,
+//! ecrivait son abstention sur stderr sans que rien ne rougisse. Le parcours
+//! passe donc par le lexeur partage (`commun/lexeur_rust.rs`): le premier
+//! litteral apres la parenthese est lu ou qu'il soit, les chaines brutes sont
+//! lues aussi, et un commentaire ou un litteral n'est plus pris pour du code.
+//!
 //! # Son perimetre et sa methode
 //!
 //! `crates/**/*.rs`, sur le disque (sans git: sur essai-linux le depot est copie
 //! par `tar` et n'a pas de `.git`). CE fichier est exclu du parcours: il porte
 //! les motifs interdits comme litteraux de sa propre logique et de son test de
 //! classeur, il ne peut pas etre sa propre victime.
+
+#[path = "commun/lexeur_rust.rs"]
+mod lexeur_rust;
 
 use std::path::{Path, PathBuf};
 
@@ -56,7 +83,8 @@ const GUARD_REL: &str = "crates/bifrost-evasion/tests/abstentions_stdout.rs";
 /// Les repertoires que le parcours ne descend jamais.
 const DOSSIERS_IGNORES: [&str; 2] = [".git", "target"];
 
-/// Le seuil du compte de controle: le depot en porte une cinquantaine.
+/// Le seuil du compte de controle: le depot en porte soixante-dix au 30/09/2026
+/// (cinquante tant que seul un litteral sur la ligne de la macro etait lu).
 const SEUIL_CONTROLE: usize = 40;
 
 fn racine() -> PathBuf {
@@ -104,31 +132,43 @@ const NOMS: [(&str, Genre); 4] = [
     ("print", Genre::Print),
 ];
 
-/// Un appel de macro trouve sur une ligne: son genre, et le contenu du premier
-/// litteral chaine s'il en porte un (les caracteres apres le `"` ouvrant,
-/// jusqu'au `"` fermant sur la MEME ligne; les echappements sont gardes tels
-/// quels, donc un `\n` source reste les deux caracteres `\` et `n`).
+/// Un appel de macro trouve dans le CODE (hors commentaires et litteraux): son
+/// genre, la ligne de la macro, et le premier litteral chaine qui suit sa
+/// parenthese, sur la meme ligne ou non. Le contenu est le corps tel qu'il est
+/// ecrit: dans une chaine normale, un `\n` source reste les deux caracteres
+/// `\` et `n`.
 struct Appel {
     genre: Genre,
+    ligne: usize,
     contenu: Option<String>,
+    brut: bool,
 }
 
 fn est_ident(octet: u8) -> bool {
     octet == b'_' || octet.is_ascii_alphanumeric()
 }
 
-/// Trouve les appels de macro d'impression sur une ligne.
+/// Trouve les appels de macro d'impression d'un source.
 ///
-/// Les sources du depot sont en ASCII (garde par `sources_ascii.rs`), donc un
-/// parcours par octets est sur ici. Le nom doit etre precede d'une frontiere
-/// (debut de ligne ou caractere non identifiant), sinon `eprintln!` serait lu
-/// aussi comme `println!` (il le contient), et `sprint!` comme `print!`.
-fn analyser_ligne(ligne: &str) -> Vec<Appel> {
-    let b = ligne.as_bytes();
+/// Le nom doit etre dans le code (pas dans un commentaire ni un litteral) et
+/// precede d'une frontiere (debut de texte ou caractere non identifiant), sinon
+/// `eprintln!` serait lu aussi comme `println!` (il le contient), et `sprint!`
+/// comme `print!`. Apres la parenthese, les blancs ET les sauts de ligne sont
+/// sautes: rustfmt passe les arguments longs a la ligne.
+fn analyser(src: &str) -> Result<Vec<Appel>, String> {
+    let decoupe = lexeur_rust::decouper(src)?;
+    let debuts_de_ligne: Vec<usize> = std::iter::once(0)
+        .chain(src.match_indices('\n').map(|(p, _)| p + 1))
+        .collect();
+    let b = src.as_bytes();
     let n = b.len();
     let mut appels = Vec::new();
     let mut i = 0usize;
     while i < n {
+        if let Some((_, fin)) = decoupe.zone_neutre(i) {
+            i = fin;
+            continue;
+        }
         let mut trouve: Option<(Genre, usize)> = None;
         for (nom, genre) in NOMS {
             let l = nom.len();
@@ -148,42 +188,32 @@ fn analyser_ligne(ligne: &str) -> Vec<Appel> {
         }
         if let Some((genre, apres_parenthese)) = trouve {
             let mut j = apres_parenthese;
-            while j < n && (b[j] == b' ' || b[j] == b'\t') {
+            while j < n && matches!(b[j], b' ' | b'\t' | b'\r' | b'\n') {
                 j += 1;
             }
-            let mut contenu = None;
-            if j < n && b[j] == b'"' {
-                let mut k = j + 1;
-                let mut buf = String::new();
-                while k < n {
-                    let c = b[k];
-                    if c == b'\\' && k + 1 < n {
-                        buf.push(b[k] as char);
-                        buf.push(b[k + 1] as char);
-                        k += 2;
-                        continue;
-                    }
-                    if c == b'"' {
-                        break;
-                    }
-                    buf.push(c as char);
-                    k += 1;
-                }
-                contenu = Some(buf);
-            }
-            appels.push(Appel { genre, contenu });
+            let litteral = decoupe.litteral_a(j);
+            appels.push(Appel {
+                genre,
+                ligne: debuts_de_ligne.partition_point(|&d| d <= i),
+                contenu: litteral.map(|l| l.corps.clone()),
+                brut: litteral.is_some_and(|l| l.brut),
+            });
             i += genre.nom().len();
         } else {
             i += 1;
         }
     }
-    appels
+    Ok(appels)
 }
 
-/// Le contenu prive d'un unique `\n` de tete (les deux caracteres `\` et `n`):
+/// Le contenu prive d'un saut de ligne de tete: `\n` echappe (les deux
+/// caracteres `\` et `n`) dans une chaine normale, ou vrai saut de ligne.
 /// `println!("\nSKIPPED...")` imprime bien une ligne qui commence a SKIPPED.
-fn tete_sans_saut(contenu: &str) -> &str {
-    contenu.strip_prefix("\\n").unwrap_or(contenu)
+fn tete_sans_saut(contenu: &str, brut: bool) -> &str {
+    if !brut && let Some(reste) = contenu.strip_prefix("\\n") {
+        return reste;
+    }
+    contenu.strip_prefix('\n').unwrap_or(contenu)
 }
 
 /// La forme exacte comptee: le litteral commence par `SKIPPED` sans rien devant.
@@ -192,16 +222,39 @@ fn commence_par_skipped(contenu: &str) -> bool {
 }
 
 /// La ligne imprimee commencera par `SKIPPED` (apres un eventuel `\n` de tete).
-fn debute_la_ligne(contenu: &str) -> bool {
-    tete_sans_saut(contenu).starts_with("SKIPPED")
+fn debute_la_ligne(contenu: &str, brut: bool) -> bool {
+    tete_sans_saut(contenu, brut).starts_with("SKIPPED")
 }
 
 /// Un ou plusieurs espaces (ou tabulations) avant `SKIPPED`: le prefixe interdit
 /// dans le code de test.
-fn espace_puis_skipped(contenu: &str) -> bool {
-    let tete = tete_sans_saut(contenu);
+fn espace_puis_skipped(contenu: &str, brut: bool) -> bool {
+    let tete = tete_sans_saut(contenu, brut);
     let sans_espace = tete.trim_start_matches([' ', '\t']);
     sans_espace.len() != tete.len() && sans_espace.starts_with("SKIPPED")
+}
+
+/// Nombre d'antislashs consecutifs a la fin de `s`.
+fn antislashs_finaux(s: &str) -> usize {
+    s.bytes().rev().take_while(|o| *o == b'\\').count()
+}
+
+/// Le litteral finit la ligne qu'il imprime: sa valeur se termine par un saut
+/// de ligne. Dans une chaine normale, c'est un `\n` dont l'antislash n'est pas
+/// lui-meme echappe, ou un vrai saut qui n'est pas une continuation (`\` puis
+/// saut: rustc l'efface). Dans une chaine brute, seul un vrai saut compte.
+fn finit_la_ligne(contenu: &str, brut: bool) -> bool {
+    if brut {
+        return contenu.ends_with('\n');
+    }
+    if let Some(avant) = contenu.strip_suffix('n')
+        && !antislashs_finaux(avant).is_multiple_of(2)
+    {
+        return true;
+    }
+    contenu.strip_suffix('\n').is_some_and(|avant| {
+        antislashs_finaux(avant.strip_suffix('\r').unwrap_or(avant)).is_multiple_of(2)
+    })
 }
 
 /// Parcourt `dossier` et ramasse les `.rs`, chemin relatif a `racine` (en `/`).
@@ -256,31 +309,51 @@ fn aucune_abstention_sur_stderr_ni_prefixee_dans_le_code_de_test() {
             continue;
         }
         let dans_tests = rel.contains("/tests/");
-        for (numero, ligne) in texte.lines().enumerate() {
-            for appel in analyser_ligne(ligne) {
-                let Some(contenu) = appel.contenu.as_deref() else {
-                    continue;
-                };
-                if appel.genre.sur_stderr() {
-                    if debute_la_ligne(contenu) || espace_puis_skipped(contenu) {
-                        violations.push(format!(
-                            "{rel}:{}: {}! ecrit une abstention SKIPPED sur stderr; une \
-                             abstention s'imprime sur stdout (println!), que le journal \
-                             merge sans la dechirer",
-                            numero + 1,
-                            appel.genre.nom()
-                        ));
-                    }
-                } else if commence_par_skipped(contenu) {
-                    compte += 1;
-                } else if dans_tests && espace_puis_skipped(contenu) {
+        let appels = match analyser(texte) {
+            Ok(a) => a,
+            Err(e) => {
+                violations.push(format!("{rel}: illisible pour le lexeur ({e})"));
+                continue;
+            }
+        };
+        for appel in appels {
+            let Some(contenu) = appel.contenu.as_deref() else {
+                continue;
+            };
+            let brut = appel.brut;
+            if appel.genre.sur_stderr() {
+                if debute_la_ligne(contenu, brut) || espace_puis_skipped(contenu, brut) {
                     violations.push(format!(
-                        "{rel}:{}: {}! imprime SKIPPED precede d'un espace/prefixe; le \
-                         budget lit des lignes qui commencent par SKIPPED",
-                        numero + 1,
+                        "{rel}:{}: {}! ecrit une abstention SKIPPED sur stderr; une \
+                         abstention s'imprime sur stdout (println!), que le journal \
+                         merge sans la dechirer",
+                        appel.ligne,
                         appel.genre.nom()
                     ));
                 }
+                continue;
+            }
+            if appel.genre == Genre::Print
+                && debute_la_ligne(contenu, brut)
+                && !finit_la_ligne(contenu, brut)
+            {
+                violations.push(format!(
+                    "{rel}:{}: print! ouvre une abstention SKIPPED sans finir la ligne; \
+                     entre deux appels Stdout relache son verrou et une autre ecriture \
+                     peut s'intercaler. L'ecrire d'un seul jet: println!, ou un print! \
+                     dont le litteral finit par \\n",
+                    appel.ligne
+                ));
+            }
+            if commence_par_skipped(contenu) {
+                compte += 1;
+            } else if dans_tests && espace_puis_skipped(contenu, brut) {
+                violations.push(format!(
+                    "{rel}:{}: {}! imprime SKIPPED precede d'un espace/prefixe; le \
+                     budget lit des lignes qui commencent par SKIPPED",
+                    appel.ligne,
+                    appel.genre.nom()
+                ));
             }
         }
     }
@@ -311,58 +384,117 @@ fn le_classeur_reconnait_les_formes_et_peut_rougir() {
     // n'est pas vide (il distingue reellement les cas).
 
     // eprint!/eprintln! qui portent une abstention: interdits.
-    let a = analyser_ligne("        eprintln!(\"SKIPPED: motif\");");
-    assert_eq!(a.len(), 1);
-    assert_eq!(a[0].genre, Genre::Eprintln);
-    assert!(debute_la_ligne(a[0].contenu.as_deref().unwrap()));
+    let a = un_appel("        eprintln!(\"SKIPPED: motif\");");
+    assert_eq!(a.genre, Genre::Eprintln);
+    assert!(debute_la_ligne(a.contenu.as_deref().unwrap(), a.brut));
 
-    let a = analyser_ligne("    eprint!(\"SKIPPED sans ln\");");
-    assert_eq!(a[0].genre, Genre::Eprint);
-    assert!(debute_la_ligne(a[0].contenu.as_deref().unwrap()));
+    let a = un_appel("    eprint!(\"SKIPPED sans ln\");");
+    assert_eq!(a.genre, Genre::Eprint);
+    assert!(debute_la_ligne(a.contenu.as_deref().unwrap(), a.brut));
 
     // println!("SKIPPED...): la forme normale, comptee, jamais un ecart.
-    let a = analyser_ligne("    println!(\"SKIPPED: {raison}\");");
-    assert_eq!(a[0].genre, Genre::Println);
-    let c = a[0].contenu.as_deref().unwrap();
+    let a = un_appel("    println!(\"SKIPPED: {raison}\");");
+    assert_eq!(a.genre, Genre::Println);
+    let c = a.contenu.as_deref().unwrap();
     assert!(commence_par_skipped(c));
-    assert!(!espace_puis_skipped(c));
+    assert!(!espace_puis_skipped(c, false));
 
     // Un \n de tete puis SKIPPED: la ligne imprimee commence bien a SKIPPED.
     // Admise (cf. veille_linux.rs), et non comptee dans les 40 (c'est voulu).
-    let c = analyser_ligne("    println!(\"\\nSKIPPED: {e}\");")[0]
+    let c = un_appel("    println!(\"\\nSKIPPED: {e}\");")
         .contenu
-        .clone()
         .unwrap();
-    assert!(debute_la_ligne(&c));
-    assert!(!espace_puis_skipped(&c));
+    assert!(debute_la_ligne(&c, false));
+    assert!(!espace_puis_skipped(&c, false));
     assert!(!commence_par_skipped(&c));
 
     // Un espace avant SKIPPED: le prefixe interdit dans le code de test.
-    let c = analyser_ligne("    println!(\"  SKIPPED: x\");")[0]
-        .contenu
-        .clone()
-        .unwrap();
-    assert!(espace_puis_skipped(&c));
+    let c = un_appel("    println!(\"  SKIPPED: x\");").contenu.unwrap();
+    assert!(espace_puis_skipped(&c, false));
     assert!(!commence_par_skipped(&c));
 
     // Un prefixe textuel apres un \n (affichage de production, hors classe):
     // ni compte, ni prefixe d'espace.
-    let c = analyser_ligne("    println!(\"\\n{v}: SKIPPED - {r}\");")[0]
+    let c = un_appel("    println!(\"\\n{v}: SKIPPED - {r}\");")
         .contenu
-        .clone()
         .unwrap();
-    assert!(!debute_la_ligne(&c));
-    assert!(!espace_puis_skipped(&c));
+    assert!(!debute_la_ligne(&c, false));
+    assert!(!espace_puis_skipped(&c, false));
 
-    // Frontiere: println! n'est PAS reconnu a l'interieur d'eprintln!.
-    let a = analyser_ligne("    eprintln!(\"SKIPPED\");");
+    // Frontiere: println! n'est PAS reconnu a l'interieur d'eprintln!
+    // (`un_appel` exige un appel et un seul).
     assert_eq!(
-        a.len(),
-        1,
-        "eprintln! ne doit pas compter aussi comme println!"
+        un_appel("    eprintln!(\"SKIPPED\");").genre,
+        Genre::Eprintln
     );
-    assert_eq!(a[0].genre, Genre::Eprintln);
 
     // Une mention de SKIPPED hors macro d'impression n'est pas un appel.
-    assert!(analyser_ligne("        assert!(s.contains(\"SKIPPED\"));").is_empty());
+    assert!(
+        analyser("        assert!(s.contains(\"SKIPPED\"));")
+            .unwrap()
+            .is_empty()
+    );
+
+    // --- 30/09/2026: le litteral sur la ligne suivante, forme de rustfmt ---
+    // La forme exacte de crates/bifrost-daemon/tests/sondes.rs, invisible a la
+    // lecture ligne par ligne.
+    let a = un_appel(SONDES_AVANT);
+    assert_eq!(a.genre, Genre::Eprintln);
+    assert_eq!(a.ligne, 2, "la ligne signalee est celle de la macro");
+    assert!(debute_la_ligne(a.contenu.as_deref().unwrap(), a.brut));
+
+    // Un commentaire ou un litteral n'est pas du code.
+    for extrait in [
+        "    // eprintln!(\"SKIPPED: dans un commentaire\");\n",
+        "    /* print!(\"SKIPPED\") */\n",
+        "    let s = \"eprintln!(\\\"SKIPPED\\\")\";\n",
+    ] {
+        assert!(analyser(extrait).unwrap().is_empty(), "{extrait:?}");
+    }
+
+    // Une chaine brute est lue aussi.
+    let a = un_appel("    eprintln!(r\"SKIPPED: brut\");");
+    assert!(a.brut);
+    assert!(debute_la_ligne(a.contenu.as_deref().unwrap(), a.brut));
+
+    // --- Le trou FF: print! qui ouvre une abstention sans finir la ligne ---
+    let ff = |src: &str| {
+        let a = un_appel(src);
+        let c = a.contenu.as_deref().expect("un litteral");
+        a.genre == Genre::Print && debute_la_ligne(c, a.brut) && !finit_la_ligne(c, a.brut)
+    };
+    assert!(ff("    print!(\"SKIPPED: {raison}\");"));
+    assert!(ff(
+        "    print!(\n        \"SKIPPED: {}\",\n        raison\n    );"
+    ));
+    assert!(ff("    print!(\"\\nSKIPPED: {raison}\");"));
+    assert!(ff("    print!(r\"SKIPPED: brut\");"));
+    assert!(ff("    print!(\"SKIPPED: a \\\n           b\");"));
+    // Un antislash echappe avant le n n'est pas un saut de ligne.
+    assert!(ff("    print!(\"SKIPPED: C:\\\\n\");"));
+    // Verts: la ligne est finie dans le meme appel, sous le meme verrou.
+    assert!(!ff("    print!(\"SKIPPED: {raison}\\n\");"));
+    assert!(!ff("    print!(\"SKIPPED: a \\\n           b\\n\");"));
+    assert!(!ff("    print!(r\"SKIPPED: brut\n\");"));
+    // println! n'est pas l'affaire de cette regle, eprint! non plus: il tombe
+    // sous la regle centrale (stderr), ci-dessus.
+    assert!(!ff("    println!(\"SKIPPED: {raison}\");"));
+    assert!(!ff("    eprint!(\"SKIPPED: {raison}\");"));
 }
+
+/// L'unique appel d'un extrait de source.
+fn un_appel(src: &str) -> Appel {
+    let mut appels = analyser(src).expect("extrait lisible");
+    assert_eq!(appels.len(), 1, "un seul appel attendu dans {src:?}");
+    appels.remove(0)
+}
+
+/// Les lignes 48 a 52 de `crates/bifrost-daemon/tests/sondes.rs` au commit
+/// 852aff4, octet pour octet. Chaine brute: le lexeur ne la prend pas pour du
+/// code quand cette recette se lit elle-meme.
+const SONDES_AVANT: &str = r#"    let Ok(cible) = std::env::var("BIFROST_CHEMIN_ETROIT") else {
+        eprintln!(
+            "SKIPPED un_chemin_etroit_est_vu_comme_tel: \
+             BIFROST_CHEMIN_ETROIT absent, aucune interface a MTU reduit a viser"
+        );
+"#;

@@ -2146,7 +2146,8 @@ mod tests {
         assert_eq!(
             NDP_TYPES,
             [133, 134, 135, 136, 137],
-            "sollicitation et annonce de routeur, sollicitation et annonce de              voisin, redirection"
+            "sollicitation et annonce de routeur, sollicitation et annonce de \
+             voisin, redirection"
         );
     }
 

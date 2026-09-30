@@ -685,10 +685,7 @@ mod tests {
         #[test]
         fn un_profil_scelle_se_rouvre_et_son_chiffre_ne_dit_rien() {
             let rep = repertoire("aller-retour");
-            let contenu = format!(
-                "mot_de_passe = \"{SECRET}\"
-"
-            );
+            let contenu = format!("mot_de_passe = \"{SECRET}\"\n");
             let clair = ecrire_profil(&rep, &contenu);
 
             let scelle = sceller(&clair).expect("le scellement doit reussir");
@@ -722,20 +719,11 @@ mod tests {
         #[test]
         fn le_scelle_l_emporte_et_un_chiffre_etranger_est_refuse() {
             let rep = repertoire("priorite");
-            let clair = ecrire_profil(
-                &rep,
-                "mot_de_passe = \"celui-du-clair\"
-",
-            );
+            let clair = ecrire_profil(&rep, "mot_de_passe = \"celui-du-clair\"\n");
             sceller(&clair).expect("le scellement doit reussir");
             // Le clair change APRES le scellement: si c'est lui qu'on lit, la
             // recette le verra.
-            std::fs::write(
-                &clair,
-                "mot_de_passe = \"celui-du-clair-modifie\"
-",
-            )
-            .unwrap();
+            std::fs::write(&clair, "mot_de_passe = \"celui-du-clair-modifie\"\n").unwrap();
 
             let ouvert = ouvrir(&clair).expect("le scelle doit s'ouvrir");
             assert_eq!(ouvert.forme, Forme::Scelle);
@@ -757,7 +745,8 @@ mod tests {
             let vu = format!("{e:#}");
             assert!(
                 vu.contains("autre.chose") && vu.contains(NOM_CREDENTIAL),
-                "le refus doit nommer les deux noms, qui sont la propriete                  d'integrite: {vu}"
+                "le refus doit nommer les deux noms, qui sont la propriete \
+                 d'integrite: {vu}"
             );
 
             let _ = std::fs::remove_dir_all(&rep);

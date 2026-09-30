@@ -491,7 +491,8 @@ mod tests {
 
         assert!(
             poignee_cote_serveur,
-            "le serveur n'a pas vu la poignee aboutir: la sonde l'a cassee,              ce que le document 04 interdit et qui signale ce client"
+            "le serveur n'a pas vu la poignee aboutir: la sonde l'a cassee, \
+             ce que le document 04 interdit et qui signale ce client"
         );
 
         match vu {
@@ -504,7 +505,8 @@ mod tests {
                 );
             }
             autre => panic!(
-                "une interception fabriquee n'a pas ete vue comme telle: {autre:?}.                  Sans ce temoin, un mitm_tls a false ne prouve rien"
+                "une interception fabriquee n'a pas ete vue comme telle: {autre:?}. \
+                 Sans ce temoin, un mitm_tls a false ne prouve rien"
             ),
         }
     }

@@ -105,20 +105,14 @@ pub fn selftest(resolveur: SocketAddr, lan: bool) -> anyhow::Result<()> {
 
     match issue {
         Issue::Reussi => {
-            println!(
-                "
-dns-leak: PASSED - aucune requete DNS ne sort en clair"
-            );
+            println!("\ndns-leak: PASSED - aucune requete DNS ne sort en clair");
             Ok(())
         }
         // Un vecteur qui n'a pas pu mesurer n'est PAS un echec d'etancheite, et
         // les confondre ferait chercher une fuite la ou il n'y a qu'un banc mal
         // dispose. C'est la regle non negociable du depot.
         Issue::Ignore(raison) => {
-            println!(
-                "
-dns-leak: SKIPPED - {raison}"
-            );
+            println!("\ndns-leak: SKIPPED - {raison}");
             Ok(())
         }
         Issue::Echec(raison) => Err(anyhow!("dns-leak: FAILED - {raison}")),

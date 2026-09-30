@@ -209,10 +209,7 @@ pub fn selftest(cible: std::net::Ipv4Addr, temoin: std::net::Ipv4Addr) -> anyhow
     let retrait = crate::boot_filtres::retirer(&[]);
     resultat?;
     retrait?;
-    println!(
-        "
-temoin WFP valide: un blocage est attribuable au filtre qui l'a pose"
-    );
+    println!("\ntemoin WFP valide: un blocage est attribuable au filtre qui l'a pose");
     Ok(())
 }
 
@@ -272,8 +269,7 @@ fn mesurer(
     );
     if constat.audit_muet() {
         anyhow::bail!(
-            "aucun blocage WFP dans le journal, pas meme ceux du pare-feu Windows: l'audit n'enregistre rien. Ce n'est pas un echec d'etancheite, c'est une mesure impossible. A activer avec:
-{COMMANDE_ACTIVATION}"
+            "aucun blocage WFP dans le journal, pas meme ceux du pare-feu Windows: l'audit n'enregistre rien. Ce n'est pas un echec d'etancheite, c'est une mesure impossible. A activer avec:\n{COMMANDE_ACTIVATION}"
         );
     }
     match constat.notres.first() {
