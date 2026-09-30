@@ -150,6 +150,14 @@ async fn ouvrir_le_profil(chemin: &std::path::Path) -> Result<Box<TunnelConfig>,
         };
         let config: TunnelConfig = toml::from_str(&ouvert.contenu)
             .map_err(|e| format!("profil {} invalide: {e}", designe.display()))?;
+        // Valide ici, a l'ouverture, pour que le refus nomme le fichier a
+        // corriger, comme le fait le client pour le sien. Le superviseur
+        // revalide de toute facon avant tout armement: c'est la meme fonction.
+        // Un profil range par une version precedente avec une table que le
+        // noyau se reserve s'arrete donc ici, avant tout montage.
+        config
+            .validate()
+            .map_err(|e| format!("profil {} invalide: {e}", designe.display()))?;
         Ok(Box::new(config))
     })
     .await
@@ -379,6 +387,36 @@ upstream = ["10.2.0.1"]
         assert!(
             e.contains(&f.display().to_string()),
             "le message doit nommer le fichier: {e}"
+        );
+        let _ = std::fs::remove_dir_all(&rep);
+    }
+
+    /// Un profil range avec une table que le noyau se reserve est refuse a
+    /// l'ouverture: le message nomme le fichier, la valeur et ce qu'il faut
+    /// changer, et aucune commande n'atteint le superviseur.
+    #[tokio::test]
+    async fn un_profil_range_avec_une_table_reservee_est_refuse_a_l_ouverture() {
+        let fautif = PROFIL.replace(
+            "addresses = [\"10.2.0.2/32\"]\n",
+            "addresses = [\"10.2.0.2/32\"]\nrouting_table = 254\n",
+        );
+        assert_ne!(fautif, PROFIL, "le remplacement doit avoir porte");
+        let (rep, f) = profil("table-reservee", &fautif);
+        let e = ouvrir_le_profil(&f)
+            .await
+            .expect_err("une table reservee doit etre refusee a l'ouverture");
+        assert!(e.contains(&f.display().to_string()), "le fichier: {e}");
+        assert!(e.contains("routing_table = 254"), "la valeur: {e}");
+        assert!(
+            e.contains("Retirer la ligne routing_table"),
+            "ce qu'il faut changer: {e}"
+        );
+        let (tx, rx) = std::sync::mpsc::channel();
+        let reponse = dispatch(Command::ConnectStored, &tx, &f).await;
+        assert!(matches!(reponse, Response::Error { .. }), "{reponse:?}");
+        assert!(
+            rx.try_recv().is_err(),
+            "rien ne doit atteindre le superviseur"
         );
         let _ = std::fs::remove_dir_all(&rep);
     }

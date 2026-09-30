@@ -39,15 +39,15 @@ service, les litteraux abimes par un transport d'antislashs et le trou FF
 de la garde des abstentions, la comparaison des objets nft nommes, puis la
 garde sans privilege du contrat de `check` sans banc et des drop-ins de l'unite, puis l'isolement des executions concurrentes
 d'une meme suite (repertoires temporaires par processus, ports sans personne
-tenus), puis la preuve des regles de routage et des routes (D1c.1). L'hote qui tient le role `essai-linux` a change le 29/09: ses comptes ne se comparent pas a ceux d'avant cette date.
+tenus), puis la preuve des regles de routage et des routes (D1c.1), puis le refus des tables de routage que le noyau se reserve. L'hote qui tient le role `essai-linux` a change le 29/09: ses comptes ne se comparent pas a ceux d'avant cette date.
 
 Compte honnete des recettes cargo, par hote. La colonne `reelles` est ce qui a
 verifie quelque chose: `annoncees` moins `abstentions` moins `rouges`.
 
 | Hote | Annoncees | Abstentions | Rouges | Reelles |
 |---|---|---|---|---|
-| dev-windows | 1409 | 19 | 0 | 1390 |
-| essai-linux | 1431 | 25 | 0 | 1406 |
+| dev-windows | 1421 | 19 | 0 | 1402 |
+| essai-linux | 1444 | 25 | 0 | 1419 |
 
 Les deux lignes ont ete prises par `scripts/recettes-strict.sh`, chacune sur son
 hote: le portage a ajoute 14 recettes des deux cotes, D1b.3b 11 sur dev-windows et 22
@@ -70,7 +70,9 @@ des executions concurrentes 4 des deux cotes (la recette du port sans personne
 que personne ne peut prendre, et les trois recettes de la garde
 `partage_entre_executions.rs`), la preuve des regles de routage et des routes
 34 sur dev-windows et 36 sur `essai-linux` (la lecture du noyau et la pose du chemin
-par coeur sont propres a Linux, le constat hors Linux a Windows). Sur `essai-linux` une recette de plus est ignoree par
+par coeur sont propres a Linux, le constat hors Linux a Windows), le refus des tables
+de routage reservees au noyau 12 sur dev-windows et 13 sur `essai-linux` (la
+comparaison aux constantes de libc est propre a Linux). Sur `essai-linux` une recette de plus est ignoree par
 construction (elle pose une route et ne tourne qu'en espace de noms reseau).
 La ligne `essai-linux` a ete prise dans un clone, ou la garde des modes de
 scripts mesure (elle lit l'index); dans une copie sans `.git` elle s'abstient,
@@ -84,7 +86,7 @@ la prochaine action. Une cellule vide signalerait une tranche non finie.
 | Chantier | Etat et derniere mesure | Prochaine action |
 |---|---|---|
 | 01 | Architecture technique. Cadre du plan, redige; ce n'est pas un livrable | - |
-| 02 | Kill switch WFP et nftables. Specification de reference, a jour. 30/09/2026: le permis DNS Windows ne se pose plus que sur la couche de la famille du resolveur, et la traduction refuse une condition inapplicable a sa couche au lieu de l'ecarter (elle compte les conditions posees). Mesure sur essai-windows avant (filtre sans adresse sur l'autre couche; resolveur `::1`, une requete DNS IPv4 vers un resolveur public obtenait sa reponse, kill switch arme) et apres (un seul permis, l'autre famille refusee par `block-dns`). La fuite IPv6 hors LAN reste inferee: pas d'IPv6 globale sur le site | - |
+| 02 | Kill switch WFP et nftables. Specification de reference, a jour. 30/09/2026: le permis DNS Windows ne se pose plus que sur la couche de la famille du resolveur, et la traduction refuse une condition inapplicable a sa couche au lieu de l'ecarter (elle compte les conditions posees). Mesure sur essai-windows avant (filtre sans adresse sur l'autre couche; resolveur `::1`, une requete DNS IPv4 vers un resolveur public obtenait sa reponse, kill switch arme) et apres (un seul permis, l'autre famille refusee par `block-dns`). La fuite IPv6 hors LAN reste inferee: pas d'IPv6 globale sur le site. 30/09/2026 aussi: une `routing_table` que le noyau se reserve (0, 253, 254, 255) est refusee a la validation, et la pose comme le demontage WireGuard la refusent sans rien emettre quand la validation n'a pas eu lieu. Mesure avant, en namespace jetable par `LinuxTunnel::up` et `down`: une tentative de connexion en 254 vidait `main`, en 0 toutes les tables; un demontage en 255 vidait `local`, en 253 `default`. Apres: refus nomme, etat du namespace identique. | - |
 | 03 | Anti-telemetrie OS. Couche DNS livree; couches Windows registre et WFP par service a finir | Finir les couches Windows registre et WFP par service |
 | 04 | Anti-censure DPI. Tableau de survie rafraichi le 20/09/2026 (une cellule); inerte a partir du 30/09/2026 (`TABLEAU_INERTE_A_PARTIR_DU`, gardee par `selection::planifier`): il classe encore, il n'ecarte plus rien | Rafraichir le tableau, en priorite la colonne Turkmenistan, sans source depuis juillet |
 | 05 | Anonymat et chainage. Document redige; le chainage Tor et Nym n'est pas commence, et le document lui-meme le place apres les trois objectifs | Chainage Tor ou Nym, apres les objectifs 1 a 3 |

@@ -115,6 +115,13 @@ impl LinuxTunnel {
 impl TunnelDevice for LinuxTunnel {
     fn up(&mut self, cfg: &TunnelConfig) -> Result<()> {
         cfg.validate()?;
+        // Les deux listes de routage sont rendues ICI, avant la premiere
+        // commande. `netcfg` refuse une table que le noyau se reserve, meme si
+        // la validation l'a laissee passer; refuse ici, rien n'a encore ete
+        // cree ni retire. Rendues plus bas, un refus de la pose laisserait une
+        // interface creee sans demontage possible.
+        let pose = netcfg::add_routing(cfg)?;
+        let demontage = netcfg::teardown(cfg)?;
 
         if !std::path::Path::new("/sys/module/wireguard").exists()
             && !Self::link_exists(&cfg.interface)
@@ -132,8 +139,8 @@ impl TunnelDevice for LinuxTunnel {
                 interface = %cfg.interface,
                 "interface residuelle detectee, demontage prealable"
             );
-            for cmd in netcfg::teardown(cfg) {
-                Self::run(&cmd)?;
+            for cmd in &demontage {
+                Self::run(cmd)?;
             }
         }
 
@@ -151,16 +158,16 @@ impl TunnelDevice for LinuxTunnel {
             for cmd in netcfg::configure_link(cfg) {
                 Self::run(&cmd)?;
             }
-            for cmd in netcfg::add_routing(cfg) {
-                Self::run(&cmd)?;
+            for cmd in &pose {
+                Self::run(cmd)?;
             }
             Ok(())
         })();
 
         if let Err(e) = result {
             tracing::error!(error = %e, "montage incomplet, nettoyage");
-            for cmd in netcfg::teardown(cfg) {
-                let _ = Self::run(&cmd);
+            for cmd in &demontage {
+                let _ = Self::run(cmd);
             }
             return Err(e);
         }
@@ -176,7 +183,9 @@ impl TunnelDevice for LinuxTunnel {
     }
 
     fn down(&mut self, cfg: &TunnelConfig) -> Result<()> {
-        for cmd in netcfg::teardown(cfg) {
+        // Une table reservee est refusee sans qu'aucune commande parte: voir
+        // `netcfg::teardown`.
+        for cmd in netcfg::teardown(cfg)? {
             Self::run(&cmd)?;
         }
         tracing::info!(interface = %cfg.interface, "tunnel demonte");
