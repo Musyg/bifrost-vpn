@@ -105,6 +105,153 @@ pub enum Condition {
     Loopback,
 }
 
+impl Condition {
+    /// Cette condition peut-elle etre posee sur `couche` ?
+    ///
+    /// Une adresse distante n'existe que dans sa famille: une adresse IPv4 sur
+    /// les couches V4, une adresse IPv6 sur les couches V6. Toutes les autres
+    /// conditions du plan valent sur les quatre couches ALE.
+    ///
+    /// C'est la regle que le plan doit respecter pour CHAQUE couche de chaque
+    /// filtre, et que la pose verifie avant d'ecrire quoi que ce soit: une
+    /// condition qu'une couche ne porte pas ne peut pas y etre ecartee, car le
+    /// filtre partirait alors au moteur plus large que le plan.
+    pub fn s_applique_a(&self, couche: Layer) -> bool {
+        match self {
+            Condition::RemoteAddrV4 { .. } => couche.is_v4(),
+            Condition::RemoteAddrV6 { .. } => !couche.is_v4(),
+            _ => true,
+        }
+    }
+}
+
+/// Refuse de poser `condition` sur une couche qui ne peut pas la porter.
+///
+/// Une ERREUR de pose, jamais un filtrage. Jusqu'au 30/09/2026 la traduction
+/// ecartait une telle condition en silence et posait le filtre sans elle:
+/// `permit-dns-to-local-resolver` perdait ainsi son adresse sur la couche de
+/// l'autre famille et y devenait "port 53, UDP ou TCP, toute destination", au
+/// poids 15, au-dessus de `block-dns`. Mesure sur banc Windows: kill switch
+/// arme, resolveur `::1`, une requete DNS en IPv4 vers un resolveur public
+/// obtenait sa reponse.
+pub fn condition_posable(
+    spec: &FilterSpec,
+    condition: &Condition,
+    couche: Layer,
+) -> bifrost_core::Result<()> {
+    if condition.s_applique_a(couche) {
+        return Ok(());
+    }
+    Err(bifrost_core::Error::Firewall(format!(
+        "le filtre '{}' porte la condition {condition:?}, inapplicable a {}: le \
+         poser sans elle l'elargirait, refus",
+        spec.name,
+        couche.name()
+    )))
+}
+
+/// Garde de la traduction: chaque condition demandee par le plan est posee.
+///
+/// Un filtre qui arrive au moteur avec moins de conditions que le plan n'en
+/// demande est plus large que le plan, et c'est toujours dans le sens qui
+/// fuit pour un permit. Couvre aussi le cas extreme d'un filtre dont toutes
+/// les conditions auraient disparu, qui deviendrait inconditionnel.
+pub fn toutes_les_conditions_posees(
+    spec: &FilterSpec,
+    couche: Layer,
+    posees: usize,
+) -> bifrost_core::Result<()> {
+    if posees == spec.conditions.len() {
+        return Ok(());
+    }
+    Err(bifrost_core::Error::Firewall(format!(
+        "le filtre '{}' sur {}: {posees} condition(s) posee(s) pour {} demandee(s); \
+         un filtre qui perd une condition est plus large que le plan, refus",
+        spec.name,
+        couche.name(),
+        spec.conditions.len()
+    )))
+}
+
+/// Tous les plans que ce crate sait produire, sur une matrice de politiques.
+///
+/// Sert aux gardes qui doivent valoir pour CHAQUE filtre pose, et non pour les
+/// seuls filtres qu'une recette pense a regarder: le plan de connexion et sa
+/// variante sans blocage, le filtre de demarrage et ses exemptions, la sonde
+/// d'identite, le plan anti-telemetrie et ses sondes. Tous passent par la meme
+/// traduction.
+#[cfg(test)]
+pub(crate) fn plans_de_reference() -> Vec<FilterSpec> {
+    use crate::plan_telemetrie;
+    use bifrost_core::config::ProfilTelemetrie;
+
+    let mut tout = Vec::new();
+    for resolveur in [
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        IpAddr::V6(Ipv6Addr::LOCALHOST),
+    ] {
+        for allow_lan in [false, true] {
+            for luid in [None, Some(7)] {
+                for coeur in [None, Some(PathBuf::from(r"C:\Bifrost\coeurs\sing-box.exe"))] {
+                    for (embarque, sid) in [
+                        (false, None),
+                        (true, None),
+                        (true, Some("S-1-5-19".to_owned())),
+                    ] {
+                        let politique = FirewallPolicy {
+                            tunnel_interface: None,
+                            tunnel_luid: luid,
+                            fwmark: None,
+                            dns_resolver: resolveur,
+                            allow_lan,
+                            coeur_uid: None,
+                            coeur_executable: coeur.clone(),
+                            resolveur_uid: None,
+                            resolveur_executable: Some(PathBuf::from(
+                                r"C:\Bifrost\dnscrypt-proxy.exe",
+                            )),
+                            resolveur_sid: sid,
+                            resolveur_embarque: embarque,
+                        };
+                        let p = plan(&politique, PathBuf::from("bifrost-daemon.exe"), luid);
+                        tout.extend(without_blocking(p.clone()));
+                        tout.extend(p);
+                    }
+                }
+            }
+        }
+    }
+    for n in 0u8..8 {
+        tout.extend(plan_demarrage(&PolitiqueDemarrage {
+            reseau_local: n & 1 == 1,
+            overlay_cgnat: n & 2 == 2,
+            ipv6: n & 4 == 4,
+        }));
+    }
+    for identite in [Identity::Current, Identity::Sid("S-1-0-0".into())] {
+        tout.extend(identity_probe(
+            PathBuf::from("bifrost-daemon.exe"),
+            Ipv4Addr::new(203, 0, 113, 9),
+            identite,
+        ));
+    }
+    let racine = std::path::Path::new(r"C:\Windows");
+    for profil in [
+        ProfilTelemetrie::Aucun,
+        ProfilTelemetrie::Equilibre,
+        ProfilTelemetrie::Strict,
+    ] {
+        tout.extend(plan_telemetrie::plan(profil, racine));
+    }
+    tout.extend(
+        plan_telemetrie::plan_sonde(&plan_telemetrie::sid_de_service("bifrost-sonde-dnsv6"))
+            .expect("sonde de service"),
+    );
+    let exe = std::env::current_exe().expect("binaire de la recette");
+    tout.extend(plan_telemetrie::plan_sonde_binaire(&exe, racine).expect("sonde de binaire"));
+    tout
+}
+
 /// Quelle identite d'utilisateur un filtre autorise.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Identity {
@@ -522,20 +669,31 @@ pub fn identity_probe(daemon_exe: PathBuf, target: Ipv4Addr, user: Identity) -> 
 }
 
 fn dns_filters(resolver: IpAddr) -> Vec<FilterSpec> {
-    let addr = match resolver {
-        IpAddr::V4(a) => Condition::RemoteAddrV4 {
-            addr: a,
-            prefix: 32,
-        },
-        IpAddr::V6(a) => Condition::RemoteAddrV6 {
-            addr: a,
-            prefix: 128,
-        },
+    // Le permit ne vit que sur la couche de la famille du resolveur: sur
+    // l'autre, son adresse n'existe pas, et le poser sans elle en ferait un
+    // permit :53 vers toute destination, au-dessus de `block-dns`. Sur cette
+    // autre couche, `block-dns` s'applique seul: aucun resolveur de cette
+    // famille n'est autorise, et c'est exact.
+    let (addr, couche) = match resolver {
+        IpAddr::V4(a) => (
+            Condition::RemoteAddrV4 {
+                addr: a,
+                prefix: 32,
+            },
+            Layer::AuthConnectV4,
+        ),
+        IpAddr::V6(a) => (
+            Condition::RemoteAddrV6 {
+                addr: a,
+                prefix: 128,
+            },
+            Layer::AuthConnectV6,
+        ),
     };
     vec![
         FilterSpec {
             name: "permit-dns-to-local-resolver".into(),
-            layers: Layer::OUTBOUND.to_vec(),
+            layers: vec![couche],
             weight: weight::DNS_PERMIT,
             action: Action::Permit,
             hard: false,
@@ -959,6 +1117,170 @@ mod tests {
             addr: Ipv6Addr::LOCALHOST,
             prefix: 128
         }));
+    }
+
+    /// Le permit DNS n'existe QUE sur la couche de la famille du resolveur.
+    ///
+    /// Sur l'autre couche, sa condition d'adresse n'a pas de sens: pose la
+    /// quand meme, il y devenait "port 53 vers toute destination" au-dessus
+    /// de `block-dns`. Mesure sur banc Windows le 30/09/2026, kill switch
+    /// arme: resolveur `127.0.0.1`, le :53 IPv6 passait; resolveur `::1`, une
+    /// requete DNS IPv4 vers un resolveur public obtenait sa reponse. Sur
+    /// l'autre couche, `block-dns` doit s'appliquer seul.
+    #[test]
+    fn le_permit_dns_ne_vit_que_sur_la_couche_de_la_famille_du_resolveur() {
+        for (resolveur, couche) in [
+            (IpAddr::V4(Ipv4Addr::LOCALHOST), Layer::AuthConnectV4),
+            (IpAddr::V6(Ipv6Addr::LOCALHOST), Layer::AuthConnectV6),
+        ] {
+            let mut politique = policy(true);
+            politique.dns_resolver = resolveur;
+            let p = plan(&politique, PathBuf::from("x.exe"), Some(1));
+            assert_eq!(
+                find(&p, "permit-dns-to-local-resolver").layers,
+                vec![couche],
+                "resolveur {resolveur}: le permit DNS deborde de sa famille"
+            );
+            assert_eq!(
+                find(&p, "block-dns").layers,
+                Layer::OUTBOUND.to_vec(),
+                "resolveur {resolveur}: le blocage DNS doit couvrir les deux familles"
+            );
+        }
+    }
+
+    /// La garde de classe: aucun filtre d'aucun plan ne porte une condition
+    /// qu'une de ses couches ne peut pas porter.
+    ///
+    /// Les recettes du permit DNS lisaient la condition d'adresse dans le
+    /// `FilterSpec`, ou elle etait bien presente; c'est la traduction par
+    /// couche qui la retirait. Celle-ci lit la condition CONTRE chaque couche,
+    /// pour tous les plans du crate.
+    #[test]
+    fn aucun_plan_ne_porte_une_condition_inapplicable_a_l_une_de_ses_couches() {
+        let mut fautes = Vec::new();
+        for f in plans_de_reference() {
+            for couche in &f.layers {
+                for c in &f.conditions {
+                    if !c.s_applique_a(*couche) {
+                        fautes.push(format!("{} sur {}: {c:?}", f.name, couche.name()));
+                    }
+                }
+            }
+        }
+        fautes.sort();
+        fautes.dedup();
+        assert!(
+            fautes.is_empty(),
+            "conditions inapplicables a leur couche: {fautes:#?}"
+        );
+    }
+
+    /// La regle elle-meme, couche par couche. Sans cette table, une garde qui
+    /// rendrait toujours vrai laisserait passer la garde de classe ci-dessus.
+    #[test]
+    fn une_adresse_ne_s_applique_qu_aux_couches_de_sa_famille() {
+        let v4 = Condition::RemoteAddrV4 {
+            addr: Ipv4Addr::LOCALHOST,
+            prefix: 32,
+        };
+        let v6 = Condition::RemoteAddrV6 {
+            addr: Ipv6Addr::LOCALHOST,
+            prefix: 128,
+        };
+        for couche in Layer::ALL {
+            assert_eq!(v4.s_applique_a(couche), couche.is_v4(), "{}", couche.name());
+            assert_eq!(
+                v6.s_applique_a(couche),
+                !couche.is_v4(),
+                "{}",
+                couche.name()
+            );
+            for autre in [
+                Condition::RemotePort(53),
+                Condition::Protocol(IPPROTO_UDP),
+                Condition::LocalPort(68),
+                Condition::IcmpType(135),
+                Condition::LocalInterface(1),
+                Condition::Loopback,
+                Condition::AppId(PathBuf::from("x.exe")),
+                Condition::UserId(Identity::Current),
+            ] {
+                assert!(
+                    autre.s_applique_a(couche),
+                    "{autre:?} sur {}",
+                    couche.name()
+                );
+            }
+        }
+    }
+
+    /// La pose refuse une condition inapplicable, et en le disant: jamais un
+    /// filtre pose sans elle.
+    #[test]
+    fn une_condition_inapplicable_est_refusee_a_la_pose() {
+        let p = plan(&policy(false), PathBuf::from("x.exe"), None);
+        let dns = find(&p, "permit-dns-to-local-resolver");
+        let adresse = &dns.conditions[0];
+        assert!(matches!(adresse, Condition::RemoteAddrV4 { .. }));
+        let e = condition_posable(dns, adresse, Layer::AuthConnectV6)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("inapplicable a ALE_AUTH_CONNECT_V6"), "{e}");
+        assert!(e.contains("permit-dns-to-local-resolver"), "{e}");
+        condition_posable(dns, adresse, Layer::AuthConnectV4)
+            .expect("la meme condition est posable sur sa famille");
+    }
+
+    /// Le compte: une condition de moins que le plan est un refus, le compte
+    /// exact passe. Couvre le filtre devenu inconditionnel (zero posee).
+    #[test]
+    fn le_compte_des_conditions_posees_refuse_toute_perte() {
+        let p = plan(&policy(false), PathBuf::from("x.exe"), None);
+        let dns = find(&p, "permit-dns-to-local-resolver");
+        let n = dns.conditions.len();
+        toutes_les_conditions_posees(dns, Layer::AuthConnectV4, n).expect("compte exact");
+        for posees in [0, n - 1] {
+            let e = toutes_les_conditions_posees(dns, Layer::AuthConnectV4, posees)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                e.contains(&format!("{posees} condition(s) posee(s)")),
+                "{e}"
+            );
+        }
+    }
+
+    /// La matrice de reference couvre bien les plans qu'elle annonce. Une
+    /// matrice vide ou tronquee rendrait la garde de classe verte sans rien
+    /// avoir lu.
+    #[test]
+    fn la_matrice_de_reference_contient_chaque_plan() {
+        let noms: Vec<String> = plans_de_reference().into_iter().map(|f| f.name).collect();
+        for attendu in [
+            "permit-dns-to-local-resolver",
+            "permit-resolveur-dns",
+            "permit-coeur",
+            "permit-tunnel-interface",
+            "permit-lan-v4",
+            "permit-lan-v6",
+            "demarrage reseau local sortant",
+            "demarrage DHCPv6 (relais) sortant",
+            "demarrage reseau overlay entrant",
+            "probe-permit-daemon",
+            "bifrost telemetrie sonde S-1-5-80-",
+            "bifrost telemetrie sonde binaire ",
+        ] {
+            assert!(
+                noms.iter().any(|n| n.starts_with(attendu)),
+                "plan absent de la matrice: {attendu}"
+            );
+        }
+        assert!(
+            noms.iter()
+                .any(|n| n.starts_with("bifrost telemetrie ") && !n.contains("sonde")),
+            "plan anti-telemetrie absent de la matrice"
+        );
     }
 
     /// La meme garantie que cote Linux: l'endpoint est autorise par l'identite

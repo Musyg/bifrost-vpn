@@ -483,9 +483,13 @@ impl WfpKillSwitch {
 
     /// Traduit les conditions du plan en structures WFP.
     ///
-    /// Les conditions d'adresse d'une famille sont ignorees sur les layers de
-    /// l'autre famille: poser une condition IPv4 sur un layer IPv6 fait echouer
-    /// l'ajout du filtre avec un code peu parlant.
+    /// Fail-closed: une condition que la couche ne peut pas porter fait
+    /// ECHOUER la pose, et le compte des conditions posees doit egaler celui
+    /// du plan. Jusqu'au 30/09/2026, une adresse de l'autre famille etait
+    /// ecartee en silence et le filtre partait au moteur sans elle, donc plus
+    /// large que le plan: c'est ainsi que `permit-dns-to-local-resolver`
+    /// autorisait le :53 vers toute destination sur la couche de l'autre
+    /// famille, au-dessus de `block-dns`.
     fn build_conditions(
         &self,
         storage: &mut Storage,
@@ -494,6 +498,7 @@ impl WfpKillSwitch {
     ) -> Result<Vec<FWPM_FILTER_CONDITION0>> {
         let mut out = Vec::new();
         for condition in &spec.conditions {
+            wfp_plan::condition_posable(spec, condition, layer)?;
             let (field, value) = match condition {
                 Condition::AppId(path) => {
                     let blob = storage.app_id(path)?;
@@ -512,17 +517,11 @@ impl WfpKillSwitch {
                 }
                 Condition::RemotePort(p) => (FWPM_CONDITION_IP_REMOTE_PORT, ffi::cond_u16(*p)),
                 Condition::RemoteAddrV4 { addr, prefix } => {
-                    if !layer.is_v4() {
-                        continue;
-                    }
                     let mask = prefix_mask_v4(*prefix);
                     let ptr = storage.v4(u32::from(*addr), mask);
                     (FWPM_CONDITION_IP_REMOTE_ADDRESS, ffi::cond_v4(ptr))
                 }
                 Condition::RemoteAddrV6 { addr, prefix } => {
-                    if layer.is_v4() {
-                        continue;
-                    }
                     let ptr = storage.v6(addr.octets(), *prefix);
                     (FWPM_CONDITION_IP_REMOTE_ADDRESS, ffi::cond_v6(ptr))
                 }
@@ -545,17 +544,10 @@ impl WfpKillSwitch {
             });
         }
 
-        // Un filtre dont toutes les conditions ont ete ecartees par le filtrage
-        // de famille deviendrait un permit inconditionnel: c'est exactement le
-        // trou qu'on veut eviter.
-        if !spec.conditions.is_empty() && out.is_empty() {
-            return Err(Error::Firewall(format!(
-                "le filtre '{}' n'a plus aucune condition sur {}: il autoriserait \
-                 tout le trafic de ce layer",
-                spec.name,
-                layer.name()
-            )));
-        }
+        // Le compte, et pas seulement le vide: un filtre qui perd UNE condition
+        // est deja plus large que le plan. Couvre l'ancien refus du filtre
+        // devenu inconditionnel.
+        wfp_plan::toutes_les_conditions_posees(spec, layer, out.len())?;
         Ok(out)
     }
 }
@@ -894,6 +886,104 @@ mod tests {
             resolveur_sid: None,
             resolveur_embarque: false,
         }
+    }
+
+    /// Le filtre qui a fui, rendu a la traduction tel que le plan le produisait
+    /// avant le 30/09/2026: une adresse d'une famille, posee sur une couche de
+    /// l'autre. La traduction doit REFUSER, et le dire, au lieu d'ecarter
+    /// l'adresse et de poser "port 53 vers toute destination".
+    ///
+    /// N'ouvre pas le moteur: la traduction est executable sans elevation.
+    #[test]
+    fn une_condition_inapplicable_fait_echouer_la_traduction() {
+        let cas = [
+            (
+                Condition::RemoteAddrV4 {
+                    addr: Ipv4Addr::LOCALHOST,
+                    prefix: 32,
+                },
+                Layer::AuthConnectV6,
+                Layer::AuthConnectV4,
+            ),
+            (
+                Condition::RemoteAddrV6 {
+                    addr: std::net::Ipv6Addr::LOCALHOST,
+                    prefix: 128,
+                },
+                Layer::AuthConnectV4,
+                Layer::AuthConnectV6,
+            ),
+        ];
+        for (adresse, etrangere, sienne) in cas {
+            let spec = FilterSpec {
+                name: "permit-dns-to-local-resolver".into(),
+                layers: vec![sienne, etrangere],
+                weight: 15,
+                action: Action::Permit,
+                hard: false,
+                conditions: vec![
+                    adresse,
+                    Condition::RemotePort(53),
+                    Condition::Protocol(wfp_plan::IPPROTO_UDP),
+                    Condition::Protocol(wfp_plan::IPPROTO_TCP),
+                ],
+            };
+            let mut storage = Storage::default();
+            let e = match ks().build_conditions(&mut storage, &spec, etrangere) {
+                Ok(posees) => panic!(
+                    "{} condition(s) posee(s) sur {} pour {} demandee(s): le filtre part au \
+                     moteur sans son adresse",
+                    posees.len(),
+                    etrangere.name(),
+                    spec.conditions.len()
+                ),
+                Err(e) => e.to_string(),
+            };
+            assert!(
+                e.contains(&format!("inapplicable a {}", etrangere.name())),
+                "le refus doit nommer la condition et la couche: {e}"
+            );
+            let mut storage = Storage::default();
+            let posees = ks()
+                .build_conditions(&mut storage, &spec, sienne)
+                .expect("sur sa famille, la meme condition se pose");
+            assert_eq!(posees.len(), spec.conditions.len());
+        }
+    }
+
+    /// Le compte, sur la VRAIE traduction et pour tous les plans du crate:
+    /// chaque condition demandee est posee, sur chaque couche.
+    ///
+    /// Les chemins d'application sont remplaces par celui de ce binaire:
+    /// `FwpmGetAppIdFromFileName0` ouvre le fichier, et un chemin de
+    /// reference n'existe pas sur l'hote de la recette. Le compte n'en depend
+    /// pas.
+    #[test]
+    fn la_traduction_pose_toutes_les_conditions_de_chaque_plan() {
+        let exe = std::env::current_exe().expect("binaire de la recette");
+        let mut vus = 0usize;
+        for mut spec in wfp_plan::plans_de_reference() {
+            for c in spec.conditions.iter_mut() {
+                if let Condition::AppId(chemin) = c {
+                    *chemin = exe.clone();
+                }
+            }
+            for couche in spec.layers.clone() {
+                let mut storage = Storage::default();
+                let posees = ks()
+                    .build_conditions(&mut storage, &spec, couche)
+                    .unwrap_or_else(|e| panic!("{} sur {}: {e}", spec.name, couche.name()));
+                assert_eq!(
+                    posees.len(),
+                    spec.conditions.len(),
+                    "{} sur {}",
+                    spec.name,
+                    couche.name()
+                );
+                vus += 1;
+            }
+        }
+        assert!(vus > 1000, "matrice trop maigre: {vus} filtres traduits");
     }
 
     /// Un resolveur routable ouvrirait un canal :53 vers l'exterieur.
