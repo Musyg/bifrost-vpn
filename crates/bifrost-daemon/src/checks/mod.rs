@@ -1921,7 +1921,8 @@ mod linux {
     impl SondeAccessible {
         fn nouvelle() -> std::io::Result<Self> {
             use std::os::unix::fs::PermissionsExt;
-            let cible = std::env::temp_dir().join("bifrost-check-probe");
+            let cible =
+                std::env::temp_dir().join(format!("bifrost-check-probe-{}", std::process::id()));
             let _ = std::fs::remove_file(&cible);
             std::fs::copy(self_exe(), &cible)?;
             std::fs::set_permissions(&cible, std::fs::Permissions::from_mode(0o755))?;

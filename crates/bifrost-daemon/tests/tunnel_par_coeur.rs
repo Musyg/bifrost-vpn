@@ -72,15 +72,61 @@ mod sous_unix {
         )
     }
 
-    fn port_mort() -> u16 {
-        bifrost_daemon::coeurs::port::port_sans_personne().unwrap()
-    }
-
+    /// Un repertoire de travail propre a CETTE execution de la recette.
+    ///
+    /// # Le defaut que le pid ferme
+    ///
+    /// Le nom etait fixe, `bifrost-par-coeur-chemin-complet`, donc partage par
+    /// toutes les executions de la recette sur la machine, et le pipeline en
+    /// fait tourner plusieurs a la fois, chacune dans sa copie. La seconde
+    /// effacait le repertoire de la premiere et y posait SON enrobage et SA
+    /// configuration de doublure; la relance de coeur de la premiere executait
+    /// alors l'enrobage de l'autre, qui liait l'API de l'autre. Mesure du
+    /// 30/09/2026 sur essai-linux, deux executions decalees de 2 s: 12 rouges
+    /// sur 12, la premiere en 44 s (<< un coeur devait revenir >>: 10 s de
+    /// budget de demarrage sur une API ou personne ne venait, puis 30 s
+    /// d'attente), la seconde en 9 s (<< le coeur doit mourir avec la
+    /// connexion >>: le coeur qu'elle voyait etait celui de l'autre). Le meme
+    /// rouge en 44 s avait ete vu le matin meme pendant que d'autres suites
+    /// tournaient. `tests/coeurs.rs` avait deja rencontre ce conflit le
+    /// 05/09/2026 et nomme son repertoire par pid; celui-ci ne l'etait pas.
     fn repertoire_temporaire(nom: &str) -> PathBuf {
-        let p = std::env::temp_dir().join(format!("bifrost-par-coeur-{nom}"));
+        let p =
+            std::env::temp_dir().join(format!("bifrost-par-coeur-{}-{nom}", std::process::id()));
         let _ = std::fs::remove_dir_all(&p);
         std::fs::create_dir_all(&p).unwrap();
         p
+    }
+
+    /// Le parent d'un processus, lu dans `/proc`, ou `None` s'il ne s'y lit
+    /// pas.
+    ///
+    /// Le nom de commande entre parentheses peut porter des espaces et des
+    /// parentheses: le champ du parent se compte depuis la DERNIERE `)`.
+    fn parent_de(pid: u32) -> Option<u32> {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let apres = &stat[stat.rfind(')')? + 1..];
+        apres.split_whitespace().nth(1)?.parse().ok()
+    }
+
+    /// Le processus qui ecoute sur l'API doit etre un enfant de CETTE recette.
+    ///
+    /// Un PID qui ecoute sur le bon port ne suffit pas a dire que c'est notre
+    /// coeur: le 30/09/2026, une execution concurrente a vu le coeur d'une
+    /// autre execution ecouter sur son port, l'a pris pour le sien et a
+    /// conclu a une relance reussie. Le coeur est lance par l'atelier de ce
+    /// processus, et l'enrobage fait `exec`: son parent est donc ce processus,
+    /// et rien d'autre.
+    fn exiger_un_enfant(pid: u32, quoi: &str) {
+        if !std::path::Path::new("/proc/self/stat").exists() {
+            println!("NON VERIFIE: /proc absent, le parent de {quoi} ne se lit pas ici");
+            return;
+        }
+        assert_eq!(
+            parent_de(pid),
+            Some(std::process::id()),
+            "{quoi} (pid {pid}) n'est pas un enfant de cette recette: un autre processus ecoute sur son API"
+        );
     }
 
     fn vivant(pid: u32) -> bool {
@@ -281,8 +327,10 @@ mod sous_unix {
         // la PUBLICATION de son adresse, pas un relais.
         let reserve_api = bifrost_daemon::coeurs::port::reserver().unwrap();
         let api = reserve_api.port();
+        // Tenu jusqu'a la fin de la recette: voir `coeurs::port`.
+        let mandataire_mort = bifrost_daemon::coeurs::port::port_sans_personne().unwrap();
         let socks = bifrost_daemon::coeurs::socks::Mandataire::nouveau(
-            std::net::SocketAddr::from(([127, 0, 0, 1], port_mort())),
+            mandataire_mort.adresse(),
             bifrost_daemon::coeurs::socks::Identifiants::nouveaux("bifrost", "recette").unwrap(),
         );
         let secret = bifrost_daemon::coeurs::alea::secret().unwrap();
@@ -506,7 +554,10 @@ mod sous_unix {
         // personne au bout du port. Le premier cas retire une propriete de la
         // recette et le dit; le second est une panne.
         let pid = match pid_qui_ecoute(api) {
-            Ok(p) => Some(p),
+            Ok(p) => {
+                exiger_un_enfant(p, "le coeur lance");
+                Some(p)
+            }
             Err(raison) if raison.starts_with("ss indisponible") => {
                 println!("NON VERIFIE: {raison}");
                 None
@@ -542,6 +593,7 @@ mod sous_unix {
             let revenu = attendre_un_autre_coeur(api, ancien, Duration::from_secs(30))
                 .expect("un coeur devait revenir apres la mort du precedent");
             assert_ne!(revenu, ancien, "et ce doit etre un NOUVEAU processus");
+            exiger_un_enfant(revenu, "le coeur relance");
 
             let montes = vues.lock().unwrap().clone();
             let noms: Vec<&str> = montes.iter().map(|(n, _)| n.as_str()).collect();

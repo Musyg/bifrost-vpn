@@ -1214,7 +1214,9 @@ TUlJQlBBU1VOVlJBSUNFUlQ=
     #[test]
     fn le_fichier_ecrit_n_est_lisible_que_par_son_proprietaire() {
         use std::os::unix::fs::PermissionsExt;
-        let chemin = std::env::temp_dir().join("bifrost-config-droits/sing-box.json");
+        let chemin = std::env::temp_dir()
+            .join(format!("bifrost-config-droits-{}", std::process::id()))
+            .join("sing-box.json");
         ecrire(&chemin, &sing_box(&parametres())).unwrap();
         let mode = std::fs::metadata(&chemin).unwrap().permissions().mode();
         assert_eq!(

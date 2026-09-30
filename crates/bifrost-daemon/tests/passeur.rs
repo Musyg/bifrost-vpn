@@ -294,13 +294,10 @@ async fn sans_coeur_joignable_la_connexion_ne_s_eternise_pas() {
     }
     let (tun, cible) = tun_monte(1);
 
-    // Un port qu'on vient de liberer: personne n'ecoute derriere.
-    let mort = {
-        let ecoute = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let a = ecoute.local_addr().unwrap();
-        drop(ecoute);
-        a
-    };
+    // Un port TENU sans ecoute: personne derriere, et personne ne peut s'y
+    // mettre pendant la recette. Voir `bifrost_daemon::coeurs::port`.
+    let tenu = bifrost_daemon::coeurs::port::port_sans_personne().unwrap();
+    let mort = tenu.adresse();
 
     let passage = Tun::nouveau(tun).expect("le TUN doit devenir asynchrone");
     tokio::spawn(passeur::servir(

@@ -720,11 +720,12 @@ mod tests {
     /// dit pas vers ou la lecture a echoue n'aide personne a la corriger.
     #[test]
     fn une_cible_muette_rend_une_erreur_qui_la_nomme() {
-        // Un ecouteur ouvert puis ferme: le port est certainement libre, alors
-        // qu'un port choisi au hasard pourrait etre pris par un autre test.
-        let ecouteur = TcpListener::bind("127.0.0.1:0").unwrap();
-        let adresse = ecouteur.local_addr().unwrap();
-        drop(ecouteur);
+        // Un port TENU sans ecoute: libre de tout ecouteur, et que personne ne
+        // peut prendre pendant la lecture. Un ecouteur ouvert puis ferme, comme
+        // avant le 30/09/2026, rendait un numero que l'attribueur pouvait
+        // redonner aussitot: voir `crate::coeurs::port`.
+        let tenu = crate::coeurs::port::port_sans_personne().unwrap();
+        let adresse = tenu.adresse();
         let e = lire(adresse, Duration::ZERO).unwrap_err();
         assert!(e.contains(&adresse.to_string()), "{e}");
     }

@@ -77,7 +77,9 @@ fn binaire_du_coeur() -> Result<PathBuf, String> {
     }
 }
 
-fn port_mort() -> u16 {
+/// Un port TENU sans ecoute: la valeur rendue garde le numero tant qu'elle
+/// vit. Voir `bifrost_daemon::coeurs::port`.
+fn port_mort() -> bifrost_daemon::coeurs::port::PortSansPersonne {
     bifrost_daemon::coeurs::port::port_sans_personne().unwrap()
 }
 
@@ -125,6 +127,10 @@ fn temoin_http() -> SocketAddr {
 struct CoeurVivant {
     enfant: Child,
     api: SocketAddr,
+    /// Le mandataire mort de la sortie morte, tenu aussi longtemps que le
+    /// coeur qui le vise: le relacher avant rendrait son numero a qui le
+    /// demande, et la sortie "morte" pourrait repondre.
+    _mandataire_mort: Option<bifrost_daemon::coeurs::port::PortSansPersonne>,
 }
 
 impl Drop for CoeurVivant {
@@ -140,17 +146,19 @@ fn lancer(binaire: &Path, repertoire: &Path, secret: &str, vivante: bool) -> Coe
     // Morte: un mandataire SOCKS sur un port ou personne n'ecoute. Le coeur ne
     // resout meme pas le nom de la cible - il le passe au mandataire - donc
     // l'echec vient bien du transport, et non d'une resolution absente.
-    let sortie = if vivante {
-        serde_json::json!({ "type": "direct", "tag": "profil" })
-    } else {
-        serde_json::json!({
+    let mandataire_mort = (!vivante).then(port_mort);
+    let sortie = match &mandataire_mort {
+        None => serde_json::json!({ "type": "direct", "tag": "profil" }),
+        Some(mort) => serde_json::json!({
             "type": "socks",
             "tag": "profil",
             "server": "127.0.0.1",
-            "server_port": port_mort(),
-        })
+            "server_port": mort.port(),
+        }),
     };
-    lancer_avec(binaire, repertoire, secret, vec![sortie])
+    let mut coeur = lancer_avec(binaire, repertoire, secret, vec![sortie]);
+    coeur._mandataire_mort = mandataire_mort;
+    coeur
 }
 
 /// Le meme, avec les sorties qu'on veut derriere le selecteur.
@@ -224,6 +232,7 @@ fn lancer_avec(
     let coeur = CoeurVivant {
         enfant,
         api: format!("127.0.0.1:{port_api}").parse().unwrap(),
+        _mandataire_mort: None,
     };
     let debut = Instant::now();
     while debut.elapsed() < DEMARRAGE {
@@ -319,7 +328,8 @@ fn les_quatre_issues_de_la_sonde_tiennent_face_a_un_vrai_coeur() {
     // --- Et une API absente non plus --------------------------------------
     // L'etat que le superviseur traverse a chaque bascule de technique: le
     // coeur precedent est mort, le suivant n'ecoute pas encore.
-    let injoignable: SocketAddr = format!("127.0.0.1:{}", port_mort()).parse().unwrap();
+    let api_absente = port_mort();
+    let injoignable: SocketAddr = api_absente.adresse();
     assert_eq!(
         ex.block_on(vitalite::sonder(
             &adresse(injoignable, &secret),
