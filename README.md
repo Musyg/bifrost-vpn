@@ -312,6 +312,7 @@ derniere validation Windows doit nommer le SHA effectivement controle.
 ```bash
 cargo test --workspace                 # tests unitaires et d'integration
 sudo ./scripts/e2e-linux.sh            # recette de bout en bout, en namespaces
+sudo ./scripts/e2e-linux.sh target/debug --unite packaging/systemd/bifrost-daemon.service  # sous les seules capacites de l'unite
 sudo ./scripts/check-strict.sh         # exige que les dix vecteurs soient PASSED
 sudo ./scripts/packaging-linux.sh      # empaquetage, dans une racine jetable
 ./scripts/resolveur-linux.sh           # configuration du resolveur chiffre et liste anti-telemetrie
@@ -440,6 +441,8 @@ suffit aussi, les filtres n'etant pas persistants.
 `daemon-mort` est le dernier arrive, le 23 aout 2026, et il est ne d'un defaut que rien ne voyait : l'unite systemd portait un `ExecStopPost=` qui lancait `--cleanup-firewall`, donc chaque plantage du daemon demontait le kill switch puis laissait la machine nue pendant `RestartSec`. Il tue un processus qui vient d'armer, par SIGKILL et par PID, et compte les paquets sur le lien pendant qu'il n'est pas revenu. Deux gardes l'accompagnent, parce qu'un vecteur ne peut pas tout voir : `crates/bifrost-daemon/tests/unite_systemd.rs` refuse qu'une directive de l'unite desarme le pare-feu, et `scripts/mort-daemon-systemd-linux.sh` rejoue la mesure sur le service REEL, cycle de redemarrage systemd compris.
 
 Le harnais monte deux namespaces reseau relies par un veth, y etablit un vrai tunnel WireGuard entre les deux, injecte les pannes, capture sur le lien qui joue la carte reseau physique, et rend son verdict sur la capture.
+
+Monter ces namespaces demande CAP_SYS_ADMIN, et le service systemd ne la detient plus depuis le 30 septembre 2026. `bifrost-cli check`, qui passe par le service, rend donc `SKIPPED` pour les neuf vecteurs sur dix qui montent un banc, chacun avec la meme raison : la capacite qui manque, et la commande qui mesure, `sudo bifrost-daemon --run-checks`, a lancer en root hors du service. `doh-bypass`, qui ne lit que des fichiers, conclut toujours par le service. Rien n'a ete perdu : mesure faite sous les capacites de l'ancienne unite, CAP_SYS_ADMIN comprise, le harnais ne concluait deja pas dans le service. tcpdump ecrit ses captures sous son propre compte, en 0600 sous l'`UMask=0077` de l'unite, et root sans CAP_DAC_OVERRIDE ne les relit pas; la relecture se lisait comme une capture vide, et seuls les temoins negatifs ont evite un PASSED. Une relecture refusee est desormais une erreur qui nomme sa cause.
 
 Deux regles gouvernent ses verdicts.
 

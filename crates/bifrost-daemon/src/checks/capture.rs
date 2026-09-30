@@ -546,16 +546,50 @@ pub fn relever(pcap: &Path, filter: &str) -> Result<Releve> {
         .stderr(Stdio::piped())
         .output()
         .map_err(|e| Error::Tunnel(format!("tcpdump -r: {e}")))?;
+    juger_la_relecture(
+        out.status.success(),
+        &String::from_utf8_lossy(&out.stdout),
+        &String::from_utf8_lossy(&out.stderr),
+    )
+}
 
-    // tcpdump renvoie un code non nul quand le fichier est vide ou tronque:
-    // ce n'est pas une erreur d'analyse, c'est une capture sans paquet.
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    if !out.status.success() && !stderr.contains("truncated") && !stderr.is_empty() {
-        tracing::debug!(stderr = %stderr.trim(), "tcpdump -r a signale une anomalie");
+/// Ce que rend une relecture, jugee: un releve, ou une erreur qui dit pourquoi.
+///
+/// Pure, pour qu'une garde l'eprouve sans pcap, sans tcpdump et sans root.
+///
+/// # Le defaut que ce jugement ferme
+///
+/// Tout code non nul de `tcpdump -r` se lisait comme une capture sans paquet,
+/// et la plainte ne partait qu'au journal de debogage. Mesure du 30/09/2026 sur
+/// la machine d'essai, sous les capacites de l'unite systemd d'alors (root sans
+/// CAP_DAC_OVERRIDE ni CAP_DAC_READ_SEARCH) et son `UMask=0077`: tcpdump quitte
+/// root pour son propre compte avant d'ouvrir sa sortie, laisse donc un pcap en
+/// 0600 a ce compte, et la relecture echoue sur `Permission denied`. La suite
+/// entiere lisait alors des captures vides. Seuls les temoins negatifs ont
+/// empeche un PASSED: tous muets, donc tous SKIPPED, sous une raison qui
+/// accusait les sondes au lieu de la lecture. Un filtre que tcpdump ne sait pas
+/// analyser se lisait de meme comme une absence de fuite.
+///
+/// Seule la troncature reste une relecture: tcpdump rend alors ce qu'il a lu
+/// avant la coupure, et un fichier sans en-tete, capture arretee avant son
+/// premier octet, est un fichier sans paquet. Tout autre echec est une
+/// relecture qui n'a pas eu lieu, et un pcap qu'on n'a pas lu ne vaut pas un
+/// pcap vide.
+fn juger_la_relecture(reussie: bool, stdout: &str, stderr: &str) -> Result<Releve> {
+    if !reussie && !stderr.contains("truncated") {
+        let plainte = stderr
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(Error::Tunnel(format!(
+            "relecture du pcap refusee par tcpdump, donc rien n'y a ete lu, pas meme \
+             une absence de paquet: [{plainte}]"
+        )));
     }
-
     Ok(Releve::depuis_lignes(
-        String::from_utf8_lossy(&out.stdout)
+        stdout
             .lines()
             .map(str::trim)
             .filter(|l| !l.is_empty() && !l.starts_with("reading from file"))
@@ -803,6 +837,65 @@ mod tests {
             MAX_EVIDENCE,
             "les preuves ne sont plus bornees"
         );
+    }
+
+    /// Une relecture refusee n'est pas une capture vide.
+    ///
+    /// Les trois plaintes sont celles que tcpdump 4.99.4 a ecrites le
+    /// 30/09/2026 sur la machine d'essai: un pcap du compte de tcpdump en 0600
+    /// relu par root sans CAP_DAC_OVERRIDE, un fichier absent, un filtre
+    /// casse. Toutes sortaient en code 1, et toutes se lisaient << zero
+    /// paquet >>.
+    #[test]
+    fn une_relecture_refusee_n_est_pas_une_capture_vide() {
+        let plaintes = [
+            "tcpdump: /tmp/bifrost-check-exit-ip-1-5.pcap: Permission denied\n",
+            "tcpdump: /tmp/bifrost-check-dns-1-2.pcap: No such file or directory\n",
+            "reading from file /tmp/x.pcap, link-type EN10MB (Ethernet), snapshot length \
+             128\ntcpdump: can't parse filter expression: syntax error\n",
+        ];
+        for plainte in plaintes {
+            let dernier = plainte.trim_end().rsplit(": ").next().unwrap_or(plainte);
+            match juger_la_relecture(false, "", plainte) {
+                Ok(r) => panic!(
+                    "relecture refusee lue comme {} paquet(s): {plainte}",
+                    r.compte
+                ),
+                Err(e) => assert!(
+                    e.to_string().contains(dernier),
+                    "la raison ne rapporte pas la plainte '{dernier}': {e}"
+                ),
+            }
+        }
+    }
+
+    /// La troncature, elle, reste une relecture: ce qui precede la coupure est
+    /// compte, et un fichier sans en-tete est un fichier sans paquet. Les deux
+    /// plaintes ont ete relevees le meme jour, sur un fichier vide et sur un
+    /// pcap coupe a 200 octets.
+    #[test]
+    fn une_troncature_rend_ce_qui_a_ete_lu() {
+        let vide = juger_la_relecture(
+            false,
+            "",
+            "tcpdump: truncated dump file; tried to read 4 file header bytes, only got 0\n",
+        )
+        .expect("un fichier sans en-tete est une capture sans paquet");
+        assert_eq!(vide.compte, 0);
+
+        let coupe = juger_la_relecture(
+            false,
+            "05:20:13.080239 IP 10.77.0.2.52480 > 10.77.0.1.51820: UDP, length 80\n",
+            "reading from file /tmp/x.pcap, link-type EN10MB (Ethernet), snapshot \
+             length 128\ntcpdump: pcap_loop: truncated dump file; tried to read 122 \
+             captured bytes, only got 22\n",
+        )
+        .expect("ce qui precede la coupure a ete lu");
+        assert_eq!(coupe.compte, 1, "le paquet lu avant la coupure a disparu");
+
+        let lue = juger_la_relecture(true, "reading from file /tmp/x.pcap\n", "")
+            .expect("une relecture reussie");
+        assert_eq!(lue.compte, 0, "l'en-tete de tcpdump compte comme un paquet");
     }
 
     /// Un pcap qui a servi a etablir un PASSED est un dechet; un pcap qui a

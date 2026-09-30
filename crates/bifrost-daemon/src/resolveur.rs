@@ -1987,20 +1987,20 @@ pub fn selftest(
     }
 
     println!("== Il ne garde que de quoi se lier au :53");
-    // L'unite systemd donne au daemon CAP_NET_ADMIN, CAP_NET_RAW et
-    // CAP_SYS_ADMIN en ambiant, donc a tous ses enfants par defaut. Un
-    // resolveur DNS qui heriterait de quoi reprogrammer nftables serait un
-    // elargissement silencieux de la surface, et rien dans le code ne le
-    // dirait: seule la lecture de /proc le montre.
+    // L'unite systemd donne au daemon CAP_NET_ADMIN, CAP_CHOWN, CAP_SETUID,
+    // CAP_SETGID et CAP_NET_BIND_SERVICE en ambiant, donc a tous ses enfants
+    // par defaut. Un resolveur DNS qui heriterait de quoi reprogrammer nftables
+    // serait un elargissement silencieux de la surface, et rien dans le code ne
+    // le dirait: seule la lecture de /proc le montre.
     if bascule.is_none() {
         println!("  SKIP  sans bascule le resolveur reste root, rien a mesurer");
     } else {
         // Les TROIS ensembles, pas seulement l'effectif. Le permis est ce que
         // le processus peut reactiver quand il veut; l'ambiant est ce qu'il
         // transmettrait a son tour. Ne lire que l'effectif laisserait passer un
-        // resolveur qui a garde CAP_SYS_ADMIN en reserve, ce qui est
-        // exactement ce que l'heritage ambiant de l'unite systemd produirait
-        // si on ne le vidait pas.
+        // resolveur qui a garde CAP_NET_ADMIN ou CAP_SETUID en reserve, ce qui
+        // est exactement ce que l'heritage ambiant de l'unite systemd
+        // produirait si on ne le vidait pas.
         let attendu = format!("{:016x}", 1u64 << CAP_NET_BIND_SERVICE);
         for ensemble in ["CapEff:", "CapPrm:", "CapAmb:"] {
             match champ_de_status(pid, ensemble) {
@@ -2214,9 +2214,9 @@ fn basculer(b: Bascule) -> std::io::Result<()> {
 
     // Vider l'ambiant AVANT d'y remettre ce qu'on veut, et ce n'est pas une
     // precaution de style. L'unite systemd donne au daemon CAP_NET_ADMIN,
-    // CAP_SYS_ADMIN et CAP_SETUID en ambiant, et l'ambiant est HERITE: sans ce
-    // vidage, le resolveur les recevrait toutes. `PR_CAP_AMBIENT_RAISE` ajoute,
-    // il ne remplace pas.
+    // CAP_SETUID et CAP_SETGID en ambiant, entre autres, et l'ambiant est
+    // HERITE: sans ce vidage, le resolveur les recevrait toutes.
+    // `PR_CAP_AMBIENT_RAISE` ajoute, il ne remplace pas.
     // SAFETY: prctl(PR_CAP_AMBIENT, ...) ne prend que des arguments entiers, aucun
     // pointeur a dereferencer.
     if unsafe {

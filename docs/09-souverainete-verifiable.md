@@ -464,9 +464,10 @@ des limites. Tor et Nym ont des contrats distincts, pas un label d'anonymat comm
 4. D3 puis D4: inventaire applique des sorties et parcours d'auto-hebergement.
 5. D5 puis D6: DNS separe, multihop mesure. Aucun raccourci sur l'etancheite.
 
-Les defauts de securite existants restent prioritaires. En particulier, la
-reduction de CAP_SYS_ADMIN du daemon et la couverture Windows ne sont pas
-effacees par ce plan. Chaque tranche met a jour ETAT.md et ses limites.
+Les defauts de securite existants restent prioritaires. La reduction de
+CAP_SYS_ADMIN du daemon est faite le 30/09/2026: le service ne la detient
+plus, et la suite de fuite se lance hors de lui. La couverture Windows n'est
+pas effacee par ce plan. Chaque tranche met a jour ETAT.md et ses limites.
 
 ## Sources primaires relues le 27 septembre 2026
 

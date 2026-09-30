@@ -34,15 +34,16 @@ Les comptes ci-dessous ont ete pris le 30/09/2026 sur l'arbre qui porte le
 portage des corrections du tableau de survie et des abstentions, puis D1b.3b,
 l'identite du serveur de D1b.3c, sa verification par toutes les commandes de
 la CLI, la correction du permis DNS Windows par famille, la garde des tubes
-sous pipefail, puis la preuve WFP par declaration. L'hote qui tient le role `essai-linux` a change le 29/09: ses comptes ne se comparent pas a ceux d'avant cette date.
+sous pipefail, la preuve WFP par declaration, puis le retrait de
+CAP_SYS_ADMIN du service. L'hote qui tient le role `essai-linux` a change le 29/09: ses comptes ne se comparent pas a ceux d'avant cette date.
 
 Compte honnete des recettes cargo, par hote. La colonne `reelles` est ce qui a
 verifie quelque chose: `annoncees` moins `abstentions` moins `rouges`.
 
 | Hote | Annoncees | Abstentions | Rouges | Reelles |
 |---|---|---|---|---|
-| dev-windows | 1348 | 19 | 0 | 1329 |
-| essai-linux | 1358 | 25 | 0 | 1333 |
+| dev-windows | 1355 | 19 | 0 | 1336 |
+| essai-linux | 1371 | 25 | 0 | 1346 |
 
 Les deux lignes ont ete prises par `scripts/recettes-strict.sh`, chacune sur son
 hote: le portage a ajoute 14 recettes des deux cotes, D1b.3b 11 sur dev-windows et 22
@@ -52,7 +53,9 @@ dev-windows et 5 sur `essai-linux`, la verification du serveur par les commandes
 dev-windows et 6 sur `essai-linux` (ses deux recettes de traduction sont devenues pures avec la preuve WFP et
 tournent sur les deux hotes), la garde des tubes sous pipefail 6 des deux
 cotes, la preuve WFP par declaration 51 sur dev-windows et 48 sur
-`essai-linux`. Sur `essai-linux` une recette de plus est ignoree par
+`essai-linux`, le retrait de CAP_SYS_ADMIN du service 7 sur dev-windows et 13 sur
+`essai-linux` (les gardes de l'unite tournent sur les deux hotes; le refus
+nomme du harnais et la relecture des captures sont propres a Linux). Sur `essai-linux` une recette de plus est ignoree par
 construction (elle pose une route et ne tourne qu'en espace de noms reseau).
 La ligne `essai-linux` a ete prise dans un clone, ou la garde des modes de
 scripts mesure (elle lit l'index); dans une copie sans `.git` elle s'abstient,
@@ -70,7 +73,7 @@ la prochaine action. Une cellule vide signalerait une tranche non finie.
 | 03 | Anti-telemetrie OS. Couche DNS livree; couches Windows registre et WFP par service a finir | Finir les couches Windows registre et WFP par service |
 | 04 | Anti-censure DPI. Tableau de survie rafraichi le 20/09/2026 (une cellule); inerte a partir du 30/09/2026 (`TABLEAU_INERTE_A_PARTIR_DU`, gardee par `selection::planifier`): il classe encore, il n'ecarte plus rien | Rafraichir le tableau, en priorite la colonne Turkmenistan, sans source depuis juillet |
 | 05 | Anonymat et chainage. Document redige; le chainage Tor et Nym n'est pas commence, et le document lui-meme le place apres les trois objectifs | Chainage Tor ou Nym, apres les objectifs 1 a 3 |
-| 06 | Architecture logicielle et packaging. Daemon, IPC authentifie, machine a etats et scripts d'installation faits (Linux et Windows, comptes dedies, ACL); ni interface graphique, ni MSI, ni .deb/.rpm, ni mise a jour TUF, ni provisioning; SBOM en CI | Interface graphique en jalon propre apres J2; paquets signes et mise a jour TUF |
+| 06 | Architecture logicielle et packaging. Daemon, IPC authentifie, machine a etats et scripts d'installation faits (Linux et Windows, comptes dedies, ACL). 30/09/2026: l'unite systemd ne donne plus CAP_SYS_ADMIN ni CAP_NET_RAW au service, garde `unite_systemd.rs`; daemon reel sous les seules capacites de l'unite, en namespace jetable (`e2e-linux.sh --unite`): toutes les fonctions VPN passent, `check` par le service rend neuf SKIPPED qui nomment CAP_SYS_ADMIN et `sudo bifrost-daemon --run-checks`, qui conclut hors du service. L'unite n'est pas mesuree sous systemd. Ni interface graphique, ni MSI, ni .deb/.rpm, ni mise a jour TUF, ni provisioning; SBOM en CI | Mesurer l'unite sous systemd (`service-systemd-linux.sh`), puis `RestrictNamespaces=yes` et le retrait d'`AF_PACKET`; interface graphique en jalon propre apres J2; paquets signes et mise a jour TUF |
 | 07 | Programme de securite produit. fmt, clippy, recettes, suite de fuite, cargo audit, cargo deny et SBOM en CI; politique de divulgation publiee (SECURITY.md, security.txt); inventaire unsafe ferme; cargo vet et fuzz absents, aucune cle PGP | Publier une cle PGP (champ Encryption); ajouter cargo vet et un harnais fuzz |
 | 09 | Souverainete verifiable. D1a: `prove binaire`. D1b.1: comparaison nft hors ligne. D1b.2: collecte Linux passive encadree par GETGEN. D1b.3a: `prove nft --politique` engendre la reference produit depuis une intention v1 explicite; 64 combinaisons confrontees au rendu applique en banc jetable. D1b.3b: `prove nft --politique-daemon --actif` prend pour attendu la politique que le daemon declare avoir posee (requete IPC en lecture, relue avant et apres la collecte); daemon reel en banc jetable: correspondance, quatre alterations en ecart, droits retires et daemon arrete non mesures. D1b.3c (identite): le client exige un serveur root (SO_PEERCRED) avant de lire la declaration, sinon UNMEASURED daemon-identity; regle Windows (proprietaire du pipe LocalSystem) livree dans bifrost-ipc et exigee par `prove wfp`. D1b.3c (WFP): `prove wfp --politique-daemon --actif` confronte le moteur WFP a la politique que le daemon declare avoir posee, par le meme lecteur de declaration que `prove nft` (identite, N1, mesure, N2); projection WFP v1 distincte de la nft; reference rendue par la traduction de la pose; enumeration en lecture seule dans une transaction unique; arbitrage des filtres tiers au poids effectif rendu par le moteur; banc jetable Windows avant fusion: MATCH, trois alterations en ecart, verrou non mesure, puis MATCH apres reprise; apres fusion, un daemon en console elevee est refuse par la preuve (UNMEASURED daemon-identity) et admis par `status`. Toutes les commandes de la CLI verifient aussi le serveur avant d'ecrire (root; Windows LocalSystem ou Administrateurs), refus en code 4, rien envoye; un compte ordinaire refuse sans rien recevoir en banc jetable. Ni preuve globale du VPN ni validation Windows | D1b.3c: objets nft hors perimetre; prove wfp face au service reel sous LocalSystem, en banc |
 
@@ -88,7 +91,7 @@ Sous `scripts/`:
 | check-strict.sh | Exige que les dix vecteurs de fuite soient PASSED |
 | preuve-nft-linux.sh | Collecte nft passive, ecart, refus de privileges et confrontation a la declaration d'un daemon reel, faux daemon non root refuse, compteur non root que chaque commande refuse sans rien lui ecrire, dans des namespaces jetables (apres cargo build --workspace); sudo bash ./scripts/preuve-nft-linux.sh |
 | check-cibles.sh | Construit et verifie les cibles sur l'hote courant |
-| e2e-linux.sh | Bout en bout Linux: daemon reel, capture, montee du tunnel et etancheite |
+| e2e-linux.sh | Bout en bout Linux: daemon reel, capture, montee du tunnel et etancheite, hote isole (/etc et /var/lib superposes, resolveur de l'hote masque); `--unite FICHIER` lance le daemon sous les seules capacites de l'unite et exige le contrat de `check` sans CAP_SYS_ADMIN |
 | banc-coeur-e2e.sh | Banc bout en bout d'un coeur anti-censure |
 | banc-bascule-en-session.sh | Banc de bascule DNS en session, avec temoin de l'etat DNS de l'hote |
 | banc-cdn-linux.sh | Banc CDN Linux (httpupgrade, edge) |
