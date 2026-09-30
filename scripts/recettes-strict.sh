@@ -140,7 +140,7 @@ echo "      qu'une fois, ce qui est l'usage actuel du depot."
 if [ "$ROUGES" -gt 0 ]; then
   echo
   echo "ECHEC: $ROUGES recette(s) rouge(s)."
-  grep -a -E '^test .* FAILED' "$JOURNAL" | sed 's/^/  /' | head -40
+  grep -a -E '^test .* FAILED' "$JOURNAL" | sed 's/^/  /' | sed -n 1,40p
   exit 1
 fi
 
@@ -159,7 +159,7 @@ if [ "$CODE_CARGO" -ne 0 ]; then
   echo
   echo "ECHEC: cargo a rendu $CODE_CARGO alors que le compte ci-dessus ne voit aucune rouge."
   echo "       Ce que le journal en dit (erreurs, paniques, binaires morts):"
-  grep -a -n -E "^error|panicked at|FAILED|process didn't exit successfully|test failed, to rerun|STATUS_|SIGSEGV|SIGABRT" "$JOURNAL" | sed 's/^/         /' | head -60
+  grep -a -n -E "^error|panicked at|FAILED|process didn't exit successfully|test failed, to rerun|STATUS_|SIGSEGV|SIGABRT" "$JOURNAL" | sed 's/^/         /' | sed -n 1,60p
   echo "       Les 30 dernieres lignes du journal:"
   tail -n 30 "$JOURNAL" | sed 's/^/         /'
   if [ -n "${RECETTES_JOURNAL_BRUT:-}" ]; then

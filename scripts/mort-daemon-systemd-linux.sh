@@ -120,7 +120,7 @@ systemctl cat "$UNITE" >/dev/null 2>&1 || { echo "SKIPPED: unite $UNITE absente"
 EMPREINTE_RESOLV_AVANT="$(readlink -f /etc/resolv.conf 2>/dev/null || echo absent)|$(stat -c %Y /etc/resolv.conf 2>/dev/null || echo 0)"
 
 echo "### mesure '$ETIQUETTE' -- $(date -Is)"
-echo "### $(systemctl --version | head -1)"
+echo "### $(systemctl --version | sed -n 1p)"
 echo "### lignes de cycle de vie de l'unite installee:"
 grep -n '^ExecStop\|^Restart=\|^RestartSec\|^OnFailure' "$UNITE_FICHIER" | sed 's/^/###   /'
 
@@ -320,8 +320,8 @@ else
   fail "connect a echoue"; journalctl -u "$UNITE" -n 40 --no-pager -o cat; exit 1
 fi
 ETAT=$("$CLI" status --json)
-echo "$ETAT" | grep -q '"state": "connected"' && ok "status: connected" || fail "status: $(echo "$ETAT" | tr -d '\n ')"
-echo "$ETAT" | grep -q '"kill_switch_engaged": true' && ok "kill switch arme" || fail "kill switch NON arme"
+echo "$ETAT" | grep '"state": "connected"' >/dev/null && ok "status: connected" || fail "status: $(echo "$ETAT" | tr -d '\n ')"
+echo "$ETAT" | grep '"kill_switch_engaged": true' >/dev/null && ok "kill switch arme" || fail "kill switch NON arme"
 TX=$(echo "$ETAT" | grep -o '"tx_bytes": [0-9]*' | awk '{print $2}')
 if [ "${TX:-0}" -gt 0 ]; then ok "le tunnel transporte ($TX octets emis)"; else info "tx_bytes=${TX:-0}"; fi
 

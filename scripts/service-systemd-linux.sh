@@ -199,7 +199,7 @@ iptables -I FORWARD 1 -d 10.96.0.0/24 -j ACCEPT
 # temoin, mesure le 17/08/2026: il passait alors que rien d'autre ne sortait,
 # et le diagnostic a coute une heure. On interroge donc en UDP, le protocole
 # dont le resolveur a besoin.
-if ip netns exec "$NS_SRV" timeout 8 dig +short +time=3 +tries=2 @9.9.9.9 example.com A 2>/dev/null | grep -qE '^[0-9]+\.'; then
+if ip netns exec "$NS_SRV" timeout 8 dig +short +time=3 +tries=2 @9.9.9.9 example.com A 2>/dev/null | grep -E '^[0-9]+\.' >/dev/null; then
   ok "le serveur du banc resout par UDP: la voie du resolveur existe"
 else
   fail "le serveur du banc n'atteint pas Internet en UDP: dnscrypt-proxy ne demarrera pas"
@@ -283,17 +283,17 @@ else
   fail "connect a echoue"; journalctl -u "$UNITE" -n 30 --no-pager -o cat
 fi
 ETAT=$("$CLI" status --json)
-echo "$ETAT" | grep -q '"state": "connected"' \
+echo "$ETAT" | grep '"state": "connected"' >/dev/null \
   && ok "status: connected" \
   || fail "status n'est pas connected: $(echo "$ETAT" | tr -d '\n ')"
-echo "$ETAT" | grep -q '"kill_switch_engaged": true' \
+echo "$ETAT" | grep '"kill_switch_engaged": true' >/dev/null \
   && ok "kill switch arme" \
   || fail "kill switch non arme"
 TX=$(echo "$ETAT" | grep -o '"tx_bytes": [0-9]*' | awk '{print $2}')
 [ "${TX:-0}" -gt 0 ] && ok "le tunnel transporte ($TX octets emis)" || fail "le tunnel ne transporte rien"
 
 step "Le VRAI resolveur chiffre tourne, sous son compte"
-PID_RESOLVEUR=$(pgrep -f "^$RESOLVEUR " | head -1)
+PID_RESOLVEUR=$(pgrep -f "^$RESOLVEUR " | sed -n 1p)
 if [ -n "$PID_RESOLVEUR" ]; then
   ok "dnscrypt-proxy en service (pid $PID_RESOLVEUR)"
   UID_ATTENDU=$(id -u "$COMPTE_RESOLVEUR")
@@ -311,7 +311,7 @@ fi
 
 step "La machine resout par lui"
 RESOLV_NS=$(nsenter -t "$PID_DAEMON" -m -- cat /etc/resolv.conf 2>/dev/null)
-echo "$RESOLV_NS" | grep -q '^nameserver 127.0.0.1$' \
+echo "$RESOLV_NS" | grep '^nameserver 127.0.0.1$' >/dev/null \
   && ok "resolv.conf pointe le resolveur local" \
   || fail "resolv.conf ne pointe pas 127.0.0.1: $(echo "$RESOLV_NS" | grep ^nameserver | tr '\n' ' ')"
 
@@ -322,7 +322,7 @@ echo "$RESOLV_NS" | grep -q '^nameserver 127.0.0.1$' \
 # resolvait quand meme, en clair par l'amont, et le temoin restait vert.
 ADRESSE=$(nsenter -t "$PID_DAEMON" -n -- \
   dig +short +time=3 +tries=1 @127.0.0.1 "$NOM_REEL" A 2>/dev/null \
-  | grep -E '^[0-9]+\.' | head -1)
+  | grep -E '^[0-9]+\.' | sed -n 1p)
 [ -n "$ADRESSE" ] \
   && ok "$NOM_REEL resout en $ADRESSE, par le resolveur local" \
   || fail "$NOM_REEL ne resout pas"
@@ -360,7 +360,7 @@ if command -v tcpdump >/dev/null 2>&1; then
   ETAGE_VUS=$(compteur_tcpdump "$WORK/clair.err" "received by filter")
   ETAGE_REMIS=$(compteur_tcpdump "$WORK/clair.err" "captured")
   if [ "$CLAIR" -gt 0 ]; then
-    fail "une requete DNS est sortie en clair: $(grep '\.53:' "$WORK/clair.txt" | head -1)"
+    fail "une requete DNS est sortie en clair: $(grep '\.53:' "$WORK/clair.txt" | sed -n 1p)"
   elif [ -n "$ETAGE_VUS" ] && [ "$ETAGE_VUS" -gt 0 ] && [ "${ETAGE_REMIS:-0}" -eq 0 ]; then
     fail "capture incomplete: $ETAGE_VUS paquet(s) ont passe le filtre du noyau et aucun n'a ete remis, le zero ne prouve rien"
   else
@@ -380,10 +380,10 @@ step "Le /etc/resolv.conf de la machine n'a pas bouge"
 step "Les regles posees ferment le :53 a tout le monde sauf lui"
 REGLES=$(ip netns exec "$NS_CLI" nft list ruleset 2>/dev/null)
 UID_R=$(id -u "$COMPTE_RESOLVEUR")
-echo "$REGLES" | grep -qE "meta skuid $UID_R .*dport 53 accept" \
+echo "$REGLES" | grep -E "meta skuid $UID_R .*dport 53 accept" >/dev/null \
   && ok "l'uid $UID_R garde le droit d'emettre du :53" \
   || fail "aucune exception pour le resolveur dans les regles vivantes"
-echo "$REGLES" | grep -qE '^[[:space:]]*udp dport 53 drop' \
+echo "$REGLES" | grep -E '^[[:space:]]*udp dport 53 drop' >/dev/null \
   && ok "le :53 tombe pour tous les autres" \
   || fail "le :53 circule librement"
 
@@ -403,7 +403,7 @@ elif pgrep -f "^$RESOLVEUR " >/dev/null; then
 else
   ok "le resolveur (pid $PID_RESOLVEUR) s'est arrete avec le tunnel"
 fi
-ip netns exec "$NS_CLI" nft list tables 2>/dev/null | grep -qi bifrost \
+ip netns exec "$NS_CLI" nft list tables 2>/dev/null | grep -i bifrost >/dev/null \
   && fail "des filtres restent en place" \
   || ok "le kill switch est retire"
 

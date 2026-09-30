@@ -93,7 +93,7 @@ if [ "${1:-}" = --menage ]; then
   menage
   # Le controle qui manquait a la note du 18/08/2026: l'ecouteur se verifie par
   # ce qui ECOUTE, jamais en deduisant son sort du demontage de l'interface.
-  if ss -lntp 2>/dev/null | grep -q ":$BANNIERE_PORT "; then
+  if ss -lntp 2>/dev/null | grep ":$BANNIERE_PORT " >/dev/null; then
     echo "ECHEC: quelque chose ecoute encore sur :$BANNIERE_PORT"
     exit 1
   fi
@@ -119,7 +119,7 @@ step "Le pair a-t-il lui-meme Internet"
 # `before-forward` et bloque le reste. Un ping reussi ici serait un faux temoin,
 # mesure le 17/08/2026 et paye d'une heure de diagnostic. On interroge dans le
 # protocole dont le resolveur a besoin.
-if timeout 8 dig +short +time=3 +tries=2 @9.9.9.9 example.com A 2>/dev/null | grep -qE '^[0-9]+\.'; then
+if timeout 8 dig +short +time=3 +tries=2 @9.9.9.9 example.com A 2>/dev/null | grep -E '^[0-9]+\.' >/dev/null; then
   ok "la machine resout par UDP: la voie du resolveur existe"
 else
   fail "la machine n'atteint pas Internet en UDP: dnscrypt-proxy ne demarrera pas"
@@ -198,11 +198,11 @@ setsid nohup python3 "$ATELIER/banniere.py" "$SRV_ADDR" "$BANNIERE_PORT" "$BANNI
   >"$ATELIER/banniere.log" 2>&1 &
 echo $! >"$PID_BANNIERE"
 n=0
-while [ "$n" -lt 20 ] && ! ss -lntp 2>/dev/null | grep -q ":$BANNIERE_PORT "; do
+while [ "$n" -lt 20 ] && ! ss -lntp 2>/dev/null | grep ":$BANNIERE_PORT " >/dev/null; do
   n=$((n + 1))
   sleep 0.25
 done
-if ss -lntp 2>/dev/null | grep -q ":$BANNIERE_PORT "; then
+if ss -lntp 2>/dev/null | grep ":$BANNIERE_PORT " >/dev/null; then
   ok "'$BANNIERE' servie sur $SRV_ADDR:$BANNIERE_PORT (pid $(cat "$PID_BANNIERE"))"
 else
   fail "la banniere n'ecoute pas: le banc client n'aurait aucun temoin de transport"
@@ -213,7 +213,7 @@ step "Profil client"
 # L'adresse du LAN, et jamais celle de Tailscale: le banc client arme un kill
 # switch qui coupe tout ce qui ne passe pas par le tunnel, et un endpoint
 # joignable par un autre VPN se couperait lui-meme.
-LAN=$(ip -4 -o addr show scope global | awk '{print $4}' | cut -d/ -f1 | grep -v '^100\.' | head -1)
+LAN=$(ip -4 -o addr show scope global | awk '{print $4}' | cut -d/ -f1 | grep -v '^100\.' | sed -n 1p)
 if [ -z "$LAN" ]; then
   fail "aucune adresse LAN trouvee pour l'endpoint"
   LAN=0.0.0.0

@@ -82,7 +82,7 @@ fi
 for compte in $COMPTES_SERVICE; do
   # Membre du groupe de pilotage, ce compte pourrait DECONNECTER le VPN: un
   # debordement dans un parseur tiers deviendrait une coupure a distance.
-  if id -nG "$compte" | tr ' ' '\n' | grep -qx "$GROUPE_PILOTAGE"; then
+  if id -nG "$compte" | tr ' ' '\n' | grep -x "$GROUPE_PILOTAGE" >/dev/null; then
     echo "REFUS: $compte appartient au groupe $GROUPE_PILOTAGE, donc il" >&2
     echo "       pourrait piloter le daemon. Le retirer avant d'installer." >&2
     exit 1

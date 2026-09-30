@@ -48,10 +48,10 @@ systemd-sysusers --root="$ESSAI" "$SYSUSERS" >/dev/null 2>&1 \
 
 COMPTES=$(grep '^u ' "$SYSUSERS" | awk '{print $2}')
 GROUPE=$(grep '^g ' "$SYSUSERS" | awk '{print $2}')
-COMPTE=$(echo "$COMPTES" | head -1)   # le coeur, pour les controles qui le visent
+COMPTE=$(echo "$COMPTES" | sed -n 1p)   # le coeur, pour les controles qui le visent
 # Le resolveur, lu dans le fichier declaratif et non ecrit en dur ici: une
 # recette qui recopie le nom qu'elle verifie ne verifie que sa propre copie.
-COMPTE_RESOLVEUR=$(echo "$COMPTES" | grep resolveur | head -1)
+COMPTE_RESOLVEUR=$(echo "$COMPTES" | grep resolveur | sed -n 1p)
 LIGNE=$(grep "^$COMPTE:" "$ESSAI/etc/passwd" || true)
 
 for c in $COMPTES; do
@@ -100,7 +100,7 @@ step "Aucun compte de service ne peut piloter le daemon"
 MEMBRES=$(grep "^$GROUPE:" "$ESSAI/etc/group" | awk -F: '{print $4}')
 GID_PILOTAGE=$(grep "^$GROUPE:" "$ESSAI/etc/group" | awk -F: '{print $3}')
 for c in $COMPTES; do
-  if echo ",$MEMBRES," | grep -q ",$c,"; then
+  if echo ",$MEMBRES," | grep ",$c," >/dev/null; then
     fail "$c est membre de $GROUPE: il pourrait couper le tunnel"
   else
     ok "$c n'est pas membre de $GROUPE"
@@ -151,7 +151,7 @@ step "Les deux voies de creation produisent le meme compte"
 # fonction que l'installateur appelle lui-meme. Pas une transcription: la meme.
 if ! command -v useradd >/dev/null 2>&1 || ! command -v groupadd >/dev/null 2>&1; then
   echo "  SKIP  useradd ou groupadd absent: la voie de repli ne peut pas etre exercee ici"
-elif ! useradd --help 2>&1 | grep -q -- '--prefix'; then
+elif ! useradd --help 2>&1 | grep -- '--prefix' >/dev/null; then
   echo "  SKIP  useradd sans --prefix (shadow-utils < 4.6): l'exercer toucherait la vraie machine"
 else
   REPLI=$(mktemp -d)
@@ -198,7 +198,7 @@ else
     [ "$NOM_GROUPE" = "$c" ] \
       && ok "$c a pour groupe primaire son groupe dedie" \
       || fail "$c a pour groupe primaire ${NOM_GROUPE:-<inconnu>}, pas $c"
-    if grep "^$GROUPE:" "$REPLI/etc/group" | cut -d: -f4 | tr ',' '\n' | grep -qx "$c"; then
+    if grep "^$GROUPE:" "$REPLI/etc/group" | cut -d: -f4 | tr ',' '\n' | grep -x "$c" >/dev/null; then
       fail "le repli a mis $c dans le groupe de pilotage $GROUPE"
     fi
   done
@@ -265,7 +265,7 @@ step "L'installateur ne demarre rien tout seul"
 # Le texte d'aide final CITE la commande a lancer a la main; on le retire avant
 # de chercher, sinon la recette confondrait "explique quoi faire" et "le fait".
 COMMANDES=$(sed '/<<TEXTE/,/^TEXTE$/d' "$INSTALL" | grep -v '^[[:space:]]*#')
-if echo "$COMMANDES" | grep -qE 'systemctl[[:space:]]+(enable|start)'; then
+if echo "$COMMANDES" | grep -E 'systemctl[[:space:]]+(enable|start)' >/dev/null; then
   fail "l'installateur active ou demarre le service"
 else
   ok "aucune activation automatique"

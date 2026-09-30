@@ -149,7 +149,7 @@ CLE_PRIVEE=$(echo "$PAIRE" | awk '/PrivateKey/{print $2}')
 CLE_PUBLIQUE=$(echo "$PAIRE" | awk '/PublicKey/{print $2}')
 UUID=$("$COEURS/sing-box" generate uuid)
 SHORT_ID=$("$COEURS/sing-box" generate rand 8 --hex)
-MDP=$(head -c 24 /dev/urandom | base64 | tr -d '/+=' | head -c 24)
+MDP=$(head -c 24 /dev/urandom | base64 | tr -d '/+=' | cut -c 1-24)
 # Le certificat de B est EPINGLE dans le profil, jamais ignore: `Confiance` n'a
 # volontairement aucune variante "ne pas verifier". L'admettre ferait passer la
 # recette avec un tunnel non authentifie, donc lui ferait prouver le contraire
@@ -280,9 +280,9 @@ for duo in "$NS_A a" "$NS_B b"; do
     "$COEURS/sing-box" run -c "$BANC/$2.json" >"$BANC/$2-serveur.log" 2>&1 &
 done
 sleep 2
-sudo ip netns exec "$NS_A" ss -lnt 2>/dev/null | grep -q ":$PORT " \
+sudo ip netns exec "$NS_A" ss -lnt 2>/dev/null | grep ":$PORT " >/dev/null \
   || { echo "FAILED: le serveur REALITY n'ecoute pas"; tail -5 "$BANC/a-serveur.log"; exit 1; }
-sudo ip netns exec "$NS_B" ss -lnu 2>/dev/null | grep -q ":$PORT " \
+sudo ip netns exec "$NS_B" ss -lnu 2>/dev/null | grep ":$PORT " >/dev/null \
   || { echo "FAILED: le serveur Hysteria2 n'ecoute pas"; tail -5 "$BANC/b-serveur.log"; exit 1; }
 echo "   A ecoute en TCP, B en UDP, les deux bannieres sont posees"
 
