@@ -54,6 +54,7 @@ use bifrost_evasion::Coeur;
 use tokio::sync::{mpsc, oneshot, watch};
 
 use super::lancement::Lancement;
+use super::proprietaire::{self, Proprietaire};
 use super::superviseur::{self, CoeurEnCours};
 
 /// Profondeur du canal de demandes.
@@ -73,6 +74,40 @@ const PROFONDEUR: usize = 1;
 pub struct Vivant {
     pub pid: Option<u32>,
     pub api: Option<SocketAddr>,
+}
+
+/// Ce que l'atelier PUBLIE sur le coeur actif, pour quiconque doit lui parler
+/// APRES son lancement.
+///
+/// Pas seulement l'adresse SOCKS: aussi son API, son PID et son compte dedie.
+/// C'est ce qui permet a la facade (trafic), a la sonde et a la bascule (secret)
+/// de VERIFIER, avant chaque envoi, que le port qu'ils s'appretent a joindre est
+/// toujours tenu par le coeur qu'on a lance - et non par un squatteur qui
+/// l'aurait repris apres une mort du coeur en cours de session. Une seule
+/// source de verite (l'atelier tient le `CoeurEnCours`), diffusee par le meme
+/// canal `watch` qu'avant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CoeurPublie {
+    /// L'entree SOCKS, ou la facade mene le trafic de l'utilisateur.
+    pub socks: SocketAddr,
+    /// L'API de controle, si le coeur en expose une (sing-box oui, xray non).
+    pub api: Option<SocketAddr>,
+    /// Le PID de l'enfant, contre lequel on verifie le proprietaire des ecoutes.
+    pub pid: u32,
+    /// L'UID du compte dedie pose au lancement, s'il y en a un: ce qui tranche
+    /// quand les descripteurs du coeur sont illisibles au daemon (l'unite
+    /// livree). Voir [`super::proprietaire`].
+    pub uid: Option<u32>,
+}
+
+impl CoeurPublie {
+    /// Ce qu'une ecoute doit etre pour appartenir a ce coeur.
+    pub fn attendu(&self) -> proprietaire::Attendu {
+        proprietaire::Attendu {
+            pid: self.pid,
+            uid: self.uid,
+        }
+    }
 }
 
 /// Ce qu'on demande a l'atelier.
@@ -179,7 +214,7 @@ impl Poignee {
 /// mener les octets au bon endroit sans que son adresse d'ecoute change.
 pub fn ouvrir() -> (
     Poignee,
-    watch::Receiver<Option<SocketAddr>>,
+    watch::Receiver<Option<CoeurPublie>>,
     impl std::future::Future<Output = ()>,
 ) {
     let (envoi, demandes) = mpsc::channel(PROFONDEUR);
@@ -190,7 +225,7 @@ pub fn ouvrir() -> (
 }
 
 /// La tache qui detient les coeurs. N'en garde jamais plus d'un.
-async fn tenir(mut demandes: mpsc::Receiver<Demande>, publier: watch::Sender<Option<SocketAddr>>) {
+async fn tenir(mut demandes: mpsc::Receiver<Demande>, publier: watch::Sender<Option<CoeurPublie>>) {
     let mut en_cours: Option<CoeurEnCours> = None;
     loop {
         // Deux choses peuvent arriver: on nous demande quelque chose, ou le
@@ -248,12 +283,42 @@ async fn tenir(mut demandes: mpsc::Receiver<Demande>, publier: watch::Sender<Opt
                 let rendu = match issue {
                     Ok(vivant_et_coeur) => {
                         let (vivant, garde) = vivant_et_coeur;
-                        en_cours = Some(garde);
-                        // Publier seulement une fois le coeur VIVANT: annoncer
-                        // avant enverrait la facade vers un port que personne
-                        // n'ecoute encore.
-                        let _ = publier.send(Some(socks));
-                        Ok(vivant)
+                        // Le trafic de l'utilisateur passe par l'entree SOCKS,
+                        // en clair avant que le coeur ne le chiffre. Si un autre
+                        // processus tient deja ce port, la facade lui menerait ce
+                        // trafic. On refuse donc de publier une adresse qu'un
+                        // tiers detient - la meme regle que pour le secret de
+                        // l'API, a l'autre bout du chemin par coeur.
+                        match proprietaire_de_l_entree(garde.pid(), garde.uid(), socks) {
+                            Ok(pid) => {
+                                // Publier PID, compte et API en plus de l'entree
+                                // SOCKS: c'est ce que la facade, la sonde et la
+                                // bascule reverifient avant chaque usage, pour
+                                // qu'un squatteur qui reprendrait le port apres
+                                // une mort du coeur ne recoive ni octet ni secret.
+                                let publie = CoeurPublie {
+                                    socks,
+                                    api: garde.api(),
+                                    pid,
+                                    uid: garde.uid(),
+                                };
+                                en_cours = Some(garde);
+                                // Publier seulement une fois le coeur VIVANT:
+                                // annoncer avant enverrait la facade vers un
+                                // port que personne n'ecoute encore.
+                                let _ = publier.send(Some(publie));
+                                Ok(vivant)
+                            }
+                            Err(raison) => {
+                                // Depublier est deja fait (rien n'a ete publie);
+                                // reste a ne pas laisser tourner le coeur qu'on
+                                // refuse de servir.
+                                if let Err(e) = garde.arreter().await {
+                                    tracing::warn!(erreur = %e, "coeur arrete apres refus de publication SOCKS, mais mal arrete");
+                                }
+                                Err(raison)
+                            }
+                        }
                     }
                     Err(e) => Err(e),
                 };
@@ -299,6 +364,39 @@ async fn attendre_la_mort(en_cours: &mut Option<CoeurEnCours>) -> String {
         // indefiniment plutot que de rendre, pour qu'une garde oubliee un jour
         // ne se traduise pas par une boucle qui tourne a vide.
         None => std::future::pending().await,
+    }
+}
+
+/// L'entree SOCKS a publier est-elle tenue par le coeur qu'on vient de lancer.
+///
+/// `PersonneEncore` est accepte, et c'est un choix a dire: rien n'est ENVOYE a
+/// la publication. La facade reverifie le proprietaire de l'entree avant CHAQUE
+/// connexion (`proprietaire::exiger_le_coeur`, voir [`super::facade`]), et y
+/// refuse aussi bien un port sans ecoute qu'une ecoute etrangere. Ce
+/// controle-ci refuse plus tot le cas qu'un squatteur produit avant le
+/// lancement: une ecoute qui existe DEJA et qui n'est pas au coeur.
+///
+/// Rend le PID verifie quand le controle passe: c'est lui qu'on PUBLIE dans
+/// [`CoeurPublie`], avec le compte dedie, pour que la facade, la sonde et la
+/// bascule reverifient plus tard que le port est toujours tenu par ce coeur.
+fn proprietaire_de_l_entree(
+    pid: Option<u32>,
+    uid: Option<u32>,
+    socks: SocketAddr,
+) -> Result<u32, String> {
+    let Some(pid) = pid else {
+        return Err(
+            "le coeur n'a pas de PID: impossible de verifier qui tient son entree SOCKS".to_owned(),
+        );
+    };
+    match proprietaire::verifier_ecoute(socks.port(), proprietaire::Attendu { pid, uid }) {
+        Proprietaire::Confirme | Proprietaire::PersonneEncore => Ok(pid),
+        Proprietaire::Autre { details } => Err(format!(
+            "l'entree SOCKS {socks} est tenue par un autre que le coeur lance: le trafic ne lui sera pas mene ({details})"
+        )),
+        Proprietaire::Illisible { details } => Err(format!(
+            "impossible de verifier qui tient l'entree SOCKS {socks}: par prudence, elle ne sera pas publiee ({details})"
+        )),
     }
 }
 

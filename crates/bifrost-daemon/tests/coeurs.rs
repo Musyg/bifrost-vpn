@@ -705,11 +705,19 @@ fn un_coeur_qui_meurt_tout_seul_est_depublie() {
     let pid = fil.join().expect("le fil ne doit pas paniquer");
 
     // Publie tant qu'il vit: sans ce temoin, la recette passerait aussi si
-    // l'atelier ne publiait jamais rien.
+    // l'atelier ne publiait jamais rien. On verifie l'adresse SOCKS ET le pid:
+    // c'est ce pid publie que la facade, la sonde et la bascule reverifient
+    // avant chaque usage, donc il doit etre celui du processus lance.
+    let publie = *suivre.borrow_and_update();
     assert_eq!(
-        *suivre.borrow_and_update(),
+        publie.map(|c| c.socks),
         Some(socks),
         "un coeur vivant doit etre publie"
+    );
+    assert_eq!(
+        publie.map(|c| c.pid),
+        Some(pid),
+        "le coeur publie doit porter le pid du processus lance"
     );
 
     tuer(pid);
@@ -825,20 +833,25 @@ fn l_atelier_publie_le_coeur_actif_et_le_retire_a_l_arret() {
     );
 
     let apres = std::thread::spawn(move || {
-        poignee
+        let vivant = poignee
             .lancer(Coeur::SingBox, lancement, &secret, socks)
             .expect("la doublure doit se lancer");
         let pendant = *coeur_actif.borrow();
         poignee.arreter().expect("l'arret doit aboutir");
-        (pendant, *coeur_actif.borrow())
+        (pendant, *coeur_actif.borrow(), vivant.pid)
     })
     .join()
     .expect("le fil ne doit pas paniquer");
 
     assert_eq!(
-        apres.0,
+        apres.0.map(|c| c.socks),
         Some(socks),
         "l'adresse du coeur devait etre publiee"
+    );
+    assert_eq!(
+        apres.0.map(|c| c.pid),
+        apres.2,
+        "le coeur publie devait porter le pid du processus lance"
     );
     assert_eq!(apres.1, None, "l'arret devait retirer l'adresse");
     let _ = std::fs::remove_dir_all(&rep);

@@ -235,7 +235,8 @@ mod sous_unix {
         /// eprouve sur le VRAI peripherique dans `tests/coeur_tunnel.rs`, mais
         /// ce que le SUPERVISEUR en fait: perdre le tunnel, le demonter, et
         /// relancer un coeur.
-        coeur_actif: tokio::sync::watch::Receiver<Option<std::net::SocketAddr>>,
+        coeur_actif:
+            tokio::sync::watch::Receiver<Option<bifrost_daemon::coeurs::atelier::CoeurPublie>>,
     }
 
     impl TunnelDevice for TunnelTemoin {
@@ -366,9 +367,11 @@ mod sous_unix {
             secret: secret.clone(),
             selecteur: bifrost_daemon::supervisor::SELECTEUR.to_owned(),
         };
-        let (sonde, veille) = bifrost_daemon::coeurs::vitalite::ouvrir(adresse_du_coeur.clone());
+        let (sonde, veille) =
+            bifrost_daemon::coeurs::vitalite::ouvrir(adresse_du_coeur.clone(), actif.clone());
         runtime.spawn(veille);
-        let (bascule, conduite) = bifrost_daemon::coeurs::bascule::ouvrir(adresse_du_coeur);
+        let (bascule, conduite) =
+            bifrost_daemon::coeurs::bascule::ouvrir(adresse_du_coeur, actif.clone());
         runtime.spawn(conduite);
 
         let vues = Arc::new(Mutex::new(Vec::new()));
