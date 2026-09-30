@@ -10,6 +10,7 @@ use std::time::SystemTime;
 
 use crate::Result;
 use crate::config::{DnsPolicy, Portage, TunnelConfig};
+use crate::routage::RoutagePose;
 
 /// Ce que le kill switch doit laisser passer. Tout le reste est bloque.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -279,6 +280,24 @@ pub trait TunnelDevice: Send {
     /// designe l'interface par son nom, ce qui est le cas de nftables.
     fn interface_handle(&self) -> Option<u64> {
         None
+    }
+
+    /// Le plan de routage de la derniere pose reussie de ce peripherique, tel
+    /// qu'il le declare a `prove routes --politique-daemon` par la voie du
+    /// superviseur.
+    ///
+    /// Le peripherique retient, apres la derniere commande reussie de sa pose,
+    /// une seconde evaluation de la fonction pure dont il a tire ses commandes
+    /// (`netcfg::plan`, `aiguillage::plan`), sur la meme configuration: un
+    /// [`Plan`](crate::routage::Plan) egal par construction a celui des
+    /// commandes, pas une capture des commandes elles-memes, ni un plan
+    /// recalcule au moment de la lecture. C'est ce que la preuve compare au
+    /// noyau. Le defaut est
+    /// [`RoutagePose::NonApplicable`]: un peripherique dont la plateforme ne
+    /// pose pas de plan de ce genre (Windows, table IP Helper hors perimetre)
+    /// ou un double de test qui n'en pose pas ne pretend rien avoir pose.
+    fn routage_pose(&self) -> RoutagePose {
+        RoutagePose::NonApplicable
     }
 }
 

@@ -64,11 +64,13 @@ use std::path::Path;
 use std::time::Instant;
 
 use bifrost_core::routage::{
-    Consultation, Famille, Plan, Selecteur, TABLE_LOCAL, TABLE_MAIN, TABLES_RESERVEES,
+    Consultation, Famille, PROTOCOLE_PRODUIT, Plan, Selecteur, TABLE_LOCAL, TABLE_MAIN,
+    TABLES_RESERVEES,
 };
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::declaration::IdentiteDaemon;
 use crate::preuve_nft::{Unique, heure};
 
 pub(crate) mod trames;
@@ -326,7 +328,13 @@ impl Attendue {
     /// complete a 0xffffffff quand aucun n'est donne, et le drapeau
     /// d'inversion; `uidrange U-U` la plage (U, U); `suppress_prefixlength 0`
     /// la suppression 0. Aucun autre selecteur, aucun autre drapeau.
-    fn correspond(&self, r: &Regle) -> bool {
+    ///
+    /// `exiger_etiquette` (mode daemon): la regle doit AUSSI porter l'etiquette
+    /// du produit ([`PROTOCOLE_PRODUIT`]). En mode intention elle est ignoree,
+    /// car l'intention ne dit rien de qui a pose; en mode daemon, on sait que le
+    /// daemon pose avec elle, donc une regle identique sans etiquette n'est pas
+    /// la sienne.
+    fn correspond(&self, r: &Regle, exiger_etiquette: bool) -> bool {
         let mut selecteurs = Selecteurs::default();
         let mut inverse = false;
         match self.selecteur {
@@ -346,6 +354,7 @@ impl Attendue {
             && r.suppression_groupe.is_none()
             && r.cible_saut.is_none()
             && self.pref.is_none_or(|p| p == r.pref)
+            && (!exiger_etiquette || r.protocole == PROTOCOLE_PRODUIT)
     }
 }
 
@@ -535,6 +544,7 @@ fn comparer_famille(
     f: Famille,
     obs: &Observation,
     ecarts: &mut Vec<&'static str>,
+    exiger_etiquette: bool,
 ) -> Result<(Attendus, Observes), &'static str> {
     let vue = obs.vue(f);
     let t = plan.table_du_tunnel();
@@ -564,7 +574,11 @@ fn comparer_famille(
     let du_produit: Vec<Option<usize>> = vue
         .regles
         .iter()
-        .map(|r| attendues.iter().position(|a| a.correspond(r)))
+        .map(|r| {
+            attendues
+                .iter()
+                .position(|a| a.correspond(r, exiger_etiquette))
+        })
         .collect();
     let mut positions = Vec::new();
     let mut ecart = false;
@@ -606,6 +620,10 @@ fn comparer_famille(
             && r.multichemin.is_none()
             && r.prochain_saut.is_none()
             && r.encapsulation.is_none()
+            // Mode daemon: la route du tunnel doit porter l'etiquette du produit.
+            // Une route par defaut identique posee par un tiers, sans etiquette,
+            // n'est pas celle que le daemon declare avoir posee.
+            && (!exiger_etiquette || r.protocole == PROTOCOLE_PRODUIT)
     };
     if dans_t.len() != routes_attendues.len() || !dans_t.iter().all(|r| conforme(r)) {
         ecarts.push(nom(f, Categorie::TableTunnel));
@@ -665,11 +683,24 @@ pub(crate) type Comparaison = (
     Vec<&'static str>,
 );
 
-/// La comparaison entiere: les deux familles, les ecarts dans un ordre fixe.
+/// La comparaison entiere en mode intention: l'etiquette du produit n'est pas
+/// exigee (l'intention ne dit rien de qui a pose).
 pub(crate) fn comparer(plan: &Plan, obs: &Observation) -> Result<Comparaison, &'static str> {
+    comparer_avec(plan, obs, false)
+}
+
+/// La comparaison entiere: les deux familles, les ecarts dans un ordre fixe.
+/// `exiger_etiquette` vaut vrai en mode daemon: le plan vient de ce qui l'a
+/// pose, qui met l'etiquette du produit, donc une regle ou une route du plan
+/// sans etiquette est un ecart de sa categorie.
+pub(crate) fn comparer_avec(
+    plan: &Plan,
+    obs: &Observation,
+    exiger_etiquette: bool,
+) -> Result<Comparaison, &'static str> {
     let mut ecarts = Vec::new();
-    let (a4, o4) = comparer_famille(plan, Famille::Ipv4, obs, &mut ecarts)?;
-    let (a6, o6) = comparer_famille(plan, Famille::Ipv6, obs, &mut ecarts)?;
+    let (a4, o4) = comparer_famille(plan, Famille::Ipv4, obs, &mut ecarts, exiger_etiquette)?;
+    let (a6, o6) = comparer_famille(plan, Famille::Ipv6, obs, &mut ecarts, exiger_etiquette)?;
     Ok((
         ParFamille { ipv4: a4, ipv6: a6 },
         ParFamille { ipv4: o4, ipv6: o6 },
@@ -689,12 +720,19 @@ pub struct Rapport {
     started_at_unix_ms: Option<u128>,
     completed_at_unix_ms: Option<u128>,
     duration_ms: u128,
-    source: &'static str,
+    /// La collecte de cet hote: `kernel-rtnetlink-read-twice` sous Linux;
+    /// `null` ailleurs, ou rien du noyau n'est lu.
+    source: Option<&'static str>,
     expected_source: &'static str,
     intention_schema_version: Option<u32>,
     live_kernel: bool,
     collection_verified: bool,
     network_security: &'static str,
+    /// Le nom de la regle qui a admis le serveur de la declaration, en mode
+    /// daemon; `null` en mode intention (pas de serveur), ou tant qu'elle n'est
+    /// pas etablie. Jamais un uid, un pid ou un SID.
+    #[serde(skip_serializing_if = "IdentiteDaemon::hors_perimetre")]
+    daemon_identity: IdentiteDaemon,
     tunnel_interface_present: Option<bool>,
     expected_counts: Option<ParFamille<Attendus>>,
     observed_counts: Option<ParFamille<Observes>>,
@@ -715,10 +753,11 @@ impl Rapport {
 
     pub fn texte(&self) -> String {
         format!(
-            "{}  {}\n{}\nentree non mesuree: {}\necarts: {}\n\n{}\n",
+            "{}  {}\n{}\n{}entree non mesuree: {}\necarts: {}\n\n{}\n",
             self.verdict,
             self.scope,
             self.reason,
+            self.daemon_identity.ligne(),
             self.failed_input.unwrap_or("aucune"),
             self.differences.join(", "),
             self.limitation
@@ -734,12 +773,13 @@ fn commencer() -> Rapport {
         started_at_unix_ms: heure(),
         completed_at_unix_ms: None,
         duration_ms: 0,
-        source: "kernel-rtnetlink-read-twice",
+        source: Some("kernel-rtnetlink-read-twice"),
         expected_source: "bifrost-routing-plan-v1-user-declared",
         intention_schema_version: None,
         live_kernel: false,
         collection_verified: false,
         network_security: "not-evaluated",
+        daemon_identity: IdentiteDaemon::HorsPerimetre,
         tunnel_interface_present: None,
         expected_counts: None,
         observed_counts: None,
@@ -803,8 +843,186 @@ pub fn verifier(intention: &Path) -> Rapport {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        verifier_avec(intention, |_| {
+        // Rien du noyau n'est lu ici: le rapport ne nomme aucune source.
+        let mut r = verifier_avec(intention, |_| {
             Err("collecte des routes disponible uniquement sous Linux")
-        })
+        });
+        r.source = None;
+        r
     }
+}
+
+// ---------------------------------------------------------------------------
+// Mode face au daemon.
+// ---------------------------------------------------------------------------
+
+impl crate::declaration::Suivi for Rapport {
+    fn entree_manquante(&mut self, entree: &'static str) {
+        self.failed_input = Some(entree);
+    }
+    fn identite(&mut self, identite: IdentiteDaemon) {
+        self.daemon_identity = identite;
+    }
+}
+
+/// La limite propre au mode daemon: l'attendu est declare par le peripherique,
+/// pas par l'appelant, et une declaration n'est jamais une observation.
+const LIMITE_DAEMON: &str = "Plan declare par le peripherique du tunnel, relu avant et apres la collecte, pas observe: une correspondance dit que le noyau porte le plan que le peripherique dit avoir pose. Regles et routes du namespace reseau courant, lues deux fois de suite: un changement qui s'annule entre deux lectures echappe, et ce qui est pose apres la collecte n'est pas vu. Deux limites de la regle de legitimite: une route connectee est admise quelle que soit la largeur du reseau de son adresse, et un masque large met sur le lien tout ce qu'il couvre; la multidiffusion part sur le lien, car le noyau pose ff00::/8 sur chaque interface IPv6. Ni les routes deja en cache, ni les connexions ouvertes, ni les exceptions de route, ni le pare-feu, ni le DNS ne sont prouves ici. Pas une preuve d'etancheite du VPN.";
+
+/// Le plan que la declaration du peripherique designe, reconstruit par le MEME
+/// constructeur que le produit (`Plan::wireguard`, `Plan::coeur`): une seule
+/// source pour la pose et pour l'attendu. La declaration a deja ete lue
+/// strictement (cles, coherence chemin/champs) par `analyser_routage`; il reste
+/// a rejeter ce qui sort du perimetre de la reference (interface `lo`, marque
+/// nulle, table reservee au noyau, compte root ou partage), comme le fait le
+/// lecteur d'intention.
+#[cfg(target_os = "linux")]
+fn plan_de_la_declaration(
+    d: &bifrost_ipc::protocol::DeclarationRoutage,
+) -> Result<Plan, &'static str> {
+    use bifrost_ipc::protocol::{CheminRoutage, EtatRoutage};
+    match d.issue {
+        EtatRoutage::NonApplicable => Err(
+            "le daemon ne pose pas de plan de routage de ce type sur sa plateforme (jumeau IP Helper hors perimetre)",
+        ),
+        EtatRoutage::Aucun => Err("aucun plan de routage pose par ce daemon: rien a comparer"),
+        EtatRoutage::Pose => {
+            let plan = d
+                .plan
+                .as_ref()
+                .ok_or("declaration de routage posee sans plan")?;
+            let interface = &plan.interface;
+            if interface.is_empty()
+                || interface.len() > 15
+                || interface == "lo"
+                || !interface
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+            {
+                return Err("interface du plan declare hors perimetre de la reference");
+            }
+            match plan.chemin {
+                CheminRoutage::Wireguard => {
+                    let (Some(marque), Some(table)) = (plan.fwmark, plan.table) else {
+                        return Err("plan WireGuard declare sans marque ni table");
+                    };
+                    if marque == 0 {
+                        return Err("marque nulle: plan declare hors perimetre de la reference");
+                    }
+                    if TABLES_RESERVEES.contains(&table) {
+                        return Err("table reservee du noyau: plan declare hors perimetre");
+                    }
+                    Ok(Plan::wireguard(interface, marque, table))
+                }
+                CheminRoutage::Coeur => {
+                    if plan.coeur_uid == Some(0) {
+                        return Err("compte de coeur root: plan declare hors perimetre");
+                    }
+                    Ok(Plan::coeur(interface, plan.coeur_uid))
+                }
+            }
+        }
+    }
+}
+
+/// `prove routes --politique-daemon --actif`: l'attendu est le plan que le
+/// peripherique du tunnel joint par `socket` declare avoir pose, relu avant et
+/// apres la collecte du noyau, par le lecteur COMMUN de `declaration`.
+pub async fn verifier_declaration(socket: &str) -> Rapport {
+    #[cfg(target_os = "linux")]
+    {
+        verifier_declaration_avec(
+            move || crate::declaration::lire_routage(socket),
+            crate::preuve_routes_linux::lire_une_fois,
+        )
+        .await
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // Sous Windows, aucune lecture: la commande et la preuve rendent un non
+        // applicable nomme (le jumeau IP Helper est hors de cette tranche), et
+        // le rapport ne nomme aucune source.
+        let _ = socket;
+        let debut = Instant::now();
+        let mut r = commencer_declaration();
+        r.source = None;
+        r.reason = "plan de routage par declaration disponible uniquement sous Linux (jumeau IP Helper hors perimetre)";
+        r.completed_at_unix_ms = heure();
+        r.duration_ms = debut.elapsed().as_millis();
+        r
+    }
+}
+
+/// Le rapport de depart du mode daemon, avant toute lecture.
+fn commencer_declaration() -> Rapport {
+    let mut r = commencer();
+    r.expected_source = "daemon-declared-active-routing-plan";
+    r.daemon_identity = IdentiteDaemon::NonVerifiee;
+    r.failed_input = Some("daemon-declaration");
+    r.reason = "declaration de routage du daemon non lue";
+    r.limitation = LIMITE_DAEMON;
+    r
+}
+
+/// Le protocole, separe de ses deux sources pour que les recettes le jouent
+/// avec un faux daemon et une fausse lecture du noyau. N1, la mesure encadree
+/// (deux lectures rtnetlink identiques), N2: le protocole commun des preuves
+/// par declaration (`declaration::encadrer`), avec son exigence d'identite et
+/// ce qu'il en dit au rapport. En mode daemon, l'etiquette du produit est
+/// exigee sur les objets du plan.
+#[cfg(target_os = "linux")]
+pub(crate) async fn verifier_declaration_avec<L, FL, C>(
+    lire_declaration: L,
+    lire_noyau: C,
+) -> Rapport
+where
+    L: FnMut() -> FL,
+    FL: std::future::Future<
+            Output = Result<crate::declaration::LueRoutage, crate::declaration::Refus>,
+        >,
+    C: Fn(&str) -> Result<Observation, &'static str> + Copy,
+{
+    let debut = Instant::now();
+    let mut r = commencer_declaration();
+    let resultat = async {
+        let (plan, obs) = crate::declaration::encadrer(
+            &mut r,
+            lire_declaration,
+            plan_de_la_declaration,
+            async move |r: &mut Rapport, plan: Plan| {
+                // Pas d'`intention_schema_version`: en mode daemon il n'y a pas
+                // d'intention lue; la source de l'attendu est dite par
+                // `expected_source` et `daemon_identity`.
+                r.failed_input = Some("observed");
+                let interface = plan.interface.clone();
+                let obs = encadrer(|| lire_noyau(&interface))?;
+                r.live_kernel = true;
+                r.collection_verified = true;
+                r.tunnel_interface_present = Some(obs.tunnel.is_some());
+                Ok((plan, obs))
+            },
+        )
+        .await?;
+        let (attendus, observes, ecarts) = comparer_avec(&plan, &obs, true)?;
+        r.expected_counts = Some(attendus);
+        r.observed_counts = Some(observes);
+        r.failed_input = None;
+        r.differences = ecarts;
+        Ok(())
+    }
+    .await;
+    r.verdict = match &resultat {
+        Ok(()) if r.differences.is_empty() => "MATCH",
+        Ok(()) => "MISMATCH",
+        Err(_) => "UNMEASURED",
+    };
+    r.reason = match resultat {
+        Ok(()) => {
+            "regles et routes des deux familles comparees au plan declare par le peripherique; l'etiquette du produit exigee sur les objets du plan"
+        }
+        Err(raison) => raison,
+    };
+    r.completed_at_unix_ms = heure();
+    r.duration_ms = debut.elapsed().as_millis();
+    r
 }

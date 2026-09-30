@@ -68,8 +68,14 @@ impl Refus {
     }
 }
 
-/// La declaration, et le nom de la regle qui a admis son serveur.
+/// La declaration du pare-feu, et le nom de la regle qui a admis son serveur.
 pub(crate) type Lue = (DeclarationPareFeu, &'static str);
+
+/// La declaration du routage, et le nom de la regle qui a admis son serveur.
+/// La mesure du routage est Linux (voir `preuve_routes`); sous Windows la
+/// preuve rend un non applicable sans jamais lire, donc rien ici ne sert.
+#[cfg(target_os = "linux")]
+pub(crate) type LueRoutage = (bifrost_ipc::protocol::DeclarationRoutage, &'static str);
 
 pub(crate) const CLES: [&str; 7] = [
     "result",
@@ -102,6 +108,50 @@ pub(crate) async fn lire_avec(
     delai: Duration,
     attendu: ServerRequirement,
 ) -> Result<Lue, Refus> {
+    let (octets, regle) =
+        connecter_et_demander(socket, delai, attendu, Command::DeclarationPareFeu).await?;
+    Ok((analyser(&octets).map_err(Refus::Declaration)?, regle))
+}
+
+/// La lecture de production de `prove routes --politique-daemon`: meme exigence
+/// d'identite, meme echange borne, meme analyse stricte que le pare-feu, mais la
+/// commande et la forme de la reponse sont celles du routage.
+#[cfg(target_os = "linux")]
+pub(crate) async fn lire_routage(socket: &str) -> Result<LueRoutage, Refus> {
+    lire_routage_avec(socket, DELAI, ServerRequirement::Privileged).await
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) async fn lire_routage_avec(
+    socket: &str,
+    delai: Duration,
+    attendu: ServerRequirement,
+) -> Result<LueRoutage, Refus> {
+    let (octets, regle) =
+        connecter_et_demander(socket, delai, attendu, Command::DeclarationRoutage).await?;
+    Ok((
+        analyser_routage(&octets).map_err(Refus::Declaration)?,
+        regle,
+    ))
+}
+
+/// Le tronc commun aux deux lectures: l'identite du serveur exigee AVANT le
+/// premier octet, la requete, un echange borne dans le temps. Une SEULE copie
+/// de cette logique: la commande et l'analyse de la reponse sont propres a
+/// chaque preuve, l'identite et l'echange ne le sont pas.
+///
+/// `--socket` est choisi par l'utilisateur, et n'importe quel processus peut
+/// ecouter sur un chemin qu'il cree: sans cette exigence, il servirait une
+/// declaration taillee pour un noyau ou un moteur altere, et la preuve dirait
+/// MATCH. Sous Linux le daemon tourne en root sans exception; sous Windows, la
+/// regle des preuves n'admet que le pipe de LocalSystem. La regle vit dans
+/// `bifrost_ipc`; les deux lectures la reprennent ici, sans la changer.
+async fn connecter_et_demander(
+    socket: &str,
+    delai: Duration,
+    attendu: ServerRequirement,
+    commande: Command,
+) -> Result<(Vec<u8>, &'static str), Refus> {
     let echange = async {
         let (mut client, regle) =
             IpcClient::connect_verified(socket, attendu)
@@ -121,15 +171,14 @@ pub(crate) async fn lire_avec(
                     _ => Refus::Declaration("daemon injoignable"),
                 })?;
         let octets = client
-            .request_raw(&Request::new(Command::DeclarationPareFeu))
+            .request_raw(&Request::new(commande))
             .await
             .map_err(|_| Refus::Declaration("reponse du daemon tronquee ou illisible"))?;
-        Ok((octets, regle))
+        Ok((octets, regle.name()))
     };
-    let (octets, regle) = tokio::time::timeout(delai, echange)
+    tokio::time::timeout(delai, echange)
         .await
-        .map_err(|_| Refus::Declaration("daemon sans reponse dans le delai"))??;
-    Ok((analyser(&octets).map_err(Refus::Declaration)?, regle.name()))
+        .map_err(|_| Refus::Declaration("daemon sans reponse dans le delai"))?
 }
 
 /// Analyse une trame de reponse, sans jamais recopier ce qu'elle contient
@@ -139,21 +188,7 @@ pub(crate) fn analyser(octets: &[u8]) -> Result<DeclarationPareFeu, &'static str
     let Unique(v) =
         serde_json::from_slice(octets).map_err(|_| "reponse du daemon tronquee ou illisible")?;
     let objet = v.as_object().ok_or(HORS_SCHEMA)?;
-    if objet.get("result").and_then(Value::as_str) == Some("error") {
-        // Le serveur refuse un pair non autorise AVANT de lire sa requete, et
-        // le dit par ce prefixe (`bifrost_ipc::auth::AuthError::Denied`). Toute
-        // autre erreur, dont celle d'un daemon d'une version qui ne connait pas
-        // la commande, est un refus de la demande, pas un refus d'acces.
-        let message = objet
-            .get("message")
-            .and_then(Value::as_str)
-            .ok_or(HORS_SCHEMA)?;
-        return Err(if message.starts_with("acces refuse") {
-            "acces au daemon refuse"
-        } else {
-            "le daemon a refuse la demande"
-        });
-    }
+    erreur_declaree(objet)?;
     if objet.len() != CLES.len() || CLES.iter().any(|c| !objet.contains_key(*c)) {
         return Err(HORS_SCHEMA);
     }
@@ -178,6 +213,101 @@ pub(crate) fn analyser(octets: &[u8]) -> Result<DeclarationPareFeu, &'static str
         || !instance_valide
         || d.moteur.is_empty()
         || !coherente
+    {
+        return Err(HORS_SCHEMA);
+    }
+    Ok(d)
+}
+
+/// La branche d'erreur, commune aux deux analyses: le serveur refuse un pair
+/// non autorise AVANT de lire sa requete, et le dit par ce prefixe
+/// (`bifrost_ipc::auth::AuthError::Denied`). Toute autre erreur, dont celle d'un
+/// daemon d'une version qui ne connait pas la commande, est un refus de la
+/// demande, pas un refus d'acces.
+fn erreur_declaree(objet: &serde_json::Map<String, Value>) -> Result<(), &'static str> {
+    if objet.get("result").and_then(Value::as_str) == Some("error") {
+        let message = objet
+            .get("message")
+            .and_then(Value::as_str)
+            .ok_or(HORS_SCHEMA)?;
+        return Err(if message.starts_with("acces refuse") {
+            "acces au daemon refuse"
+        } else {
+            "le daemon a refuse la demande"
+        });
+    }
+    Ok(())
+}
+
+/// Les cles de la reponse `declaration-routage`, tag `result` compris.
+#[cfg(target_os = "linux")]
+pub(crate) const CLES_ROUTAGE: [&str; 6] = [
+    "result",
+    "schema_version",
+    "instance",
+    "application",
+    "issue",
+    "plan",
+];
+
+/// Les cles du sous-objet `plan`, quand il est present.
+#[cfg(target_os = "linux")]
+pub(crate) const PLAN_CLES: [&str; 5] = ["chemin", "interface", "fwmark", "table", "coeur_uid"];
+
+/// Analyse une trame de reponse `declaration-routage`, aussi strictement que
+/// [`analyser`]: cles exactes au niveau superieur ET dans le sous-objet `plan`,
+/// doublons refuses (par [`Unique`], en profondeur), entiers, version, et
+/// coherence entre l'etat, le numero et le plan. Rien de ce qu'elle contient
+/// n'entre dans une raison.
+#[cfg(target_os = "linux")]
+pub(crate) fn analyser_routage(
+    octets: &[u8],
+) -> Result<bifrost_ipc::protocol::DeclarationRoutage, &'static str> {
+    use bifrost_ipc::protocol::{CheminRoutage, DECLARATION_ROUTAGE_VERSION, EtatRoutage};
+    let Unique(v) =
+        serde_json::from_slice(octets).map_err(|_| "reponse du daemon tronquee ou illisible")?;
+    let objet = v.as_object().ok_or(HORS_SCHEMA)?;
+    erreur_declaree(objet)?;
+    if objet.len() != CLES_ROUTAGE.len() || CLES_ROUTAGE.iter().any(|c| !objet.contains_key(*c)) {
+        return Err(HORS_SCHEMA);
+    }
+    // Les cles du sous-objet `plan` sont verifiees sur la valeur BRUTE: serde
+    // ignorerait une cle inconnue en le deserialisant, ce qui elargirait le
+    // schema en silence.
+    if let Some(plan) = objet.get("plan").filter(|p| !p.is_null()) {
+        let po = plan.as_object().ok_or(HORS_SCHEMA)?;
+        if po.len() != PLAN_CLES.len() || PLAN_CLES.iter().any(|c| !po.contains_key(*c)) {
+            return Err(HORS_SCHEMA);
+        }
+    }
+    let d = match serde_json::from_value::<Response>(v) {
+        Ok(Response::DeclarationRoutage(d)) => *d,
+        _ => return Err(HORS_SCHEMA),
+    };
+    let instance_valide = (32..=128).contains(&d.instance.len())
+        && d.instance
+            .bytes()
+            .all(|o| o.is_ascii_digit() || (b'a'..=b'f').contains(&o));
+    let coherente = match d.issue {
+        EtatRoutage::NonApplicable | EtatRoutage::Aucun => d.plan.is_none(),
+        EtatRoutage::Pose => d.application > 0 && d.plan.is_some(),
+    };
+    // Le plan, present, doit s'accorder a son chemin: WireGuard a une marque et
+    // une table, pas de compte; le coeur a un compte ou rien, ni marque ni
+    // table (la sienne est fixee par le produit).
+    let plan_coherent = match &d.plan {
+        None => true,
+        Some(p) => match p.chemin {
+            CheminRoutage::Wireguard => {
+                p.fwmark.is_some() && p.table.is_some() && p.coeur_uid.is_none()
+            }
+            CheminRoutage::Coeur => p.fwmark.is_none() && p.table.is_none(),
+        },
+    };
+    if d.schema_version != DECLARATION_ROUTAGE_VERSION
+        || !instance_valide
+        || !coherente
+        || !plan_coherent
     {
         return Err(HORS_SCHEMA);
     }
@@ -279,25 +409,32 @@ pub(crate) trait Suivi {
 ///
 /// Rendu `Ok`, le rapport attend sa comparaison: `failed_input` vaut
 /// `observed` jusqu'a ce que la preuve l'ait faite.
-pub(crate) async fn encadrer<R, L, FL, M, T>(
+/// Generique sur la declaration `D` (comparee en entier pour N1 == N2) et sur
+/// l'attendu `X` que `extraire` en tire: pour `prove nft`/`prove wfp`, `D` est
+/// [`DeclarationPareFeu`] et `X` la politique (`&Value`, via
+/// [`politique_posee`]); pour `prove routes`, `D` est `DeclarationRoutage` et
+/// `X` le plan reconstruit. Une seule implementation du protocole.
+pub(crate) async fn encadrer<R, D, L, FL, X, EX, M, T>(
     r: &mut R,
     mut lire: L,
-    perimetre: &Perimetre,
+    extraire: EX,
     mesurer: M,
 ) -> Result<T, &'static str>
 where
     R: Suivi,
+    D: PartialEq,
     L: FnMut() -> FL,
-    FL: std::future::Future<Output = Result<Lue, Refus>>,
-    M: AsyncFnOnce(&mut R, &Value) -> Result<T, &'static str>,
+    FL: std::future::Future<Output = Result<(D, &'static str), Refus>>,
+    EX: FnOnce(&D) -> Result<X, &'static str>,
+    M: AsyncFnOnce(&mut R, X) -> Result<T, &'static str>,
 {
     let (premiere, regle) = lire().await.map_err(|refus| {
         r.entree_manquante(refus.entree());
         refus.raison()
     })?;
     r.identite(IdentiteDaemon::Verifiee(regle));
-    let politique = politique_posee(&premiere, perimetre)?;
-    let mesure = mesurer(r, politique).await?;
+    let attendu = extraire(&premiere)?;
+    let mesure = mesurer(r, attendu).await?;
     r.entree_manquante("daemon-declaration");
     let (seconde, _) = lire().await.map_err(|refus| match refus {
         Refus::Identite(raison) => {
@@ -361,10 +498,10 @@ mod tests {
         let issue = encadrer(
             &mut j,
             || std::future::ready(lectures.next().expect("lecture de trop")),
-            &PERIMETRE,
-            async |j: &mut Journal, politique: &Value| {
+            |d: &DeclarationPareFeu| politique_posee(d, &PERIMETRE).cloned(),
+            async |j: &mut Journal, politique: Value| {
                 j.mesures += 1;
-                Ok(politique.clone())
+                Ok(politique)
             },
         )
         .await;

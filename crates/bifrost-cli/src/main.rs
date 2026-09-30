@@ -216,16 +216,28 @@ enum CmdPreuve {
         actif: bool,
     },
     /// Linux: compare les regles de routage et les routes du namespace courant
-    /// au plan que le produit pose pour une intention (chemin WireGuard ou
-    /// coeur). Lecture seule du noyau, deux fois, sans elevation ni changement;
-    /// le rapport ne porte que des categories et des comptes.
+    /// au plan de routage, soit celui qu'une intention decrit (--intention),
+    /// soit celui que le daemon declare avoir pose (--politique-daemon).
+    /// Lecture seule du noyau, deux fois, sans elevation ni changement; le
+    /// rapport ne porte que des categories et des comptes.
     Routes {
         /// Intention de routage v1: schema_version, chemin, interface, fwmark,
-        /// table, coeur_uid.
-        #[arg(long)]
-        intention: std::path::PathBuf,
-        /// Lecture seule du noyau courant. Seule forme pour l'instant, exigee
-        /// pour que la ligne dise que le noyau est lu.
+        /// table, coeur_uid. Absente en mode --politique-daemon.
+        #[arg(
+            long,
+            required_unless_present = "politique_daemon",
+            conflicts_with = "politique_daemon"
+        )]
+        intention: Option<std::path::PathBuf>,
+        /// Linux: l'attendu est le plan de routage que le daemon (--socket)
+        /// declare avoir pose (commande IPC distincte de la declaration du
+        /// pare-feu), relu avant et apres la collecte du noyau, par le lecteur
+        /// commun des declarations. Sous Windows, non applicable sans lecture:
+        /// le jumeau IP Helper est hors de cette tranche.
+        #[arg(long = "politique-daemon", conflicts_with = "intention")]
+        politique_daemon: bool,
+        /// Lecture seule du noyau courant. Exigee pour que la ligne dise que le
+        /// noyau est lu.
         #[arg(long, required = true)]
         actif: bool,
     },
@@ -928,9 +940,18 @@ async fn run(args: Args) -> anyhow::Result<i32> {
             return Ok(rapport.code());
         }
         Cmd::Prove {
-            quoi: CmdPreuve::Routes { intention, .. },
+            quoi:
+                CmdPreuve::Routes {
+                    intention,
+                    politique_daemon,
+                    ..
+                },
         } => {
-            let rapport = preuve_routes::verifier(intention);
+            let rapport = if *politique_daemon {
+                preuve_routes::verifier_declaration(&args.socket).await
+            } else {
+                preuve_routes::verifier(intention.as_ref().expect("valide par clap"))
+            };
             if args.json {
                 println!("{}", serde_json::to_string_pretty(&rapport)?);
             } else {
@@ -1027,9 +1048,12 @@ async fn run(args: Args) -> anyhow::Result<i32> {
                 bail!("{message}");
             }
         }
-        // Aucune commande de ce chemin ne demande la declaration: elle n'est
-        // lue que par `prove nft --politique-daemon`, avec son lecteur strict.
-        // La recevoir ici est un daemon qui repond a cote, pas un resultat.
-        Response::DeclarationPareFeu(_) => bail!("reponse inattendue du daemon"),
+        // Aucune commande de ce chemin ne demande une declaration: elles ne
+        // sont lues que par `prove nft/wfp/routes --politique-daemon`, avec leur
+        // lecteur strict. Les recevoir ici est un daemon qui repond a cote, pas
+        // un resultat.
+        Response::DeclarationPareFeu(_) | Response::DeclarationRoutage(_) => {
+            bail!("reponse inattendue du daemon")
+        }
     }
 }

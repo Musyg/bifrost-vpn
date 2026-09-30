@@ -130,6 +130,24 @@ pub enum Command {
     /// ni cle ni profil, seulement les champs que le moteur appele lit (voir
     /// [`DeclarationPareFeu`]).
     DeclarationPareFeu,
+    /// Le plan de routage que le PERIPHERIQUE du tunnel a pose en dernier.
+    ///
+    /// # Pourquoi une commande a part de `DeclarationPareFeu`
+    ///
+    /// La declaration du pare-feu porte ce que le MOTEUR (le superviseur) a
+    /// remis a nftables ou WFP: sept cles, lues strictement. Le plan de routage
+    /// vient d'ailleurs - c'est le PERIPHERIQUE du tunnel qui le pose, par `ip`
+    /// sous Linux - et ne se range dans aucune de ces sept cles. L'y ajouter les
+    /// elargirait et melerait deux sources de verite. Cette commande est donc
+    /// distincte, avec sa propre version de contenu
+    /// ([`DECLARATION_ROUTAGE_VERSION`]).
+    ///
+    /// # Ce qu'un appelant y gagne: une lecture
+    ///
+    /// Aucun parametre, aucun effet, meme controle d'acces que `Status`. Elle ne
+    /// transporte ni cle ni profil: seulement les champs qui definissent le plan
+    /// (voir [`DeclarationRoutage`]), et l'etat (pose, rien, non applicable).
+    DeclarationRoutage,
 }
 
 impl Command {
@@ -165,6 +183,7 @@ impl Command {
             Command::VerdictInspectionTls { .. } => "verdict-inspection-tls",
             Command::Reprise => "reprise",
             Command::DeclarationPareFeu => "declaration-pare-feu",
+            Command::DeclarationRoutage => "declaration-routage",
         }
     }
 }
@@ -176,6 +195,7 @@ pub enum Response {
     Status(Box<TunnelStatus>),
     Check(Box<CheckReport>),
     DeclarationPareFeu(Box<DeclarationPareFeu>),
+    DeclarationRoutage(Box<DeclarationRoutage>),
     Error { message: String },
 }
 
@@ -238,6 +258,80 @@ pub struct DeclarationPareFeu {
     pub politique: Option<serde_json::Value>,
 }
 
+/// Version du contenu de [`DeclarationRoutage`], distincte de
+/// [`PROTOCOL_VERSION`] et de [`DECLARATION_PARE_FEU_VERSION`]: le plan de
+/// routage a sa propre forme, qu'un lecteur strict refuse plutot que d'en
+/// comparer une partie.
+pub const DECLARATION_ROUTAGE_VERSION: u32 = 1;
+
+/// L'etat du routage que le peripherique du tunnel declare.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EtatRoutage {
+    /// Ce peripherique ne pose pas de plan de routage de ce genre sur sa
+    /// plateforme (Windows: la table IP Helper, hors perimetre de la preuve).
+    NonApplicable,
+    /// Rien de pose: le peripherique n'a jamais monte, ou a demonte.
+    Aucun,
+    /// Une interface est montee: le plan est joint.
+    Pose,
+}
+
+/// Le chemin qui a pose le plan, tel que le declare le peripherique.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CheminRoutage {
+    /// `netcfg::add_routing`: table dediee et marque.
+    Wireguard,
+    /// `aiguillage::poser`: table du coeur et, s'il y en a un, compte du coeur.
+    Coeur,
+}
+
+/// La projection du plan de routage: ce qui suffit a reconstruire
+/// `bifrost_core::routage::Plan`, et rien d'autre. Presente si et seulement si
+/// [`DeclarationRoutage::issue`] vaut [`EtatRoutage::Pose`].
+///
+/// Ni adresse, ni cle, ni point d'acces: le chemin, l'interface, et les valeurs
+/// que le plan derive du profil (marque et table pour WireGuard, compte du
+/// coeur pour le coeur). Le lecteur les rend au meme constructeur que le
+/// produit (`Plan::wireguard`, `Plan::coeur`): une seule source pour la pose et
+/// pour l'attendu.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanRoutage {
+    pub chemin: CheminRoutage,
+    pub interface: String,
+    /// Marque WireGuard (`null` pour le coeur).
+    pub fwmark: Option<u32>,
+    /// Table WireGuard (`null` pour le coeur, dont la table est fixee par le
+    /// produit).
+    pub table: Option<u32>,
+    /// Compte du coeur (`null` pour WireGuard, ou pour un coeur sans compte).
+    pub coeur_uid: Option<u32>,
+}
+
+/// Declaration du peripherique du tunnel: le plan de routage qu'il a pose en
+/// dernier.
+///
+/// C'est une DECLARATION, jamais une observation: elle dit ce que le
+/// peripherique a pose, pas ce que le noyau porte. Seul un verificateur qui lit
+/// le noyau (`prove routes`) peut la confronter a la realite.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeclarationRoutage {
+    /// Toujours [`DECLARATION_ROUTAGE_VERSION`].
+    pub schema_version: u32,
+    /// Alea tire au demarrage du daemon, partage avec [`DeclarationPareFeu`]:
+    /// il distingue deux vies du daemon. Voir cette structure.
+    pub instance: String,
+    /// Numero de la derniere pose ou depose de routage, monotone sur la vie du
+    /// daemon; zero tant que rien n'a ete pose. Chaque montage et chaque
+    /// demontage l'incremente: deux lectures qui voient le meme numero n'ont vu
+    /// passer aucun changement de plan entre elles.
+    pub application: u64,
+    pub issue: EtatRoutage,
+    /// Present si et seulement si `issue` vaut `pose`.
+    pub plan: Option<PlanRoutage>,
+}
+
 impl Response {
     pub fn error(message: impl Into<String>) -> Self {
         Self::Error {
@@ -270,6 +364,74 @@ mod tests {
         // (le controle d'acces est le meme pour toutes), mais ferait passer
         // pour une action ce qui n'en est pas une dans le journal d'audit.
         assert!(!Command::DeclarationPareFeu.is_mutating());
+        // La declaration du routage est une lecture, comme celle du pare-feu:
+        // elle ne pose rien et ne doit pas passer pour une action.
+        assert!(!Command::DeclarationRoutage.is_mutating());
+    }
+
+    /// Le nom sur le fil de la declaration du routage est un contrat avec
+    /// `prove routes --politique-daemon`, et la commande ne porte rien.
+    #[test]
+    fn la_declaration_du_routage_a_son_nom_et_ne_porte_rien() {
+        let s = serde_json::to_string(&Request::new(Command::DeclarationRoutage)).unwrap();
+        assert_eq!(s, r#"{"version":1,"command":"declaration-routage"}"#);
+        let back: Request = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.command.name(), "declaration-routage");
+        assert!(matches!(back.command, Command::DeclarationRoutage));
+    }
+
+    /// La forme de la reponse, cle par cle: c'est ce que le lecteur strict de
+    /// `prove routes --politique-daemon` compare, et une cle ajoutee ici doit le
+    /// faire tomber plutot que d'etre ignoree en silence.
+    #[test]
+    fn la_reponse_de_declaration_routage_a_exactement_six_cles() {
+        let d = DeclarationRoutage {
+            schema_version: DECLARATION_ROUTAGE_VERSION,
+            instance: "00".repeat(24),
+            application: 3,
+            issue: EtatRoutage::Pose,
+            plan: Some(PlanRoutage {
+                chemin: CheminRoutage::Wireguard,
+                interface: "wg0".into(),
+                fwmark: Some(51820),
+                table: Some(51820),
+                coeur_uid: None,
+            }),
+        };
+        let v = serde_json::to_value(Response::DeclarationRoutage(Box::new(d.clone()))).unwrap();
+        let mut cles: Vec<_> = v.as_object().unwrap().keys().cloned().collect();
+        cles.sort();
+        assert_eq!(
+            cles,
+            [
+                "application",
+                "instance",
+                "issue",
+                "plan",
+                "result",
+                "schema_version"
+            ]
+        );
+        assert_eq!(v["result"], "declaration-routage");
+        assert_eq!(v["issue"], "pose");
+        assert_eq!(v["plan"]["chemin"], "wireguard");
+        match serde_json::from_value::<Response>(v).unwrap() {
+            Response::DeclarationRoutage(relue) => assert_eq!(*relue, d),
+            autre => panic!("attendu une declaration de routage, recu {autre:?}"),
+        }
+        for (issue, fil) in [
+            (EtatRoutage::NonApplicable, "non-applicable"),
+            (EtatRoutage::Aucun, "aucun"),
+            (EtatRoutage::Pose, "pose"),
+        ] {
+            assert_eq!(serde_json::to_value(issue).unwrap(), fil);
+        }
+        for (chemin, fil) in [
+            (CheminRoutage::Wireguard, "wireguard"),
+            (CheminRoutage::Coeur, "coeur"),
+        ] {
+            assert_eq!(serde_json::to_value(chemin).unwrap(), fil);
+        }
     }
 
     /// Le nom sur le fil est un contrat avec `bifrost-cli prove nft

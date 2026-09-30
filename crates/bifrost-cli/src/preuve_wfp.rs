@@ -638,9 +638,9 @@ where
         let (attendus, instantane) = crate::declaration::encadrer(
             &mut r,
             lire,
-            &PERIMETRE,
-            async move |r: &mut Rapport, politique: &Value| {
-                let p = PolitiqueWfp::lire(politique.clone())
+            |d| crate::declaration::politique_posee(d, &PERIMETRE).cloned(),
+            async move |r: &mut Rapport, politique: Value| {
+                let p = PolitiqueWfp::lire(politique)
                     .map_err(|_| "politique declaree hors du perimetre de la reference WFP v1")?;
                 let reference = p.reference()?;
                 r.failed_input = Some("expected");

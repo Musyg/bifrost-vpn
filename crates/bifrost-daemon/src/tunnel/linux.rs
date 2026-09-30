@@ -14,6 +14,7 @@ use std::process::{Command, Stdio};
 use std::time::SystemTime;
 
 use bifrost_core::ports::{HandshakeInfo, TunnelDevice};
+use bifrost_core::routage::{Plan, RoutagePose};
 use bifrost_core::{Error, Result, TunnelConfig};
 use wireguard_control::{
     AllowedIp, Backend, Device, DeviceUpdate, InterfaceName, Key, PeerConfigBuilder,
@@ -22,7 +23,15 @@ use wireguard_control::{
 use super::netcfg::{self, Cmd};
 
 #[derive(Default)]
-pub struct LinuxTunnel;
+pub struct LinuxTunnel {
+    /// Le plan de routage de la derniere pose reussie, retenu pour la
+    /// declaration que sert `prove routes --politique-daemon`. `None` quand
+    /// rien n'est monte. Une seconde evaluation de `netcfg::plan` sur la
+    /// configuration de la pose, retenue apres sa derniere commande reussie:
+    /// egale par construction au plan dont les commandes sont tirees, pas une
+    /// capture de ces commandes, ni un plan recalcule au moment de la lecture.
+    routage: Option<Plan>,
+}
 
 /// Ce qui porte deja le nom d'interface du profil.
 ///
@@ -63,7 +72,7 @@ fn occupant_wireguard(lue: Option<&Key>, du_profil: &Key) -> Occupant {
 
 impl LinuxTunnel {
     pub fn new() -> Self {
-        Self
+        Self::default()
     }
 
     fn iface(cfg: &TunnelConfig) -> Result<InterfaceName> {
@@ -269,6 +278,12 @@ impl TunnelDevice for LinuxTunnel {
             fwmark = format!("{:#x}", wg.fwmark),
             "tunnel monte"
         );
+        // Retenir, apres la derniere commande reussie, le plan de la pose: une
+        // seconde evaluation de la fonction pure dont `add_routing` a tire les
+        // commandes (`netcfg::plan`), sur le meme `cfg`. Egale par construction
+        // au plan des commandes, ce n'est pas une capture des commandes. La
+        // premiere evaluation a reussi, sur la meme entree: celle-ci aussi.
+        self.routage = netcfg::plan(cfg, "declaration du routage")?;
         Ok(())
     }
 
@@ -294,8 +309,17 @@ impl TunnelDevice for LinuxTunnel {
                 }
             }
         }
+        // Plus rien de pose: la declaration ne doit plus rendre l'ancien plan.
+        self.routage = None;
         tracing::info!(interface = %cfg.interface, "tunnel demonte");
         Ok(())
+    }
+
+    fn routage_pose(&self) -> RoutagePose {
+        match &self.routage {
+            Some(p) => RoutagePose::Pose(p.clone()),
+            None => RoutagePose::Aucun,
+        }
     }
 
     fn handshake(&self, cfg: &TunnelConfig) -> Result<Option<HandshakeInfo>> {

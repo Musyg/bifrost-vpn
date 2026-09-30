@@ -214,6 +214,43 @@ fn ecarts(plan: &Plan, o: &Observation) -> Vec<&'static str> {
     comparer(plan, o).unwrap().2
 }
 
+/// La meme pose, ses regles et la route de sa table de tunnel posees a
+/// l'originateur `protocole`. Les regles du produit sont posees au protocole 3
+/// par les fabriques ci-dessus (comme un tiers); cette fonction les fait
+/// passer a `protocole`, avec la route du tunnel.
+fn posee_a(mut o: Observation, table: u32, protocole: u8) -> Observation {
+    for f in Famille::TOUTES {
+        let v = vue(&mut o, f);
+        for r in v.regles.iter_mut().filter(|r| r.protocole == 3) {
+            r.protocole = protocole;
+        }
+        for r in v.routes.iter_mut().filter(|r| r.table == table) {
+            r.protocole = protocole;
+        }
+    }
+    o
+}
+
+/// La meme pose avec l'etiquette du produit ([`PROTOCOLE_PRODUIT`]) sur ses
+/// regles et sur la route de sa table de tunnel: ce que le peripherique du
+/// tunnel pose vraiment, et ce que le mode daemon exige.
+fn etiquete(o: Observation, table: u32) -> Observation {
+    posee_a(o, table, PROTOCOLE_PRODUIT)
+}
+
+/// Les originateurs que les recettes du mode daemon opposent a l'etiquette du
+/// produit: 0 (`RTPROT_UNSPEC`), 2 (`RTPROT_KERNEL`), 3 (`RTPROT_BOOT`), 4
+/// (`RTPROT_STATIC`), les deux voisins de 177, et la derniere valeur. Une garde
+/// qui ne refuserait que l'un d'eux (`!= 3`, `!= 2`, `>= 177`...) en laisserait
+/// passer un autre: chaque recette les essaie tous.
+const PROTOCOLES_TIERS: [u8; 7] = [0, 2, 3, 4, 176, 178, 255];
+
+/// Les ecarts en mode daemon: l'etiquette du produit exigee sur les objets du
+/// plan (voir [`super::comparer_avec`]).
+fn ecarts_daemon(plan: &Plan, o: &Observation) -> Vec<&'static str> {
+    comparer_avec(plan, o, true).unwrap().2
+}
+
 const AUCUN: [&str; 0] = [];
 
 // --- correspondance ------------------------------------------------------
@@ -304,6 +341,121 @@ fn rien_de_pose_est_un_ecart() {
                 "ipv6-product-rules",
                 "ipv6-tunnel-table"
             ]
+        );
+    }
+}
+
+// --- mode daemon: l'etiquette du produit exigee ----------------------------
+//
+// Le mode intention ne dit rien de qui a pose: il ne compare pas l'etiquette.
+// Le mode daemon, lui, tient l'attendu du peripherique du tunnel, qui pose avec
+// l'etiquette du produit; une regle ou une route du plan sans etiquette n'est
+// donc pas la sienne. La decision de la voie: en mode daemon, l'etiquette est
+// exigee sur les regles du produit ET sur la route de la table du tunnel. Le
+// produit pose avec `protocol 177` et `proto 177` (`netcfg`, `aiguillage`), et
+// le banc `e2e-linux.sh` mesure la correspondance en mode daemon face a la pose
+// d'un vrai daemon; ces recettes tiennent le comparateur, sur chacun des
+// originateurs de [`PROTOCOLES_TIERS`].
+
+/// La pose etiquetee correspond en mode daemon, dans les deux chemins.
+#[test]
+fn en_mode_daemon_la_pose_etiquetee_correspond() {
+    assert_eq!(
+        ecarts_daemon(&plan_wg(), &etiquete(wireguard_pose(), TABLE_WG)),
+        AUCUN
+    );
+    assert_eq!(
+        ecarts_daemon(&plan_coeur(), &etiquete(coeur_pose(Some(COMPTE)), 2847)),
+        AUCUN
+    );
+}
+
+/// La MEME pose, a tout autre originateur que l'etiquette, n'est pas celle du
+/// daemon: ni ses regles ni sa route de tunnel ne correspondent, dans les deux
+/// familles. C'est ce qui distingue le mode daemon du mode intention, ou la
+/// meme pose correspond.
+#[test]
+fn en_mode_daemon_une_pose_sans_etiquette_est_un_ecart() {
+    assert!(!PROTOCOLES_TIERS.contains(&PROTOCOLE_PRODUIT));
+    for p in PROTOCOLES_TIERS {
+        for (plan, o) in [
+            (plan_wg(), posee_a(wireguard_pose(), TABLE_WG, p)),
+            (plan_coeur(), posee_a(coeur_pose(Some(COMPTE)), 2847, p)),
+        ] {
+            assert_eq!(
+                ecarts_daemon(&plan, &o),
+                [
+                    "ipv4-product-rules",
+                    "ipv4-tunnel-table",
+                    "ipv6-product-rules",
+                    "ipv6-tunnel-table"
+                ],
+                "protocole {p}"
+            );
+            // La meme pose, en mode intention, correspond: l'etiquette n'y est
+            // pas exigee.
+            assert_eq!(ecarts(&plan, &o), AUCUN, "protocole {p}");
+        }
+    }
+}
+
+/// L'etiquette otee de la SEULE regle qui aiguille vers le tunnel: elle n'est
+/// plus reconnue comme celle du produit, et comme elle est l'ancre, l'analyse
+/// d'avant-tunnel ne s'ouvre pas. Un seul ecart, celui des regles du produit,
+/// quel que soit l'originateur qui remplace l'etiquette.
+#[test]
+fn en_mode_daemon_l_etiquette_otee_de_la_regle_du_tunnel_est_un_ecart_de_sa_categorie() {
+    for p in PROTOCOLES_TIERS {
+        // WireGuard: la regle `not fwmark` consulte la table du tunnel.
+        let mut o = etiquete(wireguard_pose(), TABLE_WG);
+        for r in o.ipv4.regles.iter_mut().filter(|r| r.inverse) {
+            r.protocole = p;
+        }
+        assert_eq!(
+            ecarts_daemon(&plan_wg(), &o),
+            ["ipv4-product-rules"],
+            "protocole {p}"
+        );
+
+        // Coeur: la regle de priorite 9120 consulte la table du coeur (2847).
+        let mut o = etiquete(coeur_pose(Some(COMPTE)), 2847);
+        for r in o.ipv6.regles.iter_mut().filter(|r| r.table == 2847) {
+            r.protocole = p;
+        }
+        assert_eq!(
+            ecarts_daemon(&plan_coeur(), &o),
+            ["ipv6-product-rules"],
+            "protocole {p}"
+        );
+    }
+}
+
+/// L'etiquette otee de la route de la table du tunnel: la route par defaut
+/// existe et va au tunnel, mais sans l'etiquette du produit ce n'est pas celle
+/// que le daemon declare avoir posee. Les regles gardent la leur, donc l'ancre
+/// est trouvee et l'avant-tunnel s'analyse: un seul ecart, celui de la table du
+/// tunnel, quel que soit l'originateur qui remplace l'etiquette.
+#[test]
+fn en_mode_daemon_l_etiquette_otee_de_la_route_du_tunnel_est_un_ecart_de_sa_categorie() {
+    for p in PROTOCOLES_TIERS {
+        let mut o = etiquete(wireguard_pose(), TABLE_WG);
+        for r in o.ipv4.routes.iter_mut().filter(|r| r.table == TABLE_WG) {
+            r.protocole = p;
+        }
+        assert_eq!(
+            ecarts_daemon(&plan_wg(), &o),
+            ["ipv4-tunnel-table"],
+            "protocole {p}"
+        );
+
+        let mut o = etiquete(coeur_pose(Some(COMPTE)), 2847);
+        for r in o.ipv6.routes.iter_mut().filter(|r| r.table == 2847) {
+            r.protocole = p;
+        }
+        assert_eq!(
+            ecarts_daemon(&plan_coeur(), &o),
+            ["ipv6-tunnel-table"],
+            "protocole {p}"
         );
     }
 }
@@ -816,6 +968,10 @@ fn deux_lectures_identiques_font_une_mesure() {
     let (r, appels) = rapport(vec![Ok(wireguard_pose()), Ok(wireguard_pose())], WG);
     assert_eq!((r.verdict, r.code(), appels), ("MATCH", 0, 2));
     assert!(r.live_kernel && r.collection_verified);
+    assert_eq!(
+        serde_json::to_value(&r).unwrap()["source"],
+        "kernel-rtnetlink-read-twice"
+    );
     assert_eq!(r.failed_input, None);
     assert_eq!(r.tunnel_interface_present, Some(true));
     let (r, _) = rapport(vec![Ok(systeme()), Ok(systeme())], WG);
@@ -1390,4 +1546,688 @@ fn le_lien_du_tunnel_se_reconnait_a_son_nom() {
     assert!(d[17..].iter().all(|o| *o == 0));
     let d = trames::requete_dump(trames::RTM_GETADDR, trames::AF_INET, 7, 42);
     assert_eq!(d.len(), 24);
+}
+
+/// Hors Linux, rien du noyau n'est lu: le rapport ne nomme aucune source
+/// (`source: null`), dans les deux modes, plutot que la collecte rtnetlink qui
+/// n'a pas eu lieu. Sous Linux, la source est la collecte (recettes
+/// `deux_lectures_identiques_font_une_mesure` et `protocole_daemon`).
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn hors_linux_aucune_source_n_est_nommee() {
+    let f = Fichier::nouveau(WG);
+    let r = verifier(&f.0);
+    assert_eq!((r.verdict, r.live_kernel), ("UNMEASURED", false));
+    let v = serde_json::to_value(&r).unwrap();
+    assert!(v["source"].is_null(), "intention: {v}");
+
+    let r = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap()
+        .block_on(verifier_declaration(r"\\.\pipe\bifrost-recette-absent"));
+    assert_eq!((r.verdict, r.live_kernel), ("UNMEASURED", false));
+    assert_eq!(r.failed_input, Some("daemon-declaration"));
+    let v = serde_json::to_value(&r).unwrap();
+    assert!(v["source"].is_null(), "daemon: {v}");
+    assert_eq!(v["expected_source"], "daemon-declared-active-routing-plan");
+}
+
+/// Les categories qui ne dependent pas de l'etiquette (regles tierces et routes
+/// avant le tunnel) sont vues en mode daemon exactement comme en mode intention:
+/// `exiger_etiquette` ne touche qu'aux regles du produit et a la route du
+/// tunnel.
+#[test]
+fn en_mode_daemon_les_categories_sans_etiquette_restent_vues() {
+    let mut o = etiquete(wireguard_pose(), TABLE_WG);
+    o.ipv4.regles.insert(1, regle(100, 254));
+    assert_eq!(ecarts_daemon(&plan_wg(), &o), ["ipv4-rules-before-tunnel"]);
+
+    let mut o = etiquete(wireguard_pose(), TABLE_WG);
+    o.ipv4.routes.push(par(
+        route(254, 1, v4([203, 0, 113, 0]), 24, PHYS),
+        v4([192, 0, 2, 1]),
+    ));
+    assert_eq!(ecarts_daemon(&plan_wg(), &o), ["ipv4-routes-before-tunnel"]);
+}
+
+// --- mode daemon: le protocole et la reconstruction du plan -----------------
+//
+// Linux seulement: un faux daemon ecoute sur un vrai socket Unix, sert des
+// trames `declaration-routage`, et le client y lit l'identite du serveur par
+// SO_PEERCRED. Le lecteur (`declaration::lire_routage`) et le protocole
+// (`declaration::encadrer`) sont communs a `prove nft/wfp` et ont leurs recettes
+// dans `preuve_nft_daemon`; ce qui est propre au routage - l'analyse stricte de
+// la reponse (`analyser_routage`) et la reconstruction du plan
+// (`plan_de_la_declaration`) - est ce que ces recettes-ci tiennent, sur le noyau
+// FABRIQUE des recettes ci-dessus. Le noyau REEL face a un vrai daemon est au
+// banc `e2e-linux.sh`, qui mesure la correspondance tunnel monte, encore apres
+// reprise, et l'absence de plan apres deconnexion.
+#[cfg(target_os = "linux")]
+mod protocole_daemon {
+    use super::{
+        COMPTE, MARQUE, PROTOCOLES_TIERS, TABLE_WG, coeur_pose, etiquete, posee_a, wireguard_pose,
+    };
+    use crate::declaration::{CLES_ROUTAGE, HORS_SCHEMA, Refus, lire_routage, lire_routage_avec};
+    use crate::preuve_routes::{Observation, verifier_declaration_avec};
+    use bifrost_ipc::ServerRequirement;
+    use bifrost_ipc::protocol::{
+        CheminRoutage, DECLARATION_ROUTAGE_VERSION, DeclarationRoutage, EtatRoutage, PlanRoutage,
+        Response,
+    };
+    use serde_json::{Value, json};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    const INSTANCE: &str = "0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    /// L'uid effectif de ce processus, comme `preuve_nft_daemon`: le faux daemon
+    /// tourne sous lui, et SO_PEERCRED rend precisement cet uid.
+    fn mon_uid() -> u32 {
+        std::fs::read_to_string("/proc/self/status")
+            .unwrap()
+            .lines()
+            .find_map(|l| l.strip_prefix("Uid:"))
+            .and_then(|champs| champs.split_whitespace().nth(1))
+            .and_then(|u| u.parse().ok())
+            .expect("uid effectif lisible dans /proc/self/status")
+    }
+
+    /// L'exigence des recettes de PROTOCOLE: le faux daemon a l'uid de la
+    /// recette. La regle de PRODUCTION (`lire_routage`, root) a sa propre recette
+    /// plus bas.
+    fn recette() -> ServerRequirement {
+        ServerRequirement::Uid(mon_uid())
+    }
+
+    /// Le plan que le peripherique declare, accorde aux fabriques du noyau:
+    /// interface `bfwg0`, marque et table de WireGuard, sans compte.
+    fn decl_wg() -> PlanRoutage {
+        PlanRoutage {
+            chemin: CheminRoutage::Wireguard,
+            interface: "bfwg0".into(),
+            fwmark: Some(MARQUE),
+            table: Some(TABLE_WG),
+            coeur_uid: None,
+        }
+    }
+
+    /// Le plan du coeur declare: interface `bftun0`, ni marque ni table, avec ou
+    /// sans compte.
+    fn decl_coeur(compte: Option<u32>) -> PlanRoutage {
+        PlanRoutage {
+            chemin: CheminRoutage::Coeur,
+            interface: "bftun0".into(),
+            fwmark: None,
+            table: None,
+            coeur_uid: compte,
+        }
+    }
+
+    /// La reponse telle que le VRAI daemon l'ecrit: le type du protocole et la
+    /// projection du plan, pas un JSON tape a la main. Si l'un des deux derive,
+    /// le lecteur strict le voit ici avant de le voir en production.
+    fn trame(application: u64, issue: EtatRoutage, plan: Option<PlanRoutage>) -> Vec<u8> {
+        let d = DeclarationRoutage {
+            schema_version: DECLARATION_ROUTAGE_VERSION,
+            instance: INSTANCE.into(),
+            application,
+            issue,
+            plan,
+        };
+        let mut v = serde_json::to_vec(&Response::DeclarationRoutage(Box::new(d))).unwrap();
+        v.push(b'\n');
+        v
+    }
+
+    fn posee_wg() -> Vec<u8> {
+        trame(4, EtatRoutage::Pose, Some(decl_wg()))
+    }
+
+    fn noyau_wg() -> Observation {
+        etiquete(wireguard_pose(), TABLE_WG)
+    }
+
+    fn modifier(trame: &[u8], cle: &str, valeur: Value) -> Vec<u8> {
+        let mut v: Value = serde_json::from_slice(trame).unwrap();
+        v[cle] = valeur;
+        let mut t = serde_json::to_vec(&v).unwrap();
+        t.push(b'\n');
+        t
+    }
+
+    /// Change un champ du sous-objet `plan`.
+    fn modifier_plan(trame: &[u8], cle: &str, valeur: Value) -> Vec<u8> {
+        let mut v: Value = serde_json::from_slice(trame).unwrap();
+        v["plan"][cle] = valeur;
+        let mut t = serde_json::to_vec(&v).unwrap();
+        t.push(b'\n');
+        t
+    }
+
+    /// Un faux daemon sur un vrai socket Unix: il sert ses trames dans l'ordre
+    /// (la derniere se repete), verifie que la requete est exactement celle du
+    /// protocole du routage, et compte les requetes.
+    struct FauxDaemon {
+        dossier: PathBuf,
+        socket: String,
+        requetes: Arc<AtomicUsize>,
+        tache: tokio::task::JoinHandle<()>,
+    }
+
+    impl FauxDaemon {
+        fn dossier() -> PathBuf {
+            static SUIVANT: AtomicUsize = AtomicUsize::new(0);
+            let n = SUIVANT.fetch_add(1, Ordering::SeqCst);
+            let d = std::env::temp_dir().join(format!("bfroute-{}-{n}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir(&d).unwrap();
+            d
+        }
+
+        fn demarrer(trames: Vec<Vec<u8>>) -> Self {
+            let dossier = Self::dossier();
+            let chemin = dossier.join("d.sock");
+            let ecoute = tokio::net::UnixListener::bind(&chemin).unwrap();
+            let requetes = Arc::new(AtomicUsize::new(0));
+            let compte = requetes.clone();
+            let tache = tokio::spawn(async move {
+                loop {
+                    let Ok((flux, _)) = ecoute.accept().await else {
+                        return;
+                    };
+                    let (lecture, mut ecriture) = tokio::io::split(flux);
+                    let mut ligne = String::new();
+                    if BufReader::new(lecture).read_line(&mut ligne).await.is_err() {
+                        continue;
+                    }
+                    assert_eq!(
+                        ligne, "{\"version\":1,\"command\":\"declaration-routage\"}\n",
+                        "requete inattendue"
+                    );
+                    let n = compte.fetch_add(1, Ordering::SeqCst);
+                    let t = &trames[n.min(trames.len() - 1)];
+                    let _ = ecriture.write_all(t).await;
+                    let _ = ecriture.shutdown().await;
+                }
+            });
+            Self {
+                socket: chemin.to_string_lossy().into_owned(),
+                dossier,
+                requetes,
+                tache,
+            }
+        }
+
+        fn requetes(&self) -> usize {
+            self.requetes.load(Ordering::SeqCst)
+        }
+    }
+
+    impl Drop for FauxDaemon {
+        fn drop(&mut self) {
+            self.tache.abort();
+            let _ = std::fs::remove_dir_all(&self.dossier);
+        }
+    }
+
+    async fn prouver(daemon: &FauxDaemon, noyau: &Observation) -> Value {
+        let socket = daemon.socket.clone();
+        let noyau = noyau.clone();
+        let noyau_ref = &noyau;
+        let r = verifier_declaration_avec(
+            || lire_routage_avec(&socket, Duration::from_secs(2), recette()),
+            |_i: &str| -> Result<Observation, &'static str> { Ok(noyau_ref.clone()) },
+        )
+        .await;
+        let code = r.code();
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(
+            code,
+            match v["verdict"].as_str().unwrap() {
+                "MATCH" => 0,
+                "MISMATCH" => 1,
+                _ => 2,
+            }
+        );
+        v
+    }
+
+    async fn sans_collecte(daemon: &FauxDaemon) -> Value {
+        let socket = daemon.socket.clone();
+        let r = verifier_declaration_avec(
+            || lire_routage_avec(&socket, Duration::from_secs(2), recette()),
+            |_i: &str| -> Result<Observation, &'static str> {
+                panic!("collecte interdite sans plan a comparer")
+            },
+        )
+        .await;
+        serde_json::to_value(&r).unwrap()
+    }
+
+    /// Rien de la declaration ne sort dans le rapport. Les horodatages sont
+    /// retires avant la recherche: un instant en millisecondes contient tot ou
+    /// tard `30303` ou `4242`, et la recette rougirait sur une coincidence.
+    fn rien_de_la_declaration(rapport: &Value) {
+        let mut sans_horloge = rapport.clone();
+        for cle in ["started_at_unix_ms", "completed_at_unix_ms", "duration_ms"] {
+            sans_horloge.as_object_mut().unwrap().remove(cle);
+        }
+        let texte = sans_horloge.to_string();
+        for interdit in ["bfwg0", "bftun0", "777001", "30303", "4242", INSTANCE] {
+            assert!(
+                !texte.contains(interdit),
+                "le rapport exporte {interdit}: {texte}"
+            );
+        }
+        for cle in ["application", "instance", "issue", "plan"] {
+            assert!(rapport.get(cle).is_none(), "cle exportee: {cle}");
+        }
+    }
+
+    /// Un plan declare, conforme au noyau etiquete du produit: correspondance,
+    /// dans les deux chemins. Le rapport dit d'ou vient l'attendu, et deux
+    /// requetes encadrent la collecte.
+    #[tokio::test]
+    async fn un_plan_declare_conforme_au_noyau_correspond() {
+        let daemon = FauxDaemon::demarrer(vec![posee_wg()]);
+        let r = prouver(&daemon, &noyau_wg()).await;
+        assert_eq!(r["verdict"], "MATCH", "{r}");
+        assert_eq!(r["schema_version"], 1);
+        assert_eq!(r["scope"], "linux-routing-comparison");
+        assert_eq!(r["expected_source"], "daemon-declared-active-routing-plan");
+        assert_eq!(r["source"], "kernel-rtnetlink-read-twice");
+        assert_eq!(r["live_kernel"], true);
+        assert_eq!(r["collection_verified"], true);
+        assert!(r["failed_input"].is_null());
+        assert_eq!(r["tunnel_interface_present"], true);
+        // Pas d'intention en mode daemon.
+        assert!(r["intention_schema_version"].is_null());
+        // Le nom de la regle, jamais sa valeur.
+        assert_eq!(r["daemon_identity"], "uid-peer-credentials");
+        assert_eq!(daemon.requetes(), 2, "N1 puis N2");
+        rien_de_la_declaration(&r);
+
+        // Le chemin du coeur, avec compte.
+        let daemon = FauxDaemon::demarrer(vec![trame(
+            4,
+            EtatRoutage::Pose,
+            Some(decl_coeur(Some(COMPTE))),
+        )]);
+        let r = prouver(&daemon, &etiquete(coeur_pose(Some(COMPTE)), 2847)).await;
+        assert_eq!(r["verdict"], "MATCH", "{r}");
+    }
+
+    /// Un plan declare different de ce que le noyau porte est un ecart, jamais
+    /// une correspondance: l'attendu est reconstruit du plan declare, pas du
+    /// noyau. Marque et table alterees seulement: le noyau fabrique de ces
+    /// recettes ignore le nom de l'interface, que seul un vrai noyau resout en
+    /// index. Le nom declare different a ete mesure hors depot, par un faux
+    /// daemon face a un vrai noyau: `bfwg1`/`bfwg9` et `bftun1`/`bftun9`
+    /// declares contre une pose de `bfwg0`/`bftun0` rendent l'ecart de la table
+    /// du tunnel dans les deux familles, jamais une correspondance.
+    #[tokio::test]
+    async fn un_plan_declare_different_du_noyau_est_un_ecart() {
+        let variantes: [fn(&mut PlanRoutage); 2] = [
+            |p: &mut PlanRoutage| p.fwmark = Some(MARQUE + 1),
+            |p: &mut PlanRoutage| p.table = Some(TABLE_WG + 1),
+        ];
+        for changer in variantes {
+            let mut plan = decl_wg();
+            changer(&mut plan);
+            let daemon = FauxDaemon::demarrer(vec![trame(4, EtatRoutage::Pose, Some(plan))]);
+            let r = prouver(&daemon, &noyau_wg()).await;
+            assert_eq!(r["verdict"], "MISMATCH", "{r}");
+            assert!(!r["differences"].as_array().unwrap().is_empty());
+            assert_eq!(daemon.requetes(), 2);
+            rien_de_la_declaration(&r);
+        }
+    }
+
+    /// Le cablage de l'exigence d'etiquette, par le chemin de PRODUCTION
+    /// (`verifier_declaration_avec`): un noyau qui porte le plan declare a
+    /// l'identique, mais a un autre originateur que l'etiquette du produit,
+    /// n'est pas la pose du daemon. Ecart des regles du produit et de la table
+    /// du tunnel, dans les deux familles et les deux chemins, jamais une
+    /// correspondance. Le comparateur seul a ses recettes plus haut; celle-ci
+    /// tient l'appel que le mode daemon en fait.
+    #[tokio::test]
+    async fn un_noyau_sans_l_etiquette_du_produit_n_est_pas_la_pose_du_daemon() {
+        let quatre = json!([
+            "ipv4-product-rules",
+            "ipv4-tunnel-table",
+            "ipv6-product-rules",
+            "ipv6-tunnel-table"
+        ]);
+        for p in PROTOCOLES_TIERS {
+            let daemon = FauxDaemon::demarrer(vec![posee_wg()]);
+            let r = prouver(&daemon, &posee_a(wireguard_pose(), TABLE_WG, p)).await;
+            assert_eq!(r["verdict"], "MISMATCH", "protocole {p}: {r}");
+            assert_eq!(r["differences"], quatre, "protocole {p}");
+            assert_eq!(r["collection_verified"], true, "protocole {p}");
+            assert_eq!(daemon.requetes(), 2, "protocole {p}");
+            rien_de_la_declaration(&r);
+
+            let daemon = FauxDaemon::demarrer(vec![trame(
+                4,
+                EtatRoutage::Pose,
+                Some(decl_coeur(Some(COMPTE))),
+            )]);
+            let r = prouver(&daemon, &posee_a(coeur_pose(Some(COMPTE)), 2847, p)).await;
+            assert_eq!(r["verdict"], "MISMATCH", "coeur, protocole {p}: {r}");
+            assert_eq!(r["differences"], quatre, "coeur, protocole {p}");
+            rien_de_la_declaration(&r);
+        }
+    }
+
+    /// La moindre difference entre N1 et N2 rend la collecte non attribuable,
+    /// meme quand le noyau est conforme a N1.
+    #[tokio::test]
+    async fn une_declaration_changee_pendant_la_collecte_n_est_pas_mesuree() {
+        let n1 = posee_wg();
+        for (nom, n2) in [
+            (
+                "numero suivant",
+                trame(5, EtatRoutage::Pose, Some(decl_wg())),
+            ),
+            (
+                "autre instance",
+                modifier(&n1, "instance", json!("f".repeat(48))),
+            ),
+            (
+                "autre plan",
+                modifier_plan(&n1, "table", json!(TABLE_WG + 1)),
+            ),
+            ("retrait", trame(5, EtatRoutage::Aucun, None)),
+        ] {
+            let daemon = FauxDaemon::demarrer(vec![n1.clone(), n2]);
+            let r = prouver(&daemon, &noyau_wg()).await;
+            assert_eq!(r["verdict"], "UNMEASURED", "{nom}: {r}");
+            assert_eq!(
+                r["reason"], "declaration du daemon modifiee pendant la collecte",
+                "{nom}"
+            );
+            assert_eq!(r["failed_input"], "daemon-declaration", "{nom}");
+            assert_eq!(daemon.requetes(), 2, "{nom}");
+            rien_de_la_declaration(&r);
+        }
+        // Illisible a N2: la raison le distingue d'un changement.
+        let daemon = FauxDaemon::demarrer(vec![n1, b"{\"result\"".to_vec()]);
+        let r = prouver(&daemon, &noyau_wg()).await;
+        assert_eq!(r["verdict"], "UNMEASURED");
+        assert_eq!(
+            r["reason"],
+            "declaration du daemon illisible ou injoignable apres la collecte"
+        );
+    }
+
+    #[tokio::test]
+    async fn un_daemon_absent_n_est_pas_mesure() {
+        let daemon = FauxDaemon::demarrer(vec![posee_wg()]);
+        let socket = format!("{}.absent", daemon.socket);
+        let r = verifier_declaration_avec(
+            || lire_routage_avec(&socket, Duration::from_secs(2), recette()),
+            |_i: &str| -> Result<Observation, &'static str> {
+                panic!("collecte interdite sans declaration")
+            },
+        )
+        .await;
+        let r = serde_json::to_value(&r).unwrap();
+        assert_eq!(r["verdict"], "UNMEASURED");
+        assert_eq!(r["reason"], "daemon injoignable");
+        assert_eq!(r["failed_input"], "daemon-declaration");
+        assert_eq!(r["live_kernel"], false);
+    }
+
+    /// Le refus du daemon (SO_PEERCRED) nomme l'appelant dans son message: jamais
+    /// recopie dans une raison.
+    #[tokio::test]
+    async fn un_acces_refuse_n_est_pas_mesure_et_ne_nomme_personne() {
+        let refus = b"{\"result\":\"error\",\"message\":\"acces refuse pour uid=1000 gid=1000 pid=42: ni root\"}\n";
+        let daemon = FauxDaemon::demarrer(vec![refus.to_vec()]);
+        let r = sans_collecte(&daemon).await;
+        assert_eq!(r["verdict"], "UNMEASURED");
+        assert_eq!(r["reason"], "acces au daemon refuse");
+        rien_de_la_declaration(&r);
+    }
+
+    /// L'analyse stricte de la reponse de routage: cle en trop, cle manquante,
+    /// doublon, sous-objet `plan` mal forme, incoherence entre l'etat et le plan.
+    /// Rien ne se mesure, et rien de la declaration ne sort.
+    #[tokio::test]
+    async fn une_reponse_hors_schema_n_est_pas_mesuree() {
+        let bonne = posee_wg();
+        let mut cas: Vec<(&str, Vec<u8>)> = vec![
+            ("sans fin de ligne", bonne[..bonne.len() - 1].to_vec()),
+            ("coupee", bonne[..bonne.len() / 2].to_vec()),
+            ("vide", Vec::new()),
+            ("tableau", b"[]\n".to_vec()),
+            ("erreur sans message", b"{\"result\":\"error\"}\n".to_vec()),
+        ];
+        // Cle en trop au niveau superieur.
+        let mut v: Value = serde_json::from_slice(&bonne).unwrap();
+        v.as_object_mut()
+            .unwrap()
+            .insert("en_trop".into(), json!(1));
+        let mut t = serde_json::to_vec(&v).unwrap();
+        t.push(b'\n');
+        cas.push(("cle en trop", t));
+        // Chaque cle superieure retiree.
+        for cle in CLES_ROUTAGE {
+            let mut v: Value = serde_json::from_slice(&bonne).unwrap();
+            v.as_object_mut().unwrap().remove(cle);
+            let mut t = serde_json::to_vec(&v).unwrap();
+            t.push(b'\n');
+            cas.push((cle, t));
+        }
+        // Doublon d'une cle superieure: `Unique` le refuse en profondeur.
+        let mut doublon = bonne[..bonne.len() - 2].to_vec();
+        doublon.extend_from_slice(b",\"issue\":\"pose\"}\n");
+        cas.push(("cle superieure dupliquee", doublon));
+        // Sous-objet plan: cle en trop, cle manquante.
+        let mut v: Value = serde_json::from_slice(&bonne).unwrap();
+        v["plan"]
+            .as_object_mut()
+            .unwrap()
+            .insert("x".into(), json!(1));
+        let mut t = serde_json::to_vec(&v).unwrap();
+        t.push(b'\n');
+        cas.push(("cle en trop dans le plan", t));
+        let mut v: Value = serde_json::from_slice(&bonne).unwrap();
+        v["plan"].as_object_mut().unwrap().remove("interface");
+        let mut t = serde_json::to_vec(&v).unwrap();
+        t.push(b'\n');
+        cas.push(("cle manquante dans le plan", t));
+        // Valeurs invalides et incoherences.
+        for (nom, cle, valeur) in [
+            ("version", "schema_version", json!(2)),
+            ("instance vide", "instance", json!("")),
+            (
+                "instance majuscule",
+                "instance",
+                json!(INSTANCE.to_uppercase()),
+            ),
+            ("numero negatif", "application", json!(-1)),
+            ("issue inconnue", "issue", json!("inconnue")),
+            ("pose sans plan", "plan", Value::Null),
+        ] {
+            cas.push((nom, modifier(&bonne, cle, valeur)));
+        }
+        // Numero flottant.
+        let flottant = String::from_utf8(bonne.clone())
+            .unwrap()
+            .replace("\"application\":4", "\"application\":4.0")
+            .into_bytes();
+        cas.push(("numero flottant", flottant));
+        // Plan incoherent avec son chemin: WireGuard sans marque, coeur avec
+        // marque.
+        cas.push((
+            "wireguard sans marque",
+            modifier_plan(&bonne, "fwmark", Value::Null),
+        ));
+        let coeur = trame(4, EtatRoutage::Pose, Some(decl_coeur(Some(COMPTE))));
+        cas.push((
+            "coeur avec marque",
+            modifier_plan(&coeur, "fwmark", json!(1)),
+        ));
+        // Etat sans plan portant un plan, et l'inverse.
+        cas.push((
+            "aucun avec plan",
+            modifier(
+                &trame(0, EtatRoutage::Aucun, None),
+                "plan",
+                serde_json::to_value(decl_wg()).unwrap(),
+            ),
+        ));
+        cas.push((
+            "pose au numero zero",
+            trame(0, EtatRoutage::Pose, Some(decl_wg())),
+        ));
+        for (nom, t) in cas {
+            let daemon = FauxDaemon::demarrer(vec![t]);
+            let r = sans_collecte(&daemon).await;
+            assert_eq!(r["verdict"], "UNMEASURED", "{nom}: {r}");
+            assert!(
+                [
+                    HORS_SCHEMA,
+                    "reponse du daemon tronquee ou illisible",
+                    "le daemon a refuse la demande",
+                ]
+                .contains(&r["reason"].as_str().unwrap()),
+                "{nom}: {r}"
+            );
+            assert_eq!(r["failed_input"], "daemon-declaration", "{nom}");
+            rien_de_la_declaration(&r);
+        }
+    }
+
+    /// Une declaration valide qui ne pose aucun plan (ou n'en pose pas de ce
+    /// type sur sa plateforme): rien n'est compare, la collecte n'a pas lieu.
+    #[tokio::test]
+    async fn sans_plan_pose_rien_n_est_compare() {
+        for (issue, application, raison) in [
+            (
+                EtatRoutage::Aucun,
+                0,
+                "aucun plan de routage pose par ce daemon: rien a comparer",
+            ),
+            (
+                EtatRoutage::NonApplicable,
+                0,
+                "le daemon ne pose pas de plan de routage de ce type sur sa plateforme (jumeau IP Helper hors perimetre)",
+            ),
+        ] {
+            let daemon = FauxDaemon::demarrer(vec![trame(application, issue, None)]);
+            let r = sans_collecte(&daemon).await;
+            assert_eq!(r["verdict"], "UNMEASURED", "{issue:?}");
+            assert_eq!(r["reason"], raison);
+            assert_eq!(r["live_kernel"], false);
+            assert_eq!(daemon.requetes(), 1, "pas de N2 sans plan");
+        }
+    }
+
+    /// Un plan hors du perimetre de la reference (interface `lo`, marque nulle,
+    /// table reservee au noyau, compte root) ne se compare jamais: la collecte
+    /// n'a meme pas lieu. La declaration passe l'analyse de schema, c'est la
+    /// reconstruction du plan qui refuse.
+    #[tokio::test]
+    async fn un_plan_hors_perimetre_n_est_jamais_une_correspondance() {
+        let mut lo = decl_wg();
+        lo.interface = "lo".into();
+        let mut marque_nulle = decl_wg();
+        marque_nulle.fwmark = Some(0);
+        let mut table_reservee = decl_wg();
+        table_reservee.table = Some(255);
+        let mut coeur_root = decl_coeur(Some(0));
+        coeur_root.interface = "bftun0".into();
+        for plan in [lo, marque_nulle, table_reservee, coeur_root] {
+            let daemon = FauxDaemon::demarrer(vec![trame(4, EtatRoutage::Pose, Some(plan))]);
+            let r = sans_collecte(&daemon).await;
+            assert_eq!(r["verdict"], "UNMEASURED", "{r}");
+            assert!(
+                r["reason"].as_str().unwrap().contains("hors perimetre"),
+                "{r}"
+            );
+            assert_eq!(r["live_kernel"], false);
+            assert_eq!(daemon.requetes(), 1);
+            rien_de_la_declaration(&r);
+        }
+    }
+
+    /// La lecture de PRODUCTION (`lire_routage`) exige un serveur root, comme
+    /// `prove nft/wfp`. Non root, il n'est pas admis et ne recoit rien; root, il
+    /// est admis (la regle dit qui ecoute, pas que c'est le daemon).
+    #[tokio::test]
+    async fn la_preuve_exige_un_serveur_root() {
+        let daemon = FauxDaemon::demarrer(vec![posee_wg()]);
+        let socket = daemon.socket.clone();
+        let noyau = noyau_wg();
+        let noyau_ref = &noyau;
+        let root = mon_uid() == 0;
+        let r = verifier_declaration_avec(
+            || lire_routage(&socket),
+            |_i: &str| -> Result<Observation, &'static str> {
+                assert!(root, "collecte interdite sans identite admise");
+                Ok(noyau_ref.clone())
+            },
+        )
+        .await;
+        let code = r.code();
+        let r = serde_json::to_value(&r).unwrap();
+        if root {
+            assert_eq!(r["verdict"], "MATCH", "{r}");
+            assert_eq!(r["daemon_identity"], "root-peer-credentials");
+            assert_eq!(daemon.requetes(), 2);
+        } else {
+            assert_eq!(code, 2);
+            assert_eq!(r["verdict"], "UNMEASURED", "{r}");
+            assert_eq!(r["reason"], "serveur de la declaration non privilegie");
+            assert_eq!(r["failed_input"], "daemon-identity");
+            assert!(r["daemon_identity"].is_null(), "{r}");
+            assert_eq!(r["live_kernel"], false);
+            assert_eq!(
+                daemon.requetes(),
+                0,
+                "rien n'est envoye a un serveur refuse"
+            );
+        }
+        rien_de_la_declaration(&r);
+    }
+
+    /// L'identite se reverifie a N2: un serveur admis pour N1 et refuse pour N2
+    /// ne laisse rien comparer, et le rapport ne garde pas la regle de N1.
+    #[tokio::test]
+    async fn une_identite_refusee_apres_la_collecte_n_est_pas_mesuree() {
+        let d = DeclarationRoutage {
+            schema_version: DECLARATION_ROUTAGE_VERSION,
+            instance: INSTANCE.into(),
+            application: 4,
+            issue: EtatRoutage::Pose,
+            plan: Some(decl_wg()),
+        };
+        let noyau = noyau_wg();
+        let noyau_ref = &noyau;
+        let mut lectures = vec![
+            Err(Refus::Identite(
+                "identite du serveur de la declaration illisible",
+            )),
+            Ok((d, "root-peer-credentials")),
+        ];
+        let r = verifier_declaration_avec(
+            || std::future::ready(lectures.pop().unwrap()),
+            |_i: &str| -> Result<Observation, &'static str> { Ok(noyau_ref.clone()) },
+        )
+        .await;
+        let r = serde_json::to_value(&r).unwrap();
+        assert_eq!(r["verdict"], "UNMEASURED", "{r}");
+        assert_eq!(
+            r["reason"],
+            "identite du serveur de la declaration illisible"
+        );
+        assert_eq!(r["failed_input"], "daemon-identity");
+        assert!(r["daemon_identity"].is_null(), "{r}");
+        assert_eq!(r["live_kernel"], true);
+    }
 }

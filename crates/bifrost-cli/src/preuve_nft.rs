@@ -566,14 +566,14 @@ where
         let (a, b) = crate::declaration::encadrer(
             &mut r,
             lire_declaration,
-            &PERIMETRE,
-            async move |r: &mut Rapport, politique: &Value| {
+            |d| crate::declaration::politique_posee(d, &PERIMETRE).cloned(),
+            async move |r: &mut Rapport, politique: Value| {
                 // Le meme lecteur strict que `--politique`: la declaration ne
                 // passe pas par un chemin plus indulgent que celui d'un
                 // fichier. Ce qu'il refuse (interface `lo`, UID root ou
                 // partage, DNS hors boucle locale avec un resolveur) est hors
                 // du perimetre de la reference: NON MESURE.
-                let p = bifrost_firewall::politique_nft::Politique::lire(politique.clone())
+                let p = bifrost_firewall::politique_nft::Politique::lire(politique)
                     .map_err(|_| "politique declaree hors du perimetre de la reference nft v1")?;
                 let octets =
                     serde_json::to_vec(&p.reference()?).map_err(|_| "reference impossible")?;

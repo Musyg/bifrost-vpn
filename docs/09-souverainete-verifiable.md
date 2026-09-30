@@ -615,18 +615,33 @@ Les deux limites nommees sont mesurees: MATCH, et le temoin sort par le lien.
 Une regle qui bascule pendant la collecte rend UNMEASURED: le banc exige au
 moins une collecte instable en cent essais, et jamais une correspondance.
 
-Mode face au daemon: non livre. `DeclarationPareFeu` a sept cles lues
-strictement et ne porte pas le plan de routage. Ce plan est pose par le
-peripherique du tunnel, pas par le moteur que le superviseur declare.
-
-Tranche suivante:
-- une commande IPC distincte, avec le meme lecteur (identite, N1, mesure, N2);
-- le plan rendu par le peripherique qui l'a pose;
-- un banc qui isole le DNS, parce que monter un tunnel touche le DNS de l'hote.
+Mode face au daemon, livre. `prove routes --politique-daemon --actif` prend
+pour attendu le plan de routage que le PERIPHERIQUE DU TUNNEL declare avoir
+pose, par une commande IPC distincte (`declaration-routage`, six cles, sa
+propre version), lue par le meme lecteur que `prove nft` et `prove wfp`
+(identite du serveur, N1, mesure encadree, N2), avec la limite de ce lecteur
+ecrite en D1b: sous Linux le serveur est un processus root, rien n'etablit
+que c'est le daemon. Le plan declare est une seconde
+evaluation de la meme fonction pure (`netcfg::plan`, `aiguillage::plan`) sur la
+meme configuration, retenue par le peripherique apres la derniere commande
+reussie de sa pose: egal par construction au plan dont les commandes sont
+tirees, ce n'est pas une capture des commandes elles-memes. Le superviseur le
+retient a chaque montage et demontage (`TunnelDevice::routage_pose`), sans rien
+recalculer d'un profil, et la preuve le reconstruit au meme constructeur que le
+produit. En mode daemon, l'etiquette du produit (`protocol`/`proto 177`) est
+EXIGEE sur les regles et la route du plan: un daemon reel pose avec elle, donc
+une regle ou une route identique a un autre originateur n'est pas la sienne; le
+mode `--intention` l'ignore. Rien pose: le rapport le dit (issue `aucun`), sans
+comparer. Sous Windows, la commande et la preuve rendent un non applicable nomme
+sans lecture (le jumeau IP Helper est hors de cette tranche); hors Linux, ou
+rien du noyau n'est lu, le rapport des deux modes porte `source: null`. Banc
+jetable a cote d'un daemon reel (`e2e-linux.sh`): correspondance des deux
+familles tunnel monte, encore apres reprise, et aucun plan a comparer apres
+deconnexion, l'hote inchange.
 
 D1c reste incomplet. Ne sont pas livres: les resolveurs effectifs, les
-exceptions DNS, la provenance, le mode face au daemon, et le jumeau Windows
-(table de routage IP Helper).
+exceptions DNS, la provenance, et le jumeau Windows (table de routage IP
+Helper).
 
 ## D2 - Distribution reproductible et mises a jour verifiables
 
