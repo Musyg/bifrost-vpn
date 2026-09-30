@@ -19,23 +19,29 @@ pub mod ffi;
 /// l'identite du filtre.
 pub use ffi::identite_courante;
 
+/// Lecture seule du moteur, pour `prove wfp`: un instantane coherent, sans
+/// aucun appel qui ecrive. Voir l'en-tete du module.
+pub mod lecture;
+
+use std::cell::RefCell;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 
 use bifrost_core::demarrage::PolitiqueDemarrage;
-use bifrost_core::ports::{FirewallPolicy, KillSwitch};
+use bifrost_core::ports::{EnvironnementMoteur, FirewallPolicy, KillSwitch};
 use bifrost_core::{Error, Result};
 use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::*;
 use windows_sys::core::GUID;
 
-use crate::wfp_plan::{self, Action, Condition, FilterSpec, Identity, Layer};
+use crate::wfp_plan::{self, Action, Champ, Correspondance, FilterSpec, Identity, Layer, Valeur};
 use ffi::{Engine, Storage};
 
 /// Identifiants stables des objets Bifrost. Stables parce qu'ils servent aussi
 /// a retrouver et nettoyer les objets d'un daemon precedent qui aurait
-/// disparu sans desarmer.
-const PROVIDER_KEY: GUID = GUID::from_u128(0x0bd4f5a1_6c1e_4f8d_9a3e_2f7b41c9e510);
-const SUBLAYER_KEY: GUID = GUID::from_u128(0x0bd4f5a1_6c1e_4f8d_9a3e_2f7b41c9e511);
+/// disparu sans desarmer. La valeur vit dans le plan pur, que la preuve lit
+/// aussi.
+const PROVIDER_KEY: GUID = GUID::from_u128(wfp_plan::FOURNISSEUR);
+const SUBLAYER_KEY: GUID = GUID::from_u128(wfp_plan::SOUS_COUCHE);
 
 /// Le LUID de l'interface n'est PAS memorise ici. Il vit dans la politique,
 /// que le superviseur complete a partir du device au moment d'armer. Le garder
@@ -49,7 +55,12 @@ pub struct WfpKillSwitch {
     /// champ `FilterRTID`. Sans eux, un blocage lu dans le journal ne peut pas
     /// etre attribue, et le journal est plein de blocages du pare-feu Windows
     /// qu'on prendrait pour les siens.
-    derniers_filtres: std::cell::RefCell<Vec<(String, u64)>>,
+    derniers_filtres: RefCell<Vec<(String, u64)>>,
+    /// Ce que la derniere pose REUSSIE a lu de l'hote: le binaire autorise,
+    /// l'identite retenue et le LUID resolu. Rendu par
+    /// [`KillSwitch::environnement`], pour que la declaration du daemon dise ce
+    /// qui a ete remis a WFP et pas seulement la politique recue.
+    environnement: RefCell<Option<EnvironnementMoteur>>,
 }
 
 impl WfpKillSwitch {
@@ -61,7 +72,8 @@ impl WfpKillSwitch {
         })?;
         Ok(Self {
             daemon_exe,
-            derniers_filtres: std::cell::RefCell::new(Vec::new()),
+            derniers_filtres: RefCell::new(Vec::new()),
+            environnement: RefCell::new(None),
         })
     }
 
@@ -418,21 +430,24 @@ impl WfpKillSwitch {
         layer: Layer,
         cible: &Cible,
     ) -> Result<u64> {
+        // La traduction est PURE et partagee avec `prove wfp`: ce qui part au
+        // moteur ici est exactement ce que la preuve attend de lui.
+        let filtre = wfp_plan::filtre_wfp(spec, layer)?;
         let mut storage = Storage::default();
-        let conditions = self.build_conditions(&mut storage, spec, layer)?;
+        let conditions = build_conditions(&mut storage, &filtre)?;
 
-        let name_ptr = storage.name(&format!("{} ({})", spec.name, layer.name()));
+        let name_ptr = storage.name(&filtre.nom);
         let desc_ptr = storage.name(&format!(
             "Bifrost: {} au poids {}",
-            match spec.action {
+            match filtre.action {
                 Action::Permit => "autorisation",
                 Action::Block => "blocage",
             },
-            spec.weight
+            filtre.poids
         ));
 
         let mut flags: FWPM_FILTER_FLAGS = cible.drapeaux;
-        if spec.hard {
+        if filtre.veto {
             // Veto: empeche un hard permit d'un sublayer concurrent (antivirus,
             // autre VPN) d'ecraser ce blocage.
             flags |= FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT;
@@ -447,9 +462,9 @@ impl WfpKillSwitch {
             },
             flags,
             providerKey: &mut provider,
-            layerKey: layer_key(layer),
+            layerKey: layer_key(filtre.couche),
             subLayerKey: cible.sublayer,
-            weight: ffi::filter_weight(spec.weight),
+            weight: ffi::filter_weight(filtre.poids),
             numFilterConditions: conditions.len() as u32,
             filterCondition: if conditions.is_empty() {
                 std::ptr::null_mut()
@@ -457,7 +472,7 @@ impl WfpKillSwitch {
                 conditions.as_ptr() as *mut FWPM_FILTER_CONDITION0
             },
             action: FWPM_ACTION0 {
-                r#type: match spec.action {
+                r#type: match filtre.action {
                     Action::Permit => FWP_ACTION_PERMIT,
                     Action::Block => FWP_ACTION_BLOCK,
                 },
@@ -480,80 +495,68 @@ impl WfpKillSwitch {
             Error::Firewall(format!("filtre '{}' sur {}: {e}", spec.name, layer.name()))
         })
     }
+}
 
-    /// Traduit les conditions du plan en structures WFP.
-    ///
-    /// Fail-closed: une condition que la couche ne peut pas porter fait
-    /// ECHOUER la pose, et le compte des conditions posees doit egaler celui
-    /// du plan. Jusqu'au 30/09/2026, une adresse de l'autre famille etait
-    /// ecartee en silence et le filtre partait au moteur sans elle, donc plus
-    /// large que le plan: c'est ainsi que `permit-dns-to-local-resolver`
-    /// autorisait le :53 vers toute destination sur la couche de l'autre
-    /// famille, au-dessus de `block-dns`.
-    fn build_conditions(
-        &self,
-        storage: &mut Storage,
-        spec: &FilterSpec,
-        layer: Layer,
-    ) -> Result<Vec<FWPM_FILTER_CONDITION0>> {
-        let mut out = Vec::new();
-        for condition in &spec.conditions {
-            wfp_plan::condition_posable(spec, condition, layer)?;
-            let (field, value) = match condition {
-                Condition::AppId(path) => {
-                    let blob = storage.app_id(path)?;
-                    (FWPM_CONDITION_ALE_APP_ID, ffi::cond_blob(blob))
-                }
-                Condition::UserId(identity) => {
-                    let sd = storage.user_id(identity)?;
-                    (FWPM_CONDITION_ALE_USER_ID, ffi::cond_sd(sd))
-                }
-                Condition::Protocol(p) => (FWPM_CONDITION_IP_PROTOCOL, ffi::cond_u8(*p)),
-                // Pour ICMP, WFP fait porter le type par le champ du port
-                // local. Ce n'est pas une astuce: c'est la definition de
-                // FWPM_CONDITION_ICMP_TYPE, qui partage le meme identifiant.
-                Condition::LocalPort(p) | Condition::IcmpType(p) => {
-                    (FWPM_CONDITION_IP_LOCAL_PORT, ffi::cond_u16(*p))
-                }
-                Condition::RemotePort(p) => (FWPM_CONDITION_IP_REMOTE_PORT, ffi::cond_u16(*p)),
-                Condition::RemoteAddrV4 { addr, prefix } => {
-                    let mask = prefix_mask_v4(*prefix);
-                    let ptr = storage.v4(u32::from(*addr), mask);
-                    (FWPM_CONDITION_IP_REMOTE_ADDRESS, ffi::cond_v4(ptr))
-                }
-                Condition::RemoteAddrV6 { addr, prefix } => {
-                    let ptr = storage.v6(addr.octets(), *prefix);
-                    (FWPM_CONDITION_IP_REMOTE_ADDRESS, ffi::cond_v6(ptr))
-                }
-                Condition::LocalInterface(luid) => {
-                    let ptr = storage.u64(*luid);
-                    (FWPM_CONDITION_IP_LOCAL_INTERFACE, ffi::cond_u64(ptr))
-                }
-                Condition::Loopback => (
-                    FWPM_CONDITION_FLAGS,
-                    ffi::cond_u32(FWP_CONDITION_FLAG_IS_LOOPBACK),
-                ),
-            };
-            out.push(FWPM_FILTER_CONDITION0 {
-                fieldKey: field,
-                matchType: match condition {
-                    Condition::Loopback => FWP_MATCH_FLAGS_ALL_SET,
-                    _ => FWP_MATCH_EQUAL,
-                },
-                conditionValue: value,
-            });
-        }
+/// Remet les conditions d'un filtre traduit a WFP.
+///
+/// Rien n'y est decide: le champ, la correspondance et la valeur viennent de
+/// [`wfp_plan::filtre_wfp`]. Seules les deux valeurs qui dependent de l'hote
+/// sont calculees ici, parce qu'elles ne peuvent l'etre que sous Windows:
+/// l'identifiant d'application (`FwpmGetAppIdFromFileName0` ouvre le fichier)
+/// et le descripteur de securite de l'identite. `storage` garde vivant tout ce
+/// que les conditions pointent jusqu'a la fin de `FwpmFilterAdd0`.
+fn build_conditions(
+    storage: &mut Storage,
+    filtre: &wfp_plan::FiltreWfp,
+) -> Result<Vec<FWPM_FILTER_CONDITION0>> {
+    let mut out = Vec::with_capacity(filtre.conditions.len());
+    for condition in &filtre.conditions {
+        let value = match &condition.valeur {
+            Valeur::U8(v) => ffi::cond_u8(*v),
+            Valeur::U16(v) => ffi::cond_u16(*v),
+            Valeur::U32(v) => ffi::cond_u32(*v),
+            Valeur::U64(v) => ffi::cond_u64(storage.u64(*v)),
+            Valeur::V4 { adresse, masque } => ffi::cond_v4(storage.v4(*adresse, *masque)),
+            Valeur::V6 { adresse, prefixe } => ffi::cond_v6(storage.v6(*adresse, *prefixe)),
+            Valeur::Application(chemin) => ffi::cond_blob(storage.app_id(chemin)?),
+            Valeur::Identite(identite) => ffi::cond_sd(storage.user_id(identite)?),
+        };
+        out.push(FWPM_FILTER_CONDITION0 {
+            fieldKey: champ_key(condition.champ),
+            matchType: match condition.correspondance {
+                Correspondance::Egale => FWP_MATCH_EQUAL,
+                Correspondance::TousLesBits => FWP_MATCH_FLAGS_ALL_SET,
+            },
+            conditionValue: value,
+        });
+    }
+    Ok(out)
+}
 
-        // Le compte, et pas seulement le vide: un filtre qui perd UNE condition
-        // est deja plus large que le plan. Couvre l'ancien refus du filtre
-        // devenu inconditionnel.
-        wfp_plan::toutes_les_conditions_posees(spec, layer, out.len())?;
-        Ok(out)
+/// Le `GUID` de plateforme de chaque champ. La recette
+/// `les_cles_pures_sont_celles_de_la_plateforme` garde l'egalite avec
+/// [`Champ::cle`], que la preuve emploie.
+fn champ_key(champ: Champ) -> GUID {
+    match champ {
+        Champ::AppId => FWPM_CONDITION_ALE_APP_ID,
+        Champ::UserId => FWPM_CONDITION_ALE_USER_ID,
+        Champ::Protocole => FWPM_CONDITION_IP_PROTOCOL,
+        // Pour ICMP, WFP fait porter le type par le champ du port local. Ce
+        // n'est pas une astuce: c'est la definition de
+        // FWPM_CONDITION_ICMP_TYPE, qui partage le meme identifiant.
+        Champ::PortLocal => FWPM_CONDITION_IP_LOCAL_PORT,
+        Champ::PortDistant => FWPM_CONDITION_IP_REMOTE_PORT,
+        Champ::AdresseDistante => FWPM_CONDITION_IP_REMOTE_ADDRESS,
+        Champ::InterfaceLocale => FWPM_CONDITION_IP_LOCAL_INTERFACE,
+        Champ::Drapeaux => FWPM_CONDITION_FLAGS,
     }
 }
 
 impl KillSwitch for WfpKillSwitch {
     fn engage(&mut self, policy: &FirewallPolicy) -> Result<()> {
+        // Quoi qu'il arrive ensuite, l'environnement d'une pose precedente ne
+        // decrit plus rien: un echec ne doit pas le laisser declarer.
+        *self.environnement.borrow_mut() = None;
         if !policy.dns_resolver.is_loopback() {
             return Err(Error::Firewall(format!(
                 "resolveur DNS hors loopback: {}",
@@ -561,9 +564,19 @@ impl KillSwitch for WfpKillSwitch {
             )));
         }
         let luid = self.resolve_luid(policy)?;
+        // L'identite que `Identity::Current` designera dans chaque condition
+        // `ALE_USER_ID` de cette pose: celle du jeton de ce processus, qui ne
+        // change pas pendant sa vie. Lue AVANT la pose pour qu'un echec de
+        // lecture n'arrive pas apres des filtres deja poses.
+        let identite = identite_courante()?.0;
         let filters = wfp_plan::plan(policy, self.daemon_exe.clone(), luid);
         let engine = Engine::open()?;
         self.install(&engine, &filters)?;
+        *self.environnement.borrow_mut() = Some(EnvironnementMoteur {
+            executable: self.daemon_exe.clone(),
+            identite,
+            interface: luid,
+        });
 
         tracing::info!(
             filtres = filters.len(),
@@ -575,6 +588,7 @@ impl KillSwitch for WfpKillSwitch {
     }
 
     fn disengage(&mut self) -> Result<()> {
+        *self.environnement.borrow_mut() = None;
         let engine = Engine::open()?;
         let retires = engine.transaction(|| purge(&engine))?;
         tracing::info!(filtres = retires, "kill switch WFP desarme");
@@ -587,7 +601,11 @@ impl KillSwitch for WfpKillSwitch {
     }
 
     fn backend(&self) -> &'static str {
-        "wfp"
+        crate::politique_wfp::MOTEUR
+    }
+
+    fn environnement(&self) -> Option<EnvironnementMoteur> {
+        self.environnement.borrow().clone()
     }
 }
 
@@ -753,15 +771,6 @@ fn layer_key(layer: Layer) -> GUID {
     }
 }
 
-/// Masque IPv4 en ordre hote, tel que l'attend `FWP_V4_ADDR_AND_MASK`.
-fn prefix_mask_v4(prefix: u8) -> u32 {
-    if prefix == 0 {
-        0
-    } else {
-        u32::MAX << (32 - prefix.min(32))
-    }
-}
-
 /// Resout le LUID d'une interface a partir de son nom (alias NetAdapter).
 ///
 /// Publique pour que l'autotest puisse confronter ce que cette resolution rend
@@ -835,13 +844,81 @@ mod tests {
         }
     }
 
+    /// Les identifiants et codes que le plan pur recopie pour la preuve sont
+    /// ceux de la plateforme. Une valeur recopiee de travers ferait chercher
+    /// par `prove wfp` un champ ou une couche que le produit ne pose pas: une
+    /// machine conforme rendrait un ecart, ou pire un filtre tiers passerait
+    /// inapercu parce que sa couche ne serait pas reconnue.
     #[test]
-    fn les_masques_ipv4_correspondent_aux_prefixes() {
-        assert_eq!(prefix_mask_v4(0), 0);
-        assert_eq!(prefix_mask_v4(8), 0xff00_0000);
-        assert_eq!(prefix_mask_v4(16), 0xffff_0000);
-        assert_eq!(prefix_mask_v4(24), 0xffff_ff00);
-        assert_eq!(prefix_mask_v4(32), 0xffff_ffff);
+    fn les_cles_pures_sont_celles_de_la_plateforme() {
+        use crate::wfp_plan::cles;
+        let pur = |v: u128| guid_parts(&GUID::from_u128(v));
+        for couche in Layer::ALL {
+            assert_eq!(
+                pur(couche.cle()),
+                guid_parts(&layer_key(couche)),
+                "{}",
+                couche.name()
+            );
+        }
+        for champ in [
+            Champ::AppId,
+            Champ::UserId,
+            Champ::Protocole,
+            Champ::PortLocal,
+            Champ::PortDistant,
+            Champ::AdresseDistante,
+            Champ::InterfaceLocale,
+            Champ::Drapeaux,
+        ] {
+            assert_eq!(pur(champ.cle()), guid_parts(&champ_key(champ)), "{champ:?}");
+        }
+        assert_eq!(pur(wfp_plan::FOURNISSEUR), guid_parts(&PROVIDER_KEY));
+        assert_eq!(pur(wfp_plan::SOUS_COUCHE), guid_parts(&SUBLAYER_KEY));
+        assert_eq!(
+            cles::CORRESPONDANCE_EGALE,
+            FWP_MATCH_EQUAL as u32,
+            "FWP_MATCH_EQUAL"
+        );
+        assert_eq!(
+            cles::CORRESPONDANCE_TOUS_LES_BITS,
+            FWP_MATCH_FLAGS_ALL_SET as u32
+        );
+        assert_eq!(cles::ACTION_BLOCAGE, FWP_ACTION_BLOCK);
+        assert_eq!(cles::ACTION_AUTORISATION, FWP_ACTION_PERMIT);
+        assert_eq!(cles::ACTION_APPEL_TERMINAL, FWP_ACTION_CALLOUT_TERMINATING);
+        assert_eq!(cles::ACTION_APPEL_INSPECTION, FWP_ACTION_CALLOUT_INSPECTION);
+        assert_eq!(cles::ACTION_APPEL_INCONNU, FWP_ACTION_CALLOUT_UNKNOWN);
+        assert_eq!(cles::DRAPEAU_PERSISTANT, FWPM_FILTER_FLAG_PERSISTENT);
+        assert_eq!(cles::DRAPEAU_DEMARRAGE, FWPM_FILTER_FLAG_BOOTTIME);
+        assert_eq!(cles::DRAPEAU_VETO, FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT);
+        assert_eq!(cles::DRAPEAU_DESACTIVE, FWPM_FILTER_FLAG_DISABLED);
+        assert_eq!(cles::DRAPEAU_INDEXE, FWPM_FILTER_FLAG_INDEXED);
+        assert_eq!(cles::DRAPEAU_BOUCLE, FWP_CONDITION_FLAG_IS_LOOPBACK);
+        assert_eq!(cles::DROIT_DE_CORRESPONDRE, FWP_ACTRL_MATCH_FILTER);
+    }
+
+    /// Un kill switch neuf ne declare aucun environnement, et un armement
+    /// refuse avant toute pose n'en declare pas davantage: rien n'a ete remis
+    /// a WFP, et une declaration qui dirait le contraire servirait d'attendu a
+    /// une preuve.
+    #[test]
+    fn sans_pose_reussie_aucun_environnement_n_est_declare() {
+        let mut k = ks();
+        assert_eq!(k.environnement(), None);
+        let mut p = policy();
+        p.dns_resolver = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
+        *k.environnement.borrow_mut() = Some(EnvironnementMoteur {
+            executable: PathBuf::from("ancien.exe"),
+            identite: "S-1-5-18".into(),
+            interface: None,
+        });
+        assert!(k.engage(&p).is_err());
+        assert_eq!(
+            k.environnement(),
+            None,
+            "un refus a laisse l'environnement d'une pose precedente"
+        );
     }
 
     #[test]
@@ -868,7 +945,8 @@ mod tests {
     fn ks() -> WfpKillSwitch {
         WfpKillSwitch {
             daemon_exe: PathBuf::from("x.exe"),
-            derniers_filtres: std::cell::RefCell::new(Vec::new()),
+            derniers_filtres: RefCell::new(Vec::new()),
+            environnement: RefCell::new(None),
         }
     }
 
@@ -886,104 +964,6 @@ mod tests {
             resolveur_sid: None,
             resolveur_embarque: false,
         }
-    }
-
-    /// Le filtre qui a fui, rendu a la traduction tel que le plan le produisait
-    /// avant le 30/09/2026: une adresse d'une famille, posee sur une couche de
-    /// l'autre. La traduction doit REFUSER, et le dire, au lieu d'ecarter
-    /// l'adresse et de poser "port 53 vers toute destination".
-    ///
-    /// N'ouvre pas le moteur: la traduction est executable sans elevation.
-    #[test]
-    fn une_condition_inapplicable_fait_echouer_la_traduction() {
-        let cas = [
-            (
-                Condition::RemoteAddrV4 {
-                    addr: Ipv4Addr::LOCALHOST,
-                    prefix: 32,
-                },
-                Layer::AuthConnectV6,
-                Layer::AuthConnectV4,
-            ),
-            (
-                Condition::RemoteAddrV6 {
-                    addr: std::net::Ipv6Addr::LOCALHOST,
-                    prefix: 128,
-                },
-                Layer::AuthConnectV4,
-                Layer::AuthConnectV6,
-            ),
-        ];
-        for (adresse, etrangere, sienne) in cas {
-            let spec = FilterSpec {
-                name: "permit-dns-to-local-resolver".into(),
-                layers: vec![sienne, etrangere],
-                weight: 15,
-                action: Action::Permit,
-                hard: false,
-                conditions: vec![
-                    adresse,
-                    Condition::RemotePort(53),
-                    Condition::Protocol(wfp_plan::IPPROTO_UDP),
-                    Condition::Protocol(wfp_plan::IPPROTO_TCP),
-                ],
-            };
-            let mut storage = Storage::default();
-            let e = match ks().build_conditions(&mut storage, &spec, etrangere) {
-                Ok(posees) => panic!(
-                    "{} condition(s) posee(s) sur {} pour {} demandee(s): le filtre part au \
-                     moteur sans son adresse",
-                    posees.len(),
-                    etrangere.name(),
-                    spec.conditions.len()
-                ),
-                Err(e) => e.to_string(),
-            };
-            assert!(
-                e.contains(&format!("inapplicable a {}", etrangere.name())),
-                "le refus doit nommer la condition et la couche: {e}"
-            );
-            let mut storage = Storage::default();
-            let posees = ks()
-                .build_conditions(&mut storage, &spec, sienne)
-                .expect("sur sa famille, la meme condition se pose");
-            assert_eq!(posees.len(), spec.conditions.len());
-        }
-    }
-
-    /// Le compte, sur la VRAIE traduction et pour tous les plans du crate:
-    /// chaque condition demandee est posee, sur chaque couche.
-    ///
-    /// Les chemins d'application sont remplaces par celui de ce binaire:
-    /// `FwpmGetAppIdFromFileName0` ouvre le fichier, et un chemin de
-    /// reference n'existe pas sur l'hote de la recette. Le compte n'en depend
-    /// pas.
-    #[test]
-    fn la_traduction_pose_toutes_les_conditions_de_chaque_plan() {
-        let exe = std::env::current_exe().expect("binaire de la recette");
-        let mut vus = 0usize;
-        for mut spec in wfp_plan::plans_de_reference() {
-            for c in spec.conditions.iter_mut() {
-                if let Condition::AppId(chemin) = c {
-                    *chemin = exe.clone();
-                }
-            }
-            for couche in spec.layers.clone() {
-                let mut storage = Storage::default();
-                let posees = ks()
-                    .build_conditions(&mut storage, &spec, couche)
-                    .unwrap_or_else(|e| panic!("{} sur {}: {e}", spec.name, couche.name()));
-                assert_eq!(
-                    posees.len(),
-                    spec.conditions.len(),
-                    "{} sur {}",
-                    spec.name,
-                    couche.name()
-                );
-                vus += 1;
-            }
-        }
-        assert!(vus > 1000, "matrice trop maigre: {vus} filtres traduits");
     }
 
     /// Un resolveur routable ouvrirait un canal :53 vers l'exterieur.

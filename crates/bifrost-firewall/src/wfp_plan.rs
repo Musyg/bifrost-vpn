@@ -828,6 +828,266 @@ fn lan_filters() -> Vec<FilterSpec> {
     ]
 }
 
+/// Fournisseur du kill switch, en donnee pure.
+///
+/// `windows::mod` en fait son `GUID`, et la preuve `prove wfp` s'en sert pour
+/// reconnaitre les objets Bifrost dans un instantane du moteur. Une seule
+/// source: une preuve qui chercherait un fournisseur que le produit ne pose
+/// plus rendrait "regle retiree" sur une machine conforme.
+pub const FOURNISSEUR: u128 = 0x0bd4f5a1_6c1e_4f8d_9a3e_2f7b41c9e510;
+/// Sous-couche du kill switch, meme raison que [`FOURNISSEUR`].
+pub const SOUS_COUCHE: u128 = 0x0bd4f5a1_6c1e_4f8d_9a3e_2f7b41c9e511;
+
+/// Les identifiants et codes WFP qu'emploie la traduction, en donnee pure.
+///
+/// Recopies des en-tetes `fwpmtypes.h`/`fwpmu.h` tels que `windows-sys` les
+/// publie, pour que la traduction et la preuve compilent et se testent sous
+/// Linux. Une recette Windows (`windows::tests`) les compare un a un aux
+/// constantes de la plateforme: une valeur recopiee de travers ne resterait
+/// pas verte.
+pub mod cles {
+    pub const COUCHE_CONNECT_V4: u128 = 0xc38d57d1_05a7_4c33_904f_7fbceee60e82;
+    pub const COUCHE_CONNECT_V6: u128 = 0x4a72393b_319f_44bc_84c3_ba54dcb3b6b4;
+    pub const COUCHE_RECV_ACCEPT_V4: u128 = 0xe1cd9fe7_f4b5_4273_96c0_592e487b8650;
+    pub const COUCHE_RECV_ACCEPT_V6: u128 = 0xa3b42c97_9f04_4672_b87e_cee9c483257f;
+
+    pub const CHAMP_APP_ID: u128 = 0xd78e1e87_8644_4ea5_9437_d809ecefc971;
+    pub const CHAMP_USER_ID: u128 = 0xaf043a0a_b34d_4f86_979c_c90371af6e66;
+    pub const CHAMP_PROTOCOLE: u128 = 0x3971ef2b_623e_4f9a_8cb1_6e79b806b9a7;
+    pub const CHAMP_PORT_LOCAL: u128 = 0x0c1ba1af_5765_453f_af22_a8f791ac775b;
+    pub const CHAMP_PORT_DISTANT: u128 = 0xc35a604d_d22b_4e1a_91b4_68f674ee674b;
+    pub const CHAMP_ADRESSE_DISTANTE: u128 = 0xb235ae9a_1d64_49b8_a44c_5ff3d9095045;
+    pub const CHAMP_INTERFACE_LOCALE: u128 = 0x4cd62a49_59c3_4969_b7f3_bda5d32890a4;
+    pub const CHAMP_DRAPEAUX: u128 = 0x632ce23b_5167_435c_86d7_e903684aa80c;
+
+    /// `FWP_MATCH_EQUAL`.
+    pub const CORRESPONDANCE_EGALE: u32 = 0;
+    /// `FWP_MATCH_FLAGS_ALL_SET`.
+    pub const CORRESPONDANCE_TOUS_LES_BITS: u32 = 6;
+
+    pub const ACTION_BLOCAGE: u32 = 0x1001;
+    pub const ACTION_AUTORISATION: u32 = 0x1002;
+    /// Un appel a un pilote tiers qui peut rendre une autorisation ou un
+    /// blocage: pour l'arbitrage, il peut tout.
+    pub const ACTION_APPEL_TERMINAL: u32 = 0x5003;
+    /// Un appel qui ne rend jamais d'autorisation ni de blocage.
+    pub const ACTION_APPEL_INSPECTION: u32 = 0x6004;
+    /// Un appel dont le pilote decide a l'execution: peut tout, lui aussi.
+    pub const ACTION_APPEL_INCONNU: u32 = 0x4005;
+
+    /// `FWPM_FILTER_FLAG_PERSISTENT`.
+    pub const DRAPEAU_PERSISTANT: u32 = 0x1;
+    /// `FWPM_FILTER_FLAG_BOOTTIME`.
+    pub const DRAPEAU_DEMARRAGE: u32 = 0x2;
+    /// `FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT`: l'action ne se laisse plus
+    /// ecraser par une sous-couche evaluee apres.
+    pub const DRAPEAU_VETO: u32 = 0x8;
+    /// `FWPM_FILTER_FLAG_DISABLED`: rendu par BFE seulement, jamais pose.
+    pub const DRAPEAU_DESACTIVE: u32 = 0x20;
+    /// `FWPM_FILTER_FLAG_INDEXED`.
+    pub const DRAPEAU_INDEXE: u32 = 0x40;
+
+    /// `FWP_CONDITION_FLAG_IS_LOOPBACK`.
+    pub const DRAPEAU_BOUCLE: u32 = 0x1;
+    /// `FWP_ACTRL_MATCH_FILTER`: le seul droit que la liste de controle
+    /// d'acces d'une condition d'identite accorde.
+    pub const DROIT_DE_CORRESPONDRE: u32 = 0x1;
+}
+
+impl Layer {
+    /// Identifiant WFP de la couche, en donnee pure.
+    pub fn cle(&self) -> u128 {
+        match self {
+            Layer::AuthConnectV4 => cles::COUCHE_CONNECT_V4,
+            Layer::AuthConnectV6 => cles::COUCHE_CONNECT_V6,
+            Layer::AuthRecvAcceptV4 => cles::COUCHE_RECV_ACCEPT_V4,
+            Layer::AuthRecvAcceptV6 => cles::COUCHE_RECV_ACCEPT_V6,
+        }
+    }
+}
+
+/// Champ WFP qu'une condition compare.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Champ {
+    AppId,
+    UserId,
+    Protocole,
+    /// Porte aussi le type ICMP: c'est la definition de
+    /// `FWPM_CONDITION_ICMP_TYPE`, qui partage cet identifiant.
+    PortLocal,
+    PortDistant,
+    AdresseDistante,
+    InterfaceLocale,
+    Drapeaux,
+}
+
+impl Champ {
+    pub fn cle(self) -> u128 {
+        match self {
+            Champ::AppId => cles::CHAMP_APP_ID,
+            Champ::UserId => cles::CHAMP_USER_ID,
+            Champ::Protocole => cles::CHAMP_PROTOCOLE,
+            Champ::PortLocal => cles::CHAMP_PORT_LOCAL,
+            Champ::PortDistant => cles::CHAMP_PORT_DISTANT,
+            Champ::AdresseDistante => cles::CHAMP_ADRESSE_DISTANTE,
+            Champ::InterfaceLocale => cles::CHAMP_INTERFACE_LOCALE,
+            Champ::Drapeaux => cles::CHAMP_DRAPEAUX,
+        }
+    }
+}
+
+/// Comment WFP compare la valeur au trafic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Correspondance {
+    /// `FWP_MATCH_EQUAL`.
+    Egale,
+    /// `FWP_MATCH_FLAGS_ALL_SET`.
+    TousLesBits,
+}
+
+impl Correspondance {
+    pub fn code(self) -> u32 {
+        match self {
+            Correspondance::Egale => cles::CORRESPONDANCE_EGALE,
+            Correspondance::TousLesBits => cles::CORRESPONDANCE_TOUS_LES_BITS,
+        }
+    }
+}
+
+/// Valeur d'une condition, telle que WFP la recoit.
+///
+/// Deux valeurs ne sont pas encore des octets, et c'est delibere: elles ne se
+/// calculent QUE sur un hote Windows. [`Valeur::Application`] devient
+/// l'identifiant que `FwpmGetAppIdFromFileName0` tire du chemin (il ouvre le
+/// fichier), et [`Valeur::Identite`] le descripteur de securite qui n'accorde
+/// le droit de correspondre qu'a cette identite. Tout le reste est l'octet
+/// meme qui part au moteur.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Valeur {
+    U8(u8),
+    U16(u16),
+    U32(u32),
+    U64(u64),
+    /// Adresse et masque en ordre hote, comme `FWP_V4_ADDR_AND_MASK`.
+    V4 {
+        adresse: u32,
+        masque: u32,
+    },
+    V6 {
+        adresse: [u8; 16],
+        prefixe: u8,
+    },
+    Application(PathBuf),
+    Identite(Identity),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConditionWfp {
+    pub champ: Champ,
+    pub correspondance: Correspondance,
+    pub valeur: Valeur,
+}
+
+/// Un filtre tel qu'il part au moteur: UN par couche.
+///
+/// C'est la forme que `windows::mod` remet a `FwpmFilterAdd0`, et celle que la
+/// preuve compare a ce que le moteur rend. Les deux passent par
+/// [`filtre_wfp`]: une traduction ecrite deux fois pourrait diverger, et la
+/// preuve validerait alors une politique que le produit ne pose pas.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FiltreWfp {
+    /// Nom affiche, `<nom du plan> (<couche>)`.
+    pub nom: String,
+    pub couche: Layer,
+    pub poids: u8,
+    pub action: Action,
+    /// Pose `FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT`.
+    pub veto: bool,
+    pub conditions: Vec<ConditionWfp>,
+}
+
+/// Masque IPv4 en ordre hote, tel que l'attend `FWP_V4_ADDR_AND_MASK`.
+pub fn masque_v4(prefixe: u8) -> u32 {
+    if prefixe == 0 {
+        0
+    } else {
+        u32::MAX << (32 - prefixe.min(32))
+    }
+}
+
+/// Traduit une entree du plan en ce qui part au moteur pour UNE couche.
+///
+/// Fail-closed: une condition que la couche ne peut pas porter fait ECHOUER la
+/// traduction ([`condition_posable`]), et le compte des conditions traduites
+/// doit egaler celui du plan ([`toutes_les_conditions_posees`]). Jusqu'au
+/// 30/09/2026, une adresse de l'autre famille etait ecartee en silence et le
+/// filtre partait au moteur sans elle, donc plus large que le plan: c'est ainsi
+/// que `permit-dns-to-local-resolver` autorisait le :53 vers toute destination
+/// sur la couche de l'autre famille, au-dessus de `block-dns`. La pose et la
+/// reference de `prove wfp` passent toutes deux par ici: un refus vaut pour
+/// les deux.
+pub fn filtre_wfp(spec: &FilterSpec, couche: Layer) -> bifrost_core::Result<FiltreWfp> {
+    let mut conditions = Vec::with_capacity(spec.conditions.len());
+    for condition in &spec.conditions {
+        condition_posable(spec, condition, couche)?;
+        let (champ, valeur) = match condition {
+            Condition::AppId(chemin) => (Champ::AppId, Valeur::Application(chemin.clone())),
+            Condition::UserId(identite) => (Champ::UserId, Valeur::Identite(identite.clone())),
+            Condition::Protocol(p) => (Champ::Protocole, Valeur::U8(*p)),
+            Condition::LocalPort(p) | Condition::IcmpType(p) => (Champ::PortLocal, Valeur::U16(*p)),
+            Condition::RemotePort(p) => (Champ::PortDistant, Valeur::U16(*p)),
+            Condition::RemoteAddrV4 { addr, prefix } => (
+                Champ::AdresseDistante,
+                Valeur::V4 {
+                    adresse: u32::from(*addr),
+                    masque: masque_v4(*prefix),
+                },
+            ),
+            Condition::RemoteAddrV6 { addr, prefix } => (
+                Champ::AdresseDistante,
+                Valeur::V6 {
+                    adresse: addr.octets(),
+                    prefixe: *prefix,
+                },
+            ),
+            Condition::LocalInterface(luid) => (Champ::InterfaceLocale, Valeur::U64(*luid)),
+            Condition::Loopback => (Champ::Drapeaux, Valeur::U32(cles::DRAPEAU_BOUCLE)),
+        };
+        conditions.push(ConditionWfp {
+            champ,
+            correspondance: match condition {
+                Condition::Loopback => Correspondance::TousLesBits,
+                _ => Correspondance::Egale,
+            },
+            valeur,
+        });
+    }
+
+    // Le compte, et pas seulement le vide: un filtre qui perd UNE condition
+    // est deja plus large que le plan. Couvre l'ancien refus du filtre
+    // devenu inconditionnel.
+    toutes_les_conditions_posees(spec, couche, conditions.len())?;
+    Ok(FiltreWfp {
+        nom: format!("{} ({})", spec.name, couche.name()),
+        couche,
+        poids: spec.weight,
+        action: spec.action,
+        veto: spec.hard,
+        conditions,
+    })
+}
+
+/// Le plan entier, couche par couche, dans l'ordre ou le produit le pose.
+pub fn filtres_wfp(plan: &[FilterSpec]) -> bifrost_core::Result<Vec<FiltreWfp>> {
+    let mut filtres = Vec::new();
+    for spec in plan {
+        for couche in &spec.layers {
+            filtres.push(filtre_wfp(spec, *couche)?);
+        }
+    }
+    Ok(filtres)
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -1888,5 +2148,188 @@ mod tests {
             [133, 134, 135, 136, 137],
             "sollicitation et annonce de routeur, sollicitation et annonce de              voisin, redirection"
         );
+    }
+
+    /// Un filtre par couche du plan, dans l'ordre du plan: c'est ce que
+    /// `install` pose, et ce que la preuve attend.
+    #[test]
+    fn la_traduction_rend_un_filtre_par_couche_dans_l_ordre_du_plan() {
+        let p = plan(&policy(true), PathBuf::from("x.exe"), Some(7));
+        let filtres = filtres_wfp(&p).unwrap();
+        let attendu: usize = p.iter().map(|f| f.layers.len()).sum();
+        assert_eq!(filtres.len(), attendu);
+        let mut i = 0;
+        for spec in &p {
+            for couche in &spec.layers {
+                let f = &filtres[i];
+                assert_eq!(f.couche, *couche);
+                assert_eq!(f.nom, format!("{} ({})", spec.name, couche.name()));
+                assert_eq!(f.poids, spec.weight);
+                assert_eq!(f.action, spec.action);
+                assert_eq!(f.veto, spec.hard);
+                i += 1;
+            }
+        }
+    }
+
+    /// Les valeurs que WFP compare, et pas seulement la forme: un masque ou un
+    /// champ faux ne matcherait rien sans qu'aucune pose n'echoue.
+    #[test]
+    fn la_traduction_porte_les_valeurs_que_wfp_compare() {
+        let p = plan(&policy(true), PathBuf::from("x.exe"), Some(0x42));
+        let lan = filtre_wfp(find(&p, "permit-lan-v4"), Layer::AuthConnectV4).unwrap();
+        assert!(lan.conditions.contains(&ConditionWfp {
+            champ: Champ::AdresseDistante,
+            correspondance: Correspondance::Egale,
+            valeur: Valeur::V4 {
+                adresse: 0xc0a8_0000,
+                masque: 0xffff_0000
+            },
+        }));
+        let boucle = filtre_wfp(find(&p, "permit-loopback"), Layer::AuthRecvAcceptV6).unwrap();
+        assert_eq!(
+            boucle.conditions,
+            vec![ConditionWfp {
+                champ: Champ::Drapeaux,
+                correspondance: Correspondance::TousLesBits,
+                valeur: Valeur::U32(1),
+            }]
+        );
+        let tunnel = filtre_wfp(find(&p, "permit-tunnel-interface"), Layer::AuthConnectV6).unwrap();
+        assert_eq!(tunnel.conditions[0].valeur, Valeur::U64(0x42));
+        let ndp = filtre_wfp(find(&p, "permit-ndp"), Layer::AuthConnectV6).unwrap();
+        assert!(
+            ndp.conditions
+                .iter()
+                .any(|c| c.champ == Champ::PortLocal && c.valeur == Valeur::U16(135))
+        );
+        let daemon = filtre_wfp(find(&p, "permit-daemon"), Layer::AuthConnectV4).unwrap();
+        assert_eq!(
+            daemon.conditions[0].valeur,
+            Valeur::Application(PathBuf::from("x.exe"))
+        );
+        assert_eq!(
+            daemon.conditions[1].valeur,
+            Valeur::Identite(Identity::Current)
+        );
+    }
+
+    /// Une condition d'adresse de l'autre famille n'est plus ecartee: la
+    /// traduction refuse, en nommant la couche, et le plan entier avec elle.
+    /// Un filtre qui n'aurait plus rien n'est donc jamais pose inconditionnel.
+    #[test]
+    fn une_couche_sans_condition_applicable_est_refusee() {
+        let seul_v4 = FilterSpec {
+            name: "seul-v4".into(),
+            layers: vec![Layer::AuthConnectV6],
+            weight: 1,
+            action: Action::Permit,
+            hard: false,
+            conditions: vec![Condition::RemoteAddrV4 {
+                addr: Ipv4Addr::new(10, 0, 0, 0),
+                prefix: 8,
+            }],
+        };
+        let e = filtre_wfp(&seul_v4, Layer::AuthConnectV6)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("inapplicable a ALE_AUTH_CONNECT_V6"), "{e}");
+        assert!(e.contains("seul-v4"), "{e}");
+        assert!(filtres_wfp(&[seul_v4]).is_err());
+    }
+
+    /// Le filtre qui a fui, rendu a la traduction tel que le plan le produisait
+    /// avant le 30/09/2026: une adresse d'une famille, posee sur une couche de
+    /// l'autre. La traduction doit REFUSER, et le dire, au lieu d'ecarter
+    /// l'adresse et de poser "port 53 vers toute destination".
+    ///
+    /// Pure: c'est la traduction que la pose remet a WFP et que `prove wfp`
+    /// prend pour reference; elle se mesure sur les deux hotes.
+    #[test]
+    fn une_condition_inapplicable_fait_echouer_la_traduction() {
+        let cas = [
+            (
+                Condition::RemoteAddrV4 {
+                    addr: Ipv4Addr::LOCALHOST,
+                    prefix: 32,
+                },
+                Layer::AuthConnectV6,
+                Layer::AuthConnectV4,
+            ),
+            (
+                Condition::RemoteAddrV6 {
+                    addr: Ipv6Addr::LOCALHOST,
+                    prefix: 128,
+                },
+                Layer::AuthConnectV4,
+                Layer::AuthConnectV6,
+            ),
+        ];
+        for (adresse, etrangere, sienne) in cas {
+            let spec = FilterSpec {
+                name: "permit-dns-to-local-resolver".into(),
+                layers: vec![sienne, etrangere],
+                weight: 15,
+                action: Action::Permit,
+                hard: false,
+                conditions: vec![
+                    adresse,
+                    Condition::RemotePort(53),
+                    Condition::Protocol(IPPROTO_UDP),
+                    Condition::Protocol(IPPROTO_TCP),
+                ],
+            };
+            let e = match filtre_wfp(&spec, etrangere) {
+                Ok(f) => panic!(
+                    "{} condition(s) posee(s) sur {} pour {} demandee(s): le filtre part au \
+                     moteur sans son adresse",
+                    f.conditions.len(),
+                    etrangere.name(),
+                    spec.conditions.len()
+                ),
+                Err(e) => e.to_string(),
+            };
+            assert!(
+                e.contains(&format!("inapplicable a {}", etrangere.name())),
+                "le refus doit nommer la condition et la couche: {e}"
+            );
+            let posees = filtre_wfp(&spec, sienne)
+                .expect("sur sa famille, la meme condition se pose")
+                .conditions;
+            assert_eq!(posees.len(), spec.conditions.len());
+        }
+    }
+
+    /// Le compte, sur la VRAIE traduction et pour tous les plans du crate:
+    /// chaque condition demandee est traduite, sur chaque couche. La remise a
+    /// WFP (`windows::build_conditions`) fait ensuite une condition de
+    /// plateforme par condition traduite, sans en retirer aucune.
+    #[test]
+    fn la_traduction_pose_toutes_les_conditions_de_chaque_plan() {
+        let mut vus = 0usize;
+        for spec in plans_de_reference() {
+            for couche in &spec.layers {
+                let f = filtre_wfp(&spec, *couche)
+                    .unwrap_or_else(|e| panic!("{} sur {}: {e}", spec.name, couche.name()));
+                assert_eq!(
+                    f.conditions.len(),
+                    spec.conditions.len(),
+                    "{} sur {}",
+                    spec.name,
+                    couche.name()
+                );
+                vus += 1;
+            }
+        }
+        assert!(vus > 1000, "matrice trop maigre: {vus} filtres traduits");
+    }
+
+    #[test]
+    fn les_masques_ipv4_correspondent_aux_prefixes() {
+        assert_eq!(masque_v4(0), 0);
+        assert_eq!(masque_v4(8), 0xff00_0000);
+        assert_eq!(masque_v4(16), 0xffff_0000);
+        assert_eq!(masque_v4(24), 0xffff_ff00);
+        assert_eq!(masque_v4(32), 0xffff_ffff);
     }
 }

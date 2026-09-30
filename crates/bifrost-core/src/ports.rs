@@ -187,6 +187,29 @@ impl FirewallPolicy {
     }
 }
 
+/// Ce qu'un moteur de pare-feu a lu de SON hote, et non de la politique, au
+/// moment de sa derniere pose reussie.
+///
+/// La politique ne dit pas tout de ce qui est pose. Sous WFP, le moteur
+/// autorise le binaire qui l'execute (`ALE_APP_ID` du permit du daemon), sous
+/// l'identite qu'il lit dans son propre jeton (`ALE_USER_ID`), et l'interface
+/// qu'il a resolue lui-meme quand la politique n'en donnait que le nom. Une
+/// declaration qui omettrait ces trois valeurs ne decrirait pas ce que le
+/// moteur a remis a WFP; les recalculer ailleurs serait une seconde source de
+/// verite. Le moteur les rend donc telles qu'il les a employees.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnvironnementMoteur {
+    /// Le binaire que le moteur a autorise comme etant le daemon.
+    pub executable: PathBuf,
+    /// L'identite retenue pour le processus qui pose, sous sa forme
+    /// textuelle (sous Windows, le SID de service s'il y en a un, celui de
+    /// l'utilisateur sinon).
+    pub identite: String,
+    /// L'interface du tunnel que le moteur a autorisee, telle qu'il l'a
+    /// designee (sous Windows, le LUID); `None` s'il n'en a autorise aucune.
+    pub interface: Option<u64>,
+}
+
 /// Le kill switch. Fail-closed: une fois engage il reste en place jusqu'a un
 /// `disengage` explicite, y compris si le daemon redemarre.
 pub trait KillSwitch: Send {
@@ -202,6 +225,16 @@ pub trait KillSwitch: Send {
 
     /// Nom de la plateforme, pour les diagnostics.
     fn backend(&self) -> &'static str;
+
+    /// Ce que ce moteur a lu de son hote a sa derniere pose reussie, s'il lit
+    /// quelque chose. Voir [`EnvironnementMoteur`].
+    ///
+    /// `None` par defaut: nftables designe tout par la politique (interface par
+    /// son nom, identites par UID) et ne lit rien d'autre. `None` aussi tant
+    /// qu'aucune pose n'a reussi, et apres un retrait.
+    fn environnement(&self) -> Option<EnvironnementMoteur> {
+        None
+    }
 }
 
 /// Etat du handshake WireGuard, lu depuis le device.

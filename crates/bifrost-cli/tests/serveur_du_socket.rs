@@ -432,3 +432,68 @@ async fn la_sonde_d_emergency_disarm_n_ecrit_rien_et_ne_prend_pas_un_autre_pour_
         s.erreur
     );
 }
+
+/// Les preuves par declaration, par le binaire construit: la preuve de la
+/// plateforme (`prove nft` sous Linux, `prove wfp` sous Windows) face au meme
+/// faux serveur du compte courant. Sa regle est celle des preuves, plus
+/// stricte que celle des commandes: sous Windows, un pipe des Administrateurs
+/// n'y est PAS admis. Refusee, elle rend son code de preuve (2, NON MESURE),
+/// pas le 4 des commandes, nomme l'entree manquante (`daemon-identity`) et
+/// n'ecrit rien.
+///
+/// Admis seulement un serveur root (Linux) ou un pipe de LocalSystem (Windows,
+/// processus SYSTEM): la requete part, le faux serveur ne repond pas, et la
+/// preuve reste NON MESURE, faute de declaration.
+#[tokio::test(flavor = "multi_thread")]
+async fn chaque_preuve_par_declaration_refuse_un_serveur_du_compte_courant_sans_rien_lui_envoyer() {
+    let preuve = if cfg!(windows) { "wfp" } else { "nft" };
+    let arguments: Vec<String> = ["--json", "prove", preuve, "--politique-daemon", "--actif"]
+        .into_iter()
+        .map(String::from)
+        .collect();
+    let faux = Faux::demarrer(&format!("prove {preuve}"));
+    let s = lancer(&cli(), &faux.socket, &arguments).await;
+    let recus = faux.apres(1).await;
+    let rapport: serde_json::Value = serde_json::from_str(&s.sortie)
+        .unwrap_or_else(|e| panic!("prove {preuve}: rapport illisible ({e}): {}", s.sortie));
+    assert_eq!(s.code, Some(2), "prove {preuve}: {rapport}");
+    assert_eq!(
+        rapport["verdict"], "UNMEASURED",
+        "prove {preuve}: {rapport}"
+    );
+    assert!(
+        rapport["daemon_identity"].is_null(),
+        "prove {preuve}: {rapport}"
+    );
+    #[cfg(unix)]
+    let admis = attendu() == Attendu::Admis;
+    #[cfg(windows)]
+    let admis = {
+        let groupes = std::process::Command::new("whoami")
+            .arg("/groups")
+            .output()
+            .expect("whoami /groups");
+        String::from_utf8_lossy(&groupes.stdout).contains("S-1-16-16384")
+    };
+    if admis {
+        assert!(!recus.is_empty(), "prove {preuve}: admis, et rien recu");
+        assert_eq!(
+            rapport["failed_input"], "daemon-declaration",
+            "prove {preuve}: {rapport}"
+        );
+    } else {
+        assert!(
+            recus.is_empty(),
+            "prove {preuve}: {} octet(s) ecrit(s) a un serveur refuse",
+            recus.len()
+        );
+        assert_eq!(
+            rapport["failed_input"], "daemon-identity",
+            "prove {preuve}: {rapport}"
+        );
+        assert_eq!(
+            rapport["reason"], "serveur de la declaration non privilegie",
+            "prove {preuve}: {rapport}"
+        );
+    }
+}

@@ -1,197 +1,28 @@
-//! Lecture stricte de la declaration du daemon, pour `prove nft --politique-daemon`.
+//! Recettes, sur un vrai socket Unix, du lecteur commun de la declaration
+//! (`crate::declaration`) et du protocole de `prove nft --politique-daemon`.
 //!
-//! La declaration est ce que le daemon DIT avoir remis a son moteur: un
-//! attendu, jamais une observation. Ce lecteur ne lui fait donc aucune
-//! confiance de forme: cles exactes, doublons refuses, nombres entiers,
-//! coherence entre l'issue, le numero et la politique. Tout ce qui ne passe
-//! pas rend NON MESURE avec une raison, jamais une comparaison partielle.
-
-use std::io::ErrorKind;
-use std::time::Duration;
-
-use bifrost_ipc::protocol::{
-    Command, DECLARATION_PARE_FEU_VERSION, DeclarationPareFeu, IssueApplication, Request, Response,
-};
-use bifrost_ipc::{IpcClient, IpcError, ServerIdentityError, ServerRequirement};
-use serde_json::Value;
-
-use crate::preuve_nft::Unique;
-
-/// Borne de l'echange complet. Le daemon sert la declaration sur le fil qui
-/// applique les politiques: il peut etre occupe a monter un tunnel, mais une
-/// preuve qui attendrait sans fin ne rendrait jamais son NON MESURE.
-const DELAI: Duration = Duration::from_secs(5);
-
-/// Pourquoi la declaration n'a pas pu servir d'attendu, et quelle entree
-/// manque: le rapport distingue un serveur dont l'identite n'est pas admise
-/// (`daemon-identity`) d'une declaration absente ou illisible
-/// (`daemon-declaration`). Les raisons ne nomment ni uid, ni pid, ni SID.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Refus {
-    Identite(&'static str),
-    Declaration(&'static str),
-}
-
-impl Refus {
-    pub(crate) fn entree(self) -> &'static str {
-        match self {
-            Refus::Identite(_) => "daemon-identity",
-            Refus::Declaration(_) => "daemon-declaration",
-        }
-    }
-
-    pub(crate) fn raison(self) -> &'static str {
-        match self {
-            Refus::Identite(r) | Refus::Declaration(r) => r,
-        }
-    }
-}
-
-/// La declaration, et le nom de la regle qui a admis son serveur.
-pub(crate) type Lue = (DeclarationPareFeu, &'static str);
-
-const CLES: [&str; 7] = [
-    "result",
-    "schema_version",
-    "instance",
-    "application",
-    "moteur",
-    "issue",
-    "politique",
-];
-
-const HORS_SCHEMA: &str = "declaration du daemon hors schema";
-
-/// La lecture de la preuve: le serveur doit etre PRIVILEGIE, toujours.
-///
-/// `--socket` est choisi par l'utilisateur, et n'importe quel processus peut
-/// ecouter sur un chemin qu'il cree: sans cette exigence, il servirait une
-/// declaration taillee pour un noyau altere, et la preuve dirait MATCH. Le
-/// daemon, lui, tourne en root sans exception (`ensure_privileged` avant
-/// l'ecoute, aucun `User=` dans l'unite livree).
-pub(crate) async fn lire(socket: &str) -> Result<Lue, Refus> {
-    lire_avec(socket, DELAI, ServerRequirement::Privileged).await
-}
-
-async fn lire_avec(
-    socket: &str,
-    delai: Duration,
-    attendu: ServerRequirement,
-) -> Result<Lue, Refus> {
-    let echange = async {
-        let (mut client, regle) =
-            IpcClient::connect_verified(socket, attendu)
-                .await
-                .map_err(|e| match e {
-                    IpcError::ServerIdentity(ServerIdentityError::Refused) => {
-                        Refus::Identite("serveur de la declaration non privilegie")
-                    }
-                    IpcError::ServerIdentity(ServerIdentityError::Unreadable) => {
-                        Refus::Identite("identite du serveur de la declaration illisible")
-                    }
-                    // Le socket existe et ses droits nous ecartent: ce n'est pas une
-                    // absence de daemon, et le rapport ne doit pas le laisser croire.
-                    IpcError::Io(e) if e.kind() == ErrorKind::PermissionDenied => {
-                        Refus::Declaration("acces au daemon refuse")
-                    }
-                    _ => Refus::Declaration("daemon injoignable"),
-                })?;
-        let octets = client
-            .request_raw(&Request::new(Command::DeclarationPareFeu))
-            .await
-            .map_err(|_| Refus::Declaration("reponse du daemon tronquee ou illisible"))?;
-        Ok((octets, regle))
-    };
-    let (octets, regle) = tokio::time::timeout(delai, echange)
-        .await
-        .map_err(|_| Refus::Declaration("daemon sans reponse dans le delai"))??;
-    Ok((analyser(&octets).map_err(Refus::Declaration)?, regle.name()))
-}
-
-/// Analyse une trame de reponse, sans jamais recopier ce qu'elle contient
-/// dans une raison: un message d'erreur du daemon nomme l'appelant (uid, gid,
-/// pid), et une declaration porte des parametres de politique.
-fn analyser(octets: &[u8]) -> Result<DeclarationPareFeu, &'static str> {
-    let Unique(v) =
-        serde_json::from_slice(octets).map_err(|_| "reponse du daemon tronquee ou illisible")?;
-    let objet = v.as_object().ok_or(HORS_SCHEMA)?;
-    if objet.get("result").and_then(Value::as_str) == Some("error") {
-        // Le serveur refuse un pair non autorise AVANT de lire sa requete, et
-        // le dit par ce prefixe (`bifrost_ipc::auth::AuthError::Denied`). Toute
-        // autre erreur, dont celle d'un daemon d'une version qui ne connait pas
-        // la commande, est un refus de la demande, pas un refus d'acces.
-        let message = objet
-            .get("message")
-            .and_then(Value::as_str)
-            .ok_or(HORS_SCHEMA)?;
-        return Err(if message.starts_with("acces refuse") {
-            "acces au daemon refuse"
-        } else {
-            "le daemon a refuse la demande"
-        });
-    }
-    if objet.len() != CLES.len() || CLES.iter().any(|c| !objet.contains_key(*c)) {
-        return Err(HORS_SCHEMA);
-    }
-    let d = match serde_json::from_value::<Response>(v) {
-        Ok(Response::DeclarationPareFeu(d)) => *d,
-        _ => return Err(HORS_SCHEMA),
-    };
-    let instance_valide = (32..=128).contains(&d.instance.len())
-        && d.instance
-            .bytes()
-            .all(|o| o.is_ascii_digit() || (b'a'..=b'f').contains(&o));
-    let coherente = match d.issue {
-        IssueApplication::Aucune => d.application == 0 && d.politique.is_none(),
-        IssueApplication::Posee => {
-            d.application > 0 && d.politique.as_ref().is_some_and(Value::is_object)
-        }
-        IssueApplication::Retiree | IssueApplication::Echec => {
-            d.application > 0 && d.politique.is_none()
-        }
-    };
-    if d.schema_version != DECLARATION_PARE_FEU_VERSION
-        || !instance_valide
-        || d.moteur.is_empty()
-        || !coherente
-    {
-        return Err(HORS_SCHEMA);
-    }
-    Ok(d)
-}
-
-/// La politique a comparer, ou la raison pour laquelle il n'y en a pas.
-pub(crate) fn politique_posee(d: &DeclarationPareFeu) -> Result<&Value, &'static str> {
-    // Les six champs projetes sont ceux que lit le rendu nft; pour un autre
-    // moteur ils ne decrivent pas ce qui a ete pose, et une correspondance
-    // serait fortuite.
-    if d.moteur != "nftables" {
-        return Err("moteur de pare-feu du daemon hors perimetre de la reference nft");
-    }
-    match d.issue {
-        IssueApplication::Aucune => {
-            Err("aucune politique posee par ce daemon depuis son demarrage")
-        }
-        IssueApplication::Retiree => {
-            Err("kill switch retire par le daemon: aucune politique a comparer")
-        }
-        IssueApplication::Echec => {
-            Err("derniere application du daemon en echec: etat du noyau inconnu du daemon")
-        }
-        IssueApplication::Posee => d.politique.as_ref().ok_or(HORS_SCHEMA),
-    }
-}
+//! Le lecteur et le protocole vivent dans `declaration`, partages avec
+//! `prove wfp`; ce qui reste ici est un faux daemon qui sert de vraies trames,
+//! une vraie capture de noyau rendue par la reference, et les alterations que
+//! la preuve doit voir. Linux seulement: le faux daemon ecoute sur un socket
+//! Unix, et le client y lit l'identite du serveur par `SO_PEERCRED`.
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::declaration::*;
     use crate::preuve_nft::verifier_declaration_avec;
     use bifrost_core::ports::FirewallPolicy;
     use bifrost_firewall::politique_nft::Politique;
+    use bifrost_ipc::ServerRequirement;
+    use bifrost_ipc::protocol::{
+        DECLARATION_PARE_FEU_VERSION, DeclarationPareFeu, IssueApplication, Response,
+    };
+    use serde_json::Value;
     use serde_json::json;
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     const INSTANCE: &str = "0123456789abcdef0123456789abcdef0123456789abcdef";
