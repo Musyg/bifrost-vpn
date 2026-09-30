@@ -437,6 +437,49 @@ mod linux {
             "le harnais cree des namespaces reseau et capture du trafic: il exige root".to_owned()
         }
 
+        /// Les capacites sans lesquelles le harnais ne monte pas son banc, avec
+        /// leur numero de capabilities(7) et ce a quoi chacune sert.
+        ///
+        /// # Pourquoi etre root ne suffit plus
+        ///
+        /// Le service systemd tourne en root et ne detient plus CAP_SYS_ADMIN
+        /// depuis le 30/09/2026: `check` y est donc demande a un processus root
+        /// qui ne peut pas creer d'espace de noms. Mesure le meme jour, daemon
+        /// lance avec les capacites de l'unite moins celle-la: les DIX vecteurs
+        /// rendaient << montage du banc en namespaces impossible: tunnel: ip
+        /// netns add bifrost-check-client -> mount --make-shared /run/netns
+        /// failed: Operation not permitted >>. Exact, et inutilisable: rien n'y
+        /// dit quoi lancer a la place, et doh-bypass, qui ne monte aucun banc,
+        /// sautait avec les autres.
+        ///
+        /// L'ordre est celui du message: CAP_SYS_ADMIN d'abord, parce que c'est
+        /// celle que le service n'a plus par construction.
+        pub const CAPACITES: [(u32, &str, &str); 3] = [
+            (
+                21,
+                "CAP_SYS_ADMIN",
+                "creer les namespaces reseau de son banc",
+            ),
+            (
+                12,
+                "CAP_NET_ADMIN",
+                "poser le kill switch et les interfaces de son banc",
+            ),
+            (13, "CAP_NET_RAW", "capturer sur le lien de son banc"),
+        ];
+
+        /// Le contrat de `check` dans le service: il ne mesure pas, il le dit,
+        /// et il nomme ce qui mesure. Sans repli: aucun vecteur du banc n'est
+        /// rendu autrement qu'avec cette raison.
+        pub fn capacite_absente(nom: &str, usage: &str) -> String {
+            format!(
+                "le harnais ne peut pas {usage} sans {nom}, et ce processus ne l'a pas. \
+                 Le service systemd ne la detient plus, par construction: la suite de \
+                 fuite se lance hors du service, en root, par `sudo bifrost-daemon \
+                 --run-checks`."
+            )
+        }
+
         pub fn binaire_absent(bin: &str, usage: &str) -> String {
             format!("'{bin}' est absent, requis pour {usage}")
         }
@@ -1411,6 +1454,9 @@ mod linux {
             for (bin, usage) in PREREQUIS {
                 tout.push(("prerequis/binaire", binaire_absent(bin, usage)));
             }
+            for (_, nom, usage) in CAPACITES {
+                tout.push(("prerequis/capacite", capacite_absente(nom, usage)));
+            }
             for sonde in ["all", "dns", "ipv6"] {
                 tout.push((
                     "vecteur/temoin-muet",
@@ -1515,10 +1561,40 @@ mod linux {
         euid == 0
     }
 
+    /// Un masque de capacites lu dans `/proc/<pid>/status`, champ `CapEff:`,
+    /// `CapBnd:`... Pur, pour etre eprouve sur des textes mesures.
+    pub(super) fn masque_de_statut(statut: &str, champ: &str) -> Option<u64> {
+        statut
+            .lines()
+            .find_map(|l| l.strip_prefix(champ))
+            .and_then(|v| u64::from_str_radix(v.trim(), 16).ok())
+    }
+
+    /// La premiere capacite du harnais absente d'un masque effectif, dans
+    /// l'ordre de [`motifs::CAPACITES`].
+    pub(super) fn premiere_capacite_absente(
+        effectives: u64,
+    ) -> Option<(&'static str, &'static str)> {
+        motifs::CAPACITES
+            .iter()
+            .find(|(numero, _, _)| (effectives & (1u64 << numero)) == 0)
+            .map(|(_, nom, usage)| (*nom, *usage))
+    }
+
     /// Verifie ce dont le harnais a besoin. Renvoie la premiere raison de sauter.
     pub(super) fn missing_prerequisite() -> Option<String> {
         if !est_root() {
             return Some(motifs::exige_root());
+        }
+        // Root ne suffit pas: le service systemd est root et n'a plus
+        // CAP_SYS_ADMIN (voir `motifs::CAPACITES`). Un statut illisible ne
+        // conclut rien: le banc tente alors, et son propre echec parle.
+        if let Some(effectives) = std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|s| masque_de_statut(&s, "CapEff:"))
+            && let Some((nom, usage)) = premiere_capacite_absente(effectives)
+        {
+            return Some(motifs::capacite_absente(nom, usage));
         }
         for (bin, usage) in motifs::PREREQUIS {
             if !binary_exists(bin) {
@@ -5356,6 +5432,89 @@ mod tests_linux {
         assert!(
             root.contains("root"),
             "le motif de privilege ne dit pas ce qu'il faut: {root}"
+        );
+    }
+
+    /// Le motif d'une capacite absente est le contrat de `check` dans le
+    /// service: il nomme ce qui manque, a quoi cela sert, et la commande qui
+    /// mesure a la place. Sans la commande, l'utilisateur apprendrait qu'il ne
+    /// peut pas mesurer sans apprendre comment le faire.
+    #[test]
+    fn le_motif_de_capacite_nomme_la_capacite_l_usage_et_la_commande() {
+        for (_, nom, usage) in linux::motifs::CAPACITES {
+            let motif = linux::motifs::capacite_absente(nom, usage);
+            assert!(motif.contains(nom), "la capacite n'est pas nommee: {motif}");
+            assert!(motif.contains(usage), "l'usage a disparu: {motif}");
+            assert!(
+                motif.contains("sudo bifrost-daemon --run-checks"),
+                "la commande qui mesure hors du service a disparu: {motif}"
+            );
+        }
+    }
+
+    /// Les numeros de la table sont ceux du noyau.
+    ///
+    /// Releve du 30/09/2026 sur la machine d'essai, `capsh --decode` de ce qui
+    /// fut le masque effectif du service: `0x2034e1` =
+    /// chown, kill, setgid, setuid, net_bind_service, net_admin, net_raw,
+    /// sys_admin. Un numero faux dans la table ferait chercher la mauvaise
+    /// capacite, et le service passerait pour capable de monter le banc.
+    #[test]
+    fn les_numeros_de_la_table_sont_ceux_du_noyau() {
+        let attendus = [
+            ("CAP_SYS_ADMIN", 1u64 << 21),
+            ("CAP_NET_ADMIN", 1u64 << 12),
+            ("CAP_NET_RAW", 1u64 << 13),
+        ];
+        for (nom, bit) in attendus {
+            let (numero, _, _) = linux::motifs::CAPACITES
+                .iter()
+                .find(|(_, n, _)| *n == nom)
+                .unwrap_or_else(|| panic!("{nom} absente de la table"));
+            assert_eq!(1u64 << numero, bit, "{nom}: numero faux");
+            assert_ne!(0x2034e1 & bit, 0, "{nom} absente du masque releve");
+        }
+    }
+
+    /// Le masque se lit dans un `/proc/<pid>/status` MESURE: celui du daemon
+    /// lance le 30/09/2026 avec les capacites de l'unite d'alors.
+    #[test]
+    fn le_masque_se_lit_dans_un_statut_mesure() {
+        let statut = "Name:\tbifrost-daemon\nCapInh:\t00000000002034c1\n\
+                      CapPrm:\t00000000002034e1\nCapEff:\t00000000002034e1\n\
+                      CapBnd:\t00000000002034e1\nCapAmb:\t00000000002034c1\n\
+                      NoNewPrivs:\t1\n";
+        assert_eq!(linux::masque_de_statut(statut, "CapEff:"), Some(0x2034e1));
+        assert_eq!(linux::masque_de_statut(statut, "CapAmb:"), Some(0x2034c1));
+        assert_eq!(linux::masque_de_statut(statut, "CapXyz:"), None);
+        assert_eq!(
+            linux::masque_de_statut("CapEff:\tpas-un-nombre\n", "CapEff:"),
+            None
+        );
+    }
+
+    /// Ce que le harnais conclut de chaque masque: l'ancien service montait le
+    /// banc, le nouveau le refuse en nommant CAP_SYS_ADMIN, root complet le
+    /// monte, et une autre capacite manquante est nommee pour elle-meme.
+    #[test]
+    fn le_service_sans_sys_admin_refuse_le_banc_en_la_nommant() {
+        // L'unite d'avant le 30/09/2026.
+        assert_eq!(linux::premiere_capacite_absente(0x2034e1), None);
+        // La meme, moins CAP_SYS_ADMIN.
+        assert_eq!(
+            linux::premiere_capacite_absente(0x2034e1 & !(1u64 << 21)).map(|(n, _)| n),
+            Some("CAP_SYS_ADMIN")
+        );
+        // Root hors du service: toutes les capacites du noyau.
+        assert_eq!(linux::premiere_capacite_absente(0x1ff_ffff_ffff), None);
+        // Et une autre absence n'est pas confondue avec la premiere.
+        assert_eq!(
+            linux::premiere_capacite_absente(0x2034e1 & !(1u64 << 13)).map(|(n, _)| n),
+            Some("CAP_NET_RAW")
+        );
+        assert_eq!(
+            linux::premiere_capacite_absente(0).map(|(n, _)| n),
+            Some("CAP_SYS_ADMIN")
         );
     }
 
