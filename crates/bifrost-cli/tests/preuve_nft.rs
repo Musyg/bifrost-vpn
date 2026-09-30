@@ -218,7 +218,7 @@ fn seuls_handles_et_compteurs_volatils_peuvent_changer() {
     assert!(r["failed_input"].is_null());
     assert_eq!(
         r["expected_counts"],
-        json!({"tables":1,"chains":1,"rules":3})
+        json!({"tables":1,"chains":1,"rules":3,"objects":0})
     );
     let texte = r.to_string();
     for secret in [
@@ -315,11 +315,18 @@ fn schema_inconnu_objets_non_geres_et_parents_absents_sont_non_mesures() {
     let mut o = reference();
     o["nftables"][0]["metainfo"]["json_schema_version"] = 2.into();
     mutations.push(o);
+    // Un set sans identite, et un type que le comparateur ne sait pas lire.
     let mut o = reference();
     o["nftables"]
         .as_array_mut()
         .unwrap()
         .push(json!({"set":{"name":"cache"}}));
+    mutations.push(o);
+    let mut o = reference();
+    o["nftables"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"secmark":{"family":"inet","table":"nom-prive","name":"s","context":"x"}}));
     mutations.push(o);
     let mut o = reference();
     o["nftables"].as_array_mut().unwrap().remove(1);
@@ -331,6 +338,105 @@ fn schema_inconnu_objets_non_geres_et_parents_absents_sont_non_mesures() {
     for o in mutations {
         comparer(&o, 2, "UNMEASURED");
     }
+}
+
+/// La reference avec, dans une table tierce, un set a delai, une map, un
+/// flowtable et un counter nomme, dans la forme que nft 1.0.9 leur donne.
+fn reference_avec_objets() -> Value {
+    let mut r = reference();
+    let tiers = |genre: &str, mut corps: Value| {
+        corps["family"] = "inet".into();
+        corps["table"] = "table-tierce".into();
+        json!({ genre: corps })
+    };
+    r["nftables"].as_array_mut().unwrap().extend([
+        json!({"table": {"family": "inet", "name": "table-tierce", "handle": 7}}),
+        tiers(
+            "counter",
+            json!({"name": "compteur-prive", "handle": 1, "packets": 3, "bytes": 180}),
+        ),
+        tiers(
+            "set",
+            json!({"name": "set-prive", "handle": 2, "type": "ipv4_addr",
+            "flags": ["timeout"], "timeout": 3600,
+            "elem": [{"elem": {"val": "198.51.100.7", "expires": 3500}}, "198.51.100.8"]}),
+        ),
+        tiers(
+            "map",
+            json!({"name": "map-privee", "handle": 3, "type": "ipv4_addr", "map": "verdict",
+            "elem": [["198.51.100.9", {"accept": null}]]}),
+        ),
+        tiers(
+            "flowtable",
+            json!({"name": "flux-prive", "handle": 4, "hook": "ingress", "prio": 0,
+            "dev": "if-privee"}),
+        ),
+    ]);
+    r
+}
+
+#[test]
+fn objets_nommes_compares_sans_exporter_ce_qu_ils_portent() {
+    let a = reference_avec_objets();
+    let b = Bac::nouveau();
+    let lancer = |o: &Value| {
+        b.lancer(
+            &serde_json::to_vec(&a).unwrap(),
+            &serde_json::to_vec(o).unwrap(),
+            true,
+        )
+    };
+    // L'etat change seul: valeurs du counter, expiration, ordre des elements.
+    let mut o = a.clone();
+    o["nftables"][7]["counter"]["packets"] = 9000.into();
+    o["nftables"][8]["set"]["elem"] =
+        json!(["198.51.100.8", {"elem": {"val": "198.51.100.7", "expires": 12}}]);
+    let r = rapport(lancer(&o), 0, "MATCH");
+    assert_eq!(
+        r["expected_counts"],
+        json!({"tables":2,"chains":1,"rules":3,"objects":4})
+    );
+    let mut ecarts = Vec::new();
+    let mut o = a.clone();
+    o["nftables"][8]["set"]["elem"]
+        .as_array_mut()
+        .unwrap()
+        .push("198.51.100.99".into());
+    ecarts.push((o, json!(["set-elements"])));
+    let mut o = a.clone();
+    o["nftables"][9]["map"]["elem"][0][1] = json!({"drop": null});
+    ecarts.push((o, json!(["map-elements"])));
+    let mut o = a.clone();
+    o["nftables"][10]["flowtable"]["dev"] = json!(["if-privee", "if-autre"]);
+    ecarts.push((o, json!(["flowtables"])));
+    let mut o = a.clone();
+    o["nftables"].as_array_mut().unwrap().remove(7);
+    ecarts.push((o, json!(["counters"])));
+    for (o, categories) in ecarts {
+        let r = rapport(lancer(&o), 1, "MISMATCH");
+        assert_eq!(r["differences"], categories);
+        let texte = r.to_string();
+        for secret in [
+            "table-tierce",
+            "compteur-prive",
+            "set-prive",
+            "map-privee",
+            "flux-prive",
+            "if-privee",
+            "if-autre",
+            "198.51.100",
+        ] {
+            assert!(!texte.contains(secret), "{secret} exporte: {texte}");
+        }
+    }
+    // Un type que le comparateur ne sait pas lire: jamais omis.
+    let mut o = a.clone();
+    o["nftables"].as_array_mut().unwrap().push(
+        json!({"tunnel": {"family": "inet", "table": "table-tierce", "name": "tunnel-prive"}}),
+    );
+    let r = rapport(lancer(&o), 2, "UNMEASURED");
+    assert_eq!(r["reason"], "type d'objet nft non pris en charge");
+    assert!(!r.to_string().contains("tunnel-prive"));
 }
 
 #[test]

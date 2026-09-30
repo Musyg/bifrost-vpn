@@ -83,31 +83,57 @@ UNMEASURED/2 une comparaison impossible. Meme une reference permissive peut
 correspondre: la commande n'evalue pas sa surete. Les fichiers peuvent etre
 anciens, incomplets ou falsifies; leur collecte n'est pas attestee.
 
-Schema nft JSON 1 avec metainfo initiale obligatoire. Tables, chaines et regles
-sont comparees, y compris familles, priorites, hooks, politiques, flags,
-expressions, commentaires, regles supplementaires et ordre global. Les cles
-d'un objet JSON peuvent etre reordonnees, pas les elements d'un tableau.
-Seuls les handles d'objets et les deux valeurs `packets`/`bytes` des compteurs
-anonymes sont ignores; la presence et la position du compteur restent comparees.
+Schema nft JSON 1 avec metainfo initiale obligatoire. Tables, chaines, regles
+et objets nommes sont compares, y compris familles, priorites, hooks,
+politiques, flags, expressions, commentaires, regles et objets
+supplementaires et ordre global. Les cles d'un objet JSON peuvent etre
+reordonnees, pas les elements d'un tableau, hors les deux ensembles nommes
+plus bas. Seuls les handles d'objets et les valeurs d'etat que le noyau change
+seul sont ignores: `packets`/`bytes` des compteurs (anonymes, nommes ou
+d'element), consommation d'un quota (`used`, et `used_unit` d'un quota
+anonyme ou d'element, que nft n'ecrit qu'une fois non nulle), dernier passage
+(`last`, nul ou non) et temps restant d'un element (`expires`). L'instruction
+ou l'objet qui les porte reste compare, presence et position comprises; la
+limite d'un quota et le delai d'un element aussi. Une consommation ou une
+valeur de compteur posee a la creation n'est pas comparee davantage.
 Les informations de version du producteur dans metainfo ne sont pas comparees.
 Les expressions sont comparees structurellement, sans interpreteur nft: ce
 controle n'est ni un validateur complet de la grammaire nft, ni un simulateur.
 
-Objets autonomes set/map/flowtable/counter et autres types non pris en charge:
+Objets nommes autonomes, depuis D1b.3c: set, map, flowtable, counter, quota,
+limit, ct helper, ct timeout, ct expectation et synproxy, dans la forme que nft
+1.0.9 leur donne. Identite (type, famille, table, nom), declaration et, pour un
+set ou une map, elements sont compares. Les elements d'un set sont une
+appartenance: compares sans egard a leur ordre, tries par cle; une cle en
+double, ou deux valeurs pour une cle de map, n'est pas une sortie de nft et
+rend la capture NON MESUREE. Les peripheriques d'un flowtable sont aussi un
+ensemble (nft en ecrit un seul en chaine, plusieurs en liste). Un objet
+ajoute, retire ou change est un ecart de sa categorie (`sets`, `set-elements`,
+`maps`, `map-elements`, `flowtables`, `counters`, `quotas`, `limits`,
+`ct-helpers`, `ct-timeouts`, `ct-expectations`, `synproxies`), comme une
+chaine tierce; un element qu'un set dynamique gagne ou perd avec le trafic
+aussi. Tout autre type (`secmark`, `tunnel`, `element` hors d'un set...):
 UNMEASURED, jamais omis. Meme refus pour un schema inconnu, une cle JSON
-dupliquee, une table/chaine dupliquee, un parent absent, un nombre non entier,
-un fichier tronque ou inaccessible. Une reference sans chaine de base est
-refusee; une capture observee valide mais vide constitue un ecart.
+dupliquee, une table, une chaine ou un objet nomme duplique, un objet
+malforme, un parent absent, un nombre non entier, un fichier tronque ou
+inaccessible. Une reference sans chaine de base est refusee; une capture
+observee valide mais vide constitue un ecart.
 
 Deux fichiers reguliers immuables, 2 Mio maximum chacun, lecture bornee, liens
 detectes au controle initial refuses. Les limites de concurrence et de stockage
 de D1a s'appliquent aussi ici. Rapport sans noms, adresses, expressions ni chemins:
-seuls les comptes et les categories d'ecart sont exportes. L'intervalle est celui
+seuls les comptes (dont `objects`, le nombre d'objets nommes) et les categories
+d'ecart sont exportes; ni element de set ni peripherique. L'intervalle est celui
 de la comparaison locale, PAS celui de la collecte des captures.
 
 Acceptation hors ligne: ordre de regles inverse, chaine tierce ajoutee, politique
 drop remplacee, priorite/hook/interface/destination/operateur modifies, regle ou
 compteur supprime, table dormant, capture vide, invalide et hors perimetre.
+Objets nommes, chaque type: correspondance malgre leurs valeurs d'etat, l'ordre
+de leurs elements et de leurs peripheriques; element ajoute ou retire, flag,
+valeur de map, hook, priorite ou peripheriques de flowtable, counter retire,
+limite de quota, objet tiers ajoute, chacun dans sa seule categorie; type
+inconnu et objet malforme NON MESURES.
 Les fixtures sont synthetiques: elles ne prouvent pas une observation du noyau.
 
 #### D1b.2 - Collecte passive Linux livree
@@ -138,7 +164,7 @@ indisponible. Aucun priviliege ou service persistant n'est installe.
 Limites: namespace courant, confiance dans le noyau et le binaire nft systeme,
 reference non authentifiee, generation 32 bits, etat ponctuel. Conntrack, eBPF,
 iptables legacy, interfaces physiques, routes et DNS ne sont pas prouves par
-cette comparaison. Les objets hors perimetre D1b.1 restent NON MESURES.
+cette comparaison. Les types d'objets que D1b.1 ne lit pas restent NON MESURES.
 
 Acceptation: frames netlink invalides, generation changee ou seconde lecture
 refusee, enfant trop lent/trop bavard/en echec. Le banc `preuve-nft-linux.sh`
@@ -172,8 +198,9 @@ l'intention n'est exporte. `network_security` reste `not-evaluated`.
 
 La reference couvre le ruleset produit complet (input/output/forward, DNS,
 DHCP, NDP, marque, interface, LAN et exceptions par UID), pas les seules regles
-qui portent le nom Bifrost. Une table tierce rend MISMATCH; un objet hors
-perimetre rend UNMEASURED. Aucun tri global ni filtre de regles tierces ne peut
+qui portent le nom Bifrost. Une table ou un objet nomme tiers rend MISMATCH;
+un type d'objet que le comparateur ne lit pas rend UNMEASURED. Aucun tri global
+ni filtre de regles tierces ne peut
 masquer un changement. La forme JSON cible est celle de nft avec `--numeric`;
 une difference de representation entre versions peut rendre un ecart et doit
 etre examinee, pas ignoree automatiquement.
@@ -217,7 +244,9 @@ echec du moteur: UNMEASURED avec sa raison. La declaration passe par le meme
 lecteur strict que `--politique`; interface `lo`, compte de coeur ou de
 resolveur root, compte partage entre les deux, ou moteur autre que nftables
 sortent du perimetre de la reference et rendent UNMEASURED, jamais MATCH. Un
-noyau different de la declaration rend MISMATCH.
+noyau different de la declaration rend MISMATCH. La declaration ne porte aucun
+objet nft nomme: un objet tiers, dans une table tierce ou dans celle du
+produit, rend MISMATCH avec sa categorie, comme une table tierce (voir D1b.3c).
 
 `--politique-daemon` exclut `--attendu`, `--politique` et `--observe`, et exige
 donc `--actif`. Le rapport garde `schema_version=1` et `policy_schema_version=1`,
@@ -247,7 +276,7 @@ UNMEASURED. Aucun processus ne survit aux namespaces. Non mesures en banc:
 etat connecte, montee de l'interface, reconnexion, chemin WireGuard (marque),
 resolveur embarque reel.
 
-#### D1b.3c - Identite du serveur et preuve WFP livrees; objets nft hors perimetre (a faire)
+#### D1b.3c - Identite du serveur, preuve WFP et objets nft nommes livres
 
 Identite du serveur de la declaration, livree. Avant d'ecrire le moindre octet,
 `prove nft --politique-daemon` et `prove wfp --politique-daemon` exigent du
@@ -364,15 +393,57 @@ daemon ne journalise aucune requete de sa part. Non mesure en banc apres la
 fusion: la preuve face au service reel sous LocalSystem, dont le MATCH n'est
 etabli que par recette.
 
-Reste a faire: objets nft hors perimetre du comparateur.
+Objets nft nommes, livre. Constat avant, mesure le 30/09/2026 sur le client de
+`eb325b3`, nft 1.0.9, noyau 7.0, en namespace jetable a cote du ruleset que
+pose le daemon reel: un seul set, map, flowtable, counter, quota, limit,
+ct helper, ct timeout, ct expectation ou synproxy pose par un tiers, dans une
+table tierce ou dans celle du produit, rendait les trois modes UNMEASURED
+(`type d'objet nft non pris en charge`), meme face a une reference qui portait
+l'objet identique; seule une table tierce vide rendait MISMATCH en
+`--politique-daemon`. Sur un hote ou un pare-feu tiers pose un set, la preuve
+etait muette. Un quota anonyme et `last` dans une regle rendaient en outre un
+faux ecart des que du trafic passait: leur valeur d'etat etait comparee.
+
+Apres: les dix types sont lus et compares (voir D1b.1). `--observe` et
+`--actif` correspondent, apres trafic, a une reference qui porte les memes
+objets. `--politique-daemon` rend MISMATCH avec la categorie de ce qui est en
+plus (`tables` et `sets` pour un set dans une table tierce, `counters` seul
+pour un counter ajoute a la table du produit): la declaration n'en porte aucun,
+et un objet que le daemon n'a pas pose n'est pas ce qu'il declare, qu'une regle
+le reference ou non. Un type que le comparateur ne lit pas reste UNMEASURED,
+meme la ou une table tierce suffirait a conclure a un ecart.
+
+Limites: la forme JSON de nft 1.0.9 omet `auto-merge` d'un set (propriete de
+l'outil, pas du noyau), rend `typeof` en `type`, et n'ecrit une valeur de
+`ct timeout` que si elle differe du defaut de nft: deux captures prises par
+des versions de nft aux defauts differents peuvent correspondre sur des
+delais differents. Un set rempli par le trafic change d'elements entre deux
+captures: c'est un ecart, pas un etat ignore. La forme d'un meter n'a pas ete
+relevee. Le noyau de mesure refuse `secmark` (pas de module de securite a
+contextes) et nft 1.0.9 ne connait pas `tunnel`: leur forme n'est pas relevee.
+
+Acceptation, banc jetable (`preuve-nft-linux.sh`): une table tierce porte un
+objet de chaque type lu. Apres trafic et plus d'une seconde, chacune des six
+valeurs d'etat ignorees a change (temoin) et la collecte active correspond.
+Element ajoute, element retire, flag de set, valeur de map, priorite et
+peripheriques de flowtable, counter retire, limite de quota, debit de limit,
+set tiers ajoute, counter ajoute a la table du produit: chacun un ecart de sa
+seule categorie, puis correspondance une fois repose. Face au daemon reel, un
+set tiers rend `tables` et `sets`, un counter ajoute a sa table `counters`,
+puis correspondance une fois retires. Avec le client de `eb325b3`, le banc
+echoue sur ces etapes (UNMEASURED). Chaque neutralisation d'une valeur d'etat,
+retiree du client et rejouee face au noyau, rend un ecart de sa categorie.
+
+Reste a faire: `secmark` et `tunnel`, que le comparateur ne lit pas faute d'en
+avoir releve la forme, restent NON MESURES.
 
 La collecte Linux D1b.2 encadre le dump par la generation nftables (`getgen`/`id`),
 pas par deux horodatages. Deux captures identiques seules ne prouvent pas
 l'absence d'un changement transitoire. D1b reste incomplet: sous Linux, l'attendu peut venir de la declaration d'un serveur root, que le
 client verifie avant de la lire, mais rien n'etablit que ce serveur est le
 daemon; sous Windows, la preuve n'admet que le pipe de LocalSystem, sans
-etablir non plus que son serveur est le daemon. Les objets nft hors perimetre
-manquent. Une
+etablir non plus que son serveur est le daemon. Deux types d'objets nft
+(`secmark`, `tunnel`) ne sont pas lus. Une
 intention permissive ou obsolete n'est pas rendue fiable par le fait que le
 produit sait la representer, ni par le fait que le daemon la declare.
 

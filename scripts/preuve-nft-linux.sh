@@ -8,7 +8,7 @@ fi
 RACINE=$(cd "$(dirname "$0")/.." && pwd)
 CLI="$RACINE/target/debug/bifrost-cli"
 DAEMON="$RACINE/target/debug/bifrost-daemon"
-for outil in ip nft jq setpriv cmp getent stat python3; do command -v "$outil" >/dev/null; done
+for outil in ip nft jq setpriv cmp getent stat python3 ping sed; do command -v "$outil" >/dev/null; done
 test -x "$CLI"
 test -x "$DAEMON"
 BAC=$(mktemp -d)
@@ -46,7 +46,7 @@ retirer_netns() {
 nettoyer() {
   local code=$?
   if [ "$code" != 0 ]; then
-    for rapport in match ecart refus vide politique decl faux; do
+    for rapport in match ecart refus vide politique objets-r decl faux; do
       if [ -f "$BAC/$rapport.json" ]; then cat "$BAC/$rapport.json"; fi
     done
     for journal in connect.log daemon.log; do
@@ -161,6 +161,120 @@ ip netns exec "$NS" "$CLI" --json prove nft --politique "$BAC/intention.json" --
 test "$CODE" = 1
 jq -e '.verdict == "MISMATCH" and (.differences | index("rules") != null)' "$BAC/politique.json" >/dev/null
 echo 'PASSED: table tierce et permis ajoute detectes contre le plan produit'
+
+# --- D1b.3c: les objets nft nommes sont compares, plus refuses ---
+#
+# Une table tierce porte un objet de chaque type que le comparateur lit. Avant,
+# un seul d'entre eux, dans n'importe quelle table, rendait toute la preuve non
+# mesuree. Deux peripheriques factices, pour le flowtable: ils n'existent que
+# dans NOTRE namespace, sans lien vers l'exterieur, et partent avec lui.
+ip netns exec "$NS" nft flush ruleset
+ip netns exec "$NS" ip link set lo up
+ip netns exec "$NS" ip link add bfobj0 type dummy
+ip netns exec "$NS" ip link add bfobj1 type dummy
+ip netns exec "$NS" ip link set bfobj0 up
+ip netns exec "$NS" ip link set bfobj1 up
+cat > "$BAC/objets.nft" <<'NFT'
+table inet bifrost_preuve {
+  chain output {
+    type filter hook output priority 0; policy drop;
+    oifname "lo" accept
+  }
+}
+table inet tiers {
+  counter compte { }
+  counter isole { }
+  quota plafond { 10 mbytes }
+  limit debit { rate 10/second burst 5 packets }
+  ct helper assistant { type "ftp" protocol tcp; l3proto ip; }
+  ct timeout delais { protocol tcp; l3proto ip; policy = { established: 100 }; }
+  ct expectation attente { protocol tcp; dport 21; timeout 1m; size 10; l3proto ip; }
+  synproxy proxy { mss 1460; wscale 7; timestamp sack-perm; }
+  set bloques { type ipv4_addr; flags timeout; timeout 1h; counter; elements = { 127.0.0.1, 192.0.2.1, 192.0.2.2 timeout 30m } }
+  set reseaux { type ipv4_addr; flags interval; elements = { 192.0.2.0/24, 198.51.100.10-198.51.100.20 } }
+  map verdicts { type ipv4_addr : verdict; elements = { 192.0.2.8 : accept, 192.0.2.9 : drop } }
+  flowtable flux { hook ingress priority 0; devices = { bfobj0, bfobj1 }; }
+  chain sortie {
+    type filter hook output priority 10; policy accept;
+    ip daddr @bloques counter name "compte"
+    quota name "plafond"
+    quota 5 mbytes
+    last
+  }
+}
+NFT
+# Un type refuse par ce noyau fait echouer le banc ICI, en le nommant: jamais
+# une abstention silencieuse.
+ip netns exec "$NS" nft -f "$BAC/objets.nft"
+ip netns exec "$NS" nft --json --numeric list ruleset > "$BAC/objets.json"
+chmod 644 "$BAC/objets.json"
+# Le trafic et le temps font bouger ce qui change seul. Temoin: CHACUNE des six
+# valeurs d'etat que le comparateur ignore doit avoir change entre la reference
+# et une capture prise apres; sinon la correspondance qui suit ne prouverait
+# rien sur celle qui n'a pas bouge. L'expiration se compte en secondes: on en
+# laisse passer plus d'une.
+ip netns exec "$NS" ping -c 3 -i 0.2 -W 1 127.0.0.1 >/dev/null
+sleep 1.2
+ip netns exec "$NS" nft --json --numeric list ruleset > "$BAC/objets-trafic.json"
+if ! jq -n -e --slurpfile a "$BAC/objets.json" --slurpfile b "$BAC/objets-trafic.json" '
+  def objets($c): $c[0].nftables[];
+  def nomme($c; $genre; $nom): objets($c) | .[$genre]? | select(.name? == $nom);
+  def element($c; $v): nomme($c; "set"; "bloques") | .elem[] | .elem? | select(.val == $v);
+  def regle($c; $cle): [objets($c) | .rule? | select(.chain? == "sortie") | .expr[] | select(has($cle)) | .[$cle]];
+  [ (nomme($a; "counter"; "compte").packets != nomme($b; "counter"; "compte").packets),
+    (nomme($a; "quota"; "plafond").used != nomme($b; "quota"; "plafond").used),
+    (element($a; "127.0.0.1").counter != element($b; "127.0.0.1").counter),
+    (element($a; "192.0.2.2").expires != element($b; "192.0.2.2").expires),
+    (regle($a; "quota") != regle($b; "quota")),
+    (regle($a; "last") != regle($b; "last")) ] | all' >/dev/null; then
+  echo "une valeur d'etat n'a pas bouge: la correspondance ne prouverait rien sur elle" >&2
+  exit 1
+fi
+objets_prouver() {
+  CODE=0
+  ip netns exec "$NS" "$CLI" --json prove nft --attendu "$BAC/objets.json" --actif > "$BAC/objets-r.json" || CODE=$?
+  # Ni nom, ni element, ni peripherique ne sort du rapport.
+  if jq 'del(.started_at_unix_ms, .completed_at_unix_ms, .duration_ms)' "$BAC/objets-r.json" \
+    | grep -F -e tiers -e bloques -e verdicts -e plafond -e bfobj -e 192.0.2 -e 198.51.100 >/dev/null; then
+    echo "le rapport exporte le contenu d'un objet" >&2
+    return 1
+  fi
+}
+objets_prouver
+test "$CODE" = 0
+jq -e '.verdict == "MATCH" and .generation_verified and .expected_counts.objects == 12 and .observed_counts.objects == 12' "$BAC/objets-r.json" >/dev/null
+echo 'PASSED: objets nommes identiques apres trafic -> correspondance, valeurs d etat ignorees'
+# `objets_ecart <categorie> <expression sed>`: le ruleset repose depuis une
+# variante du fichier, puis la collecte doit rendre un ecart de CETTE seule
+# categorie. Reposer change les handles et remet l'etat a zero: le temoin qui
+# suit chaque retour le montre sans effet.
+objets_reposer() {
+  ip netns exec "$NS" nft flush ruleset
+  sed "$1" "$BAC/objets.nft" > "$BAC/variante.nft"
+  ip netns exec "$NS" nft -f "$BAC/variante.nft"
+}
+objets_ecart() {
+  objets_reposer "$2"
+  objets_prouver
+  test "$CODE" = 1
+  jq -e --arg c "$1" '.verdict == "MISMATCH" and .differences == [$c]' "$BAC/objets-r.json" >/dev/null
+  objets_reposer ''
+  objets_prouver
+  test "$CODE" = 0
+}
+objets_ecart set-elements 's|192.0.2.2 timeout 30m|192.0.2.2 timeout 30m, 192.0.2.3|'
+objets_ecart set-elements 's|192.0.2.0/24, ||'
+objets_ecart sets 's|flags interval;|flags interval,timeout;|'
+objets_ecart map-elements 's|192.0.2.8 : accept|192.0.2.8 : drop|'
+objets_ecart flowtables 's|hook ingress priority 0;|hook ingress priority 5;|'
+objets_ecart flowtables 's|devices = { bfobj0, bfobj1 }|devices = { bfobj0 }|'
+objets_ecart counters '/counter isole/d'
+objets_ecart quotas 's|quota plafond { 10 mbytes }|quota plafond { 20 mbytes }|'
+objets_ecart limits 's|rate 10/second burst 5 packets|rate 20/second burst 5 packets|'
+objets_ecart sets 's|^table inet tiers {$|table inet tiers { set ajoute { type ipv4_addr; }|'
+objets_ecart counters 's|^table inet bifrost_preuve {$|table inet bifrost_preuve { counter ajoute { }|'
+echo 'PASSED: element ajoute ou retire, flag, valeur de map, flowtable, counter retire, quota, limit, objet ajoute -> ecart de sa categorie'
+ip netns exec "$NS" nft flush ruleset
 
 # --- D1b.3b: l'attendu est ce que le VRAI daemon declare avoir pose ---
 #
@@ -567,6 +681,31 @@ ecart tables
 ip netns exec "$NSD" nft delete table inet tiers
 correspond
 echo 'PASSED: filtre tiers prioritaire -> ecart'
+
+# Objet nomme pose par un tiers: la declaration du daemon n'en porte aucun,
+# c'est donc un ecart de sa categorie, dans une table tierce comme dans celle
+# du produit. Avant D1b.3c, la preuve entiere restait non mesuree.
+objet_tiers() {
+  ecart "$1"
+  jq -e --argjson d "$2" '.differences == $d' "$BAC/decl.json" >/dev/null
+  if jq 'del(.started_at_unix_ms, .completed_at_unix_ms, .duration_ms)' "$BAC/decl.json" \
+    | grep -F -e tiers -e bloques -e ajoute -e 192.0.2 >/dev/null; then
+    echo "le rapport exporte le contenu d'un objet" >&2
+    return 1
+  fi
+}
+ip netns exec "$NSD" nft -f - <<'NFT'
+table inet tiers {
+  set bloques { type ipv4_addr; elements = { 192.0.2.1 } }
+}
+NFT
+objet_tiers sets '["tables", "sets"]'
+ip netns exec "$NSD" nft delete table inet tiers
+ip netns exec "$NSD" nft add counter inet bifrost ajoute
+objet_tiers counters '["counters"]'
+ip netns exec "$NSD" nft delete counter inet bifrost ajoute
+correspond
+echo 'PASSED: objet nomme tiers, dans une table tierce ou celle du produit -> ecart de sa categorie'
 
 # Interface remplacee: le tunnel accepte vers une autre interface.
 H=$(handle '.expr[0].match.left.meta.key? == "oifname" and .expr[0].match.right == "bfdecl0"')

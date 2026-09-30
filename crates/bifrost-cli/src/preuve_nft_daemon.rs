@@ -535,6 +535,58 @@ mod tests {
         );
     }
 
+    /// Un objet nft nomme pose par un tiers, a cote de la politique conforme:
+    /// la declaration du daemon n'en porte aucun, donc c'est un ecart de sa
+    /// categorie, comme une table tierce; dans la table du produit aussi. Un
+    /// type que le comparateur ne sait pas lire reste NON MESURE, meme quand
+    /// une table tierce suffirait a conclure.
+    #[tokio::test]
+    async fn un_objet_tiers_est_un_ecart_de_sa_categorie() {
+        let p = politique();
+        let avec = |ajouts: Vec<Value>| {
+            let mut noyau: Value = serde_json::from_slice(&noyau(&p)).unwrap();
+            noyau["nftables"].as_array_mut().unwrap().extend(ajouts);
+            serde_json::to_vec(&noyau).unwrap()
+        };
+        let table_tierce = json!({"table": {"family": "inet", "name": "tierce", "handle": 90}});
+        let set_tiers = json!({"set": {"family": "inet", "table": "tierce", "name": "bloques",
+            "handle": 1, "type": "ipv4_addr", "elem": ["192.0.2.50"]}});
+        let counter_produit = json!({"counter": {"family": "inet", "table": "bifrost",
+            "name": "ajoute", "handle": 91, "packets": 0, "bytes": 0}});
+        let secmark = json!({"secmark": {"family": "inet", "table": "tierce", "name": "s",
+            "handle": 2, "context": "x"}});
+        for (nom, capture, verdict, categories) in [
+            (
+                "set dans une table tierce",
+                avec(vec![table_tierce.clone(), set_tiers]),
+                "MISMATCH",
+                json!(["tables", "sets"]),
+            ),
+            (
+                "counter dans la table du produit",
+                avec(vec![counter_produit]),
+                "MISMATCH",
+                json!(["counters"]),
+            ),
+            (
+                "type inconnu dans une table tierce",
+                avec(vec![table_tierce, secmark]),
+                "UNMEASURED",
+                json!([]),
+            ),
+        ] {
+            let daemon = FauxDaemon::demarrer(vec![posee(&p)]);
+            let r = prouver(&daemon, capture).await;
+            assert_eq!(r["verdict"], verdict, "{nom}: {r}");
+            assert_eq!(r["differences"], categories, "{nom}");
+            assert_eq!(daemon.requetes(), 2, "{nom}");
+            rien_de_la_declaration(&r);
+            for interdit in ["tierce", "bloques", "192.0.2.50", "ajoute"] {
+                assert!(!r.to_string().contains(interdit), "{nom}: {interdit}");
+            }
+        }
+    }
+
     /// Les refus de la collecte gardent leur raison: la declaration ne
     /// remplace jamais une observation manquee.
     #[tokio::test]

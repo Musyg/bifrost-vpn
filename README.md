@@ -197,13 +197,16 @@ bifrost-cli --json prove nft --attendu reference.json --observe capture.json
 
 La commande compare des captures au format JSON de `nft -j list ruleset`, sans
 lancer nft, contacter le daemon ou appliquer de regles. Elle signale les ecarts
-de tables, chaines, regles et ordre; elle conserve les priorites et exceptions,
-en ignorant les handles et valeurs variables des compteurs anonymes. Les noms,
-adresses et chemins des captures ne sont pas exportes dans le rapport.
+de tables, chaines, regles, objets nommes (sets, maps, flowtables, counters,
+quotas, limits, objets ct, synproxy) et ordre; elle conserve les priorites et
+exceptions, en ignorant les handles et les valeurs d'etat que le noyau change
+seul (compteurs, consommation des quotas, dernier passage, expiration des
+elements de set). Les noms, adresses, elements et chemins des captures ne sont
+pas exportes dans le rapport.
 
 Codes: MATCH/0, MISMATCH/1, UNMEASURED/2. Fichiers reguliers de 2 Mio maximum.
-Les captures invalides ou les objets hors perimetre (dont sets/maps/flowtables)
-restent non mesures. **MATCH ne certifie ni le pare-feu actif ni sa surete**:
+Les captures invalides ou les types d'objets que le comparateur ne lit pas
+(secmark, tunnel) restent non mesures. **MATCH ne certifie ni le pare-feu actif ni sa surete**:
 la reference et l'observation sont deux fichiers fournis, potentiellement
 anciens ou incomplets.
 
