@@ -10,9 +10,10 @@
 //!   [`protocol::MAX_FRAME_BYTES`] plutot que de faire grossir le tampon du
 //!   daemon indefiniment.
 //!
-//! Et, dans l'autre sens, sur demande: [`IpcClient::connect_verified`] exige
-//! du SERVEUR une identite privilegiee (root par `SO_PEERCRED`, pipe
-//! appartenant a LocalSystem) avant de lui ecrire quoi que ce soit.
+//! Et, dans l'autre sens, toujours: [`IpcClient::connect_verified`], le seul
+//! constructeur du client, exige du SERVEUR une identite privilegiee (root par
+//! `SO_PEERCRED`; pipe appartenant a LocalSystem, ou aussi aux Administrateurs
+//! pour une commande) avant de lui ecrire quoi que ce soit.
 
 pub mod auth;
 pub mod protocol;

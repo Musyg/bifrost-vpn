@@ -85,6 +85,8 @@ bifrost-cli disconnect
 
 `--json` sur n'importe quelle commande donne une sortie exploitable par un script.
 
+Avant d'ecrire quoi que ce soit, le client verifie qui sert le socket : sous Linux un processus root, sous Windows un pipe possede par LocalSystem ou par les Administrateurs. Sinon il refuse, dit que le serveur du socket n'a pas l'identite attendue du daemon, n'envoie rien et sort en code **4**. Cela vaut pour chaque commande qui parle au daemon, `connect --config` compris, qui transmet la cle privee du profil, et il n'existe pas d'option pour s'en passer. Sans cette verification, sous Windows, n'importe quel compte pouvait prendre le nom du pipe du daemon pendant que le service etait arrete et recevoir le profil du prochain `connect --config`.
+
 Si le daemon meurt alors que le kill switch est arme, le trafic reste bloque : c'est voulu. Pour rouvrir :
 
 ```bash
@@ -672,7 +674,7 @@ Le chemin de binaire, en particulier, est exactement ce que ce depot refuse aill
 
 **Et un client menteur n'y gagne rien, ce qui se demontre plutot que s'espere.** Un verdict a vrai ecarte REALITY, et rien d'autre ; or le client choisit deja le profil, donc pour eviter REALITY il lui suffit de ne pas en envoyer. Un verdict a faux n'ecarte rien du tout, puisque seule une mesure elimine. Quant a l'ignorance, elle ne peut pas voyager : la commande porte un booleen et non un `Option`, donc « je n'ai rien pu mesurer » est inexprimable sur le fil - le seul degat possible, ecraser une mesure par une ignorance, n'est pas teste, il est **impossible a ecrire**.
 
-`--annoncer` est explicite, et le restera : une commande qui a l'air de ne faire que regarder ne doit pas modifier au passage ce sur quoi le daemon fondera ses refus. Si le daemon est absent, l'echec se dit sans changer le code de sortie, qui reste celui de la mesure - le verdict appartient d'abord a qui l'a demande.
+`--annoncer` est explicite, et le restera : une commande qui a l'air de ne faire que regarder ne doit pas modifier au passage ce sur quoi le daemon fondera ses refus. Si le daemon est absent, ou si le serveur du socket n'a pas l'identite attendue du daemon, l'echec se dit sans changer le code de sortie, qui reste celui de la mesure - le verdict appartient d'abord a qui l'a demande. Dans le second cas, rien n'est envoye.
 
 Une falsification a trouve ce que la relecture n'avait pas vu : cette commande est **la seule** que le daemon ne traite pas par un aller-retour. Toutes les autres attendent une reponse du superviseur, donc un « ok » prouve qu'il a recu. Celle-ci pourrait repondre « ok » en jetant le verdict, et le daemon deciderait ensuite sur une mesure qu'on croirait lui avoir donnee. Deux recettes gardent maintenant ce fil-la.
 

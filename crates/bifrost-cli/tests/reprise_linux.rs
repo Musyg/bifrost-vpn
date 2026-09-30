@@ -86,6 +86,12 @@ fn atelier(nom: &str) -> PathBuf {
 /// Le `OnceLock` supprime la concurrence plutot que de la rattraper: la seule
 /// ecriture a lieu avant que la premiere recette n'ait pu forker, puisque
 /// toutes passent par ici avant de lancer quoi que ce soit.
+///
+/// Partage, il ne peut etre efface par aucune recette, et un binaire de test n'a
+/// pas de fin ou le faire: il vit donc sous `CARGO_TARGET_TMPDIR`, dans le
+/// dossier cible, et part avec lui. Sous le repertoire temporaire du systeme,
+/// chaque passage laissait un `bifrost-reprise-hook-<pid>` sur l'hote d'essai
+/// (releve le 30/09/2026: 48 depuis la veille).
 fn hook() -> &'static PathBuf {
     static HOOK: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     HOOK.get_or_init(|| {
@@ -94,7 +100,8 @@ fn hook() -> &'static PathBuf {
             .join("../../packaging/systemd/system-sleep/bifrost-reprise");
         // Un repertoire a lui: les ateliers des recettes sont effaces a la fin
         // de chacune, et le hook partage n'y survivrait pas.
-        let rep = std::env::temp_dir().join(format!("bifrost-reprise-hook-{}", std::process::id()));
+        let rep = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("bifrost-reprise-hook-{}", std::process::id()));
         std::fs::create_dir_all(&rep).expect("repertoire du hook");
         std::fs::set_permissions(&rep, std::fs::Permissions::from_mode(0o755)).expect("hook 0755");
         let copie = rep.join("bifrost-reprise");
@@ -206,24 +213,50 @@ async fn recevoir_une_fois(mut serveur: IpcServer, tx: std::sync::mpsc::Sender<C
     }
 }
 
+/// Le serveur d'essai tourne sous le compte de la recette, et le client exige
+/// du serveur l'identite du daemon: root. Sous root (le compte du hook en
+/// production: `systemd-sleep` n'a pas de `User=`), la reprise arrive; sous un
+/// compte ordinaire le serveur d'essai est un faux daemon, et le hook doit le
+/// refuser sans rien lui ecrire, en 4, en disant que rien n'a ete repose. Les
+/// deux branches mesurent.
+fn verifier_le_reveil(nom: &str, p: &Passage) {
+    if euid() == 0 {
+        assert!(
+            matches!(p.recue, Some(Command::Reprise)),
+            "{nom}: le daemon n'a pas recu de reprise (recu: {:?}, stderr: {})",
+            p.recue.as_ref().map(Command::name),
+            p.erreur
+        );
+        assert_eq!(p.code, Some(0), "{nom}: stderr: {}", p.erreur);
+    } else {
+        assert!(
+            p.recue.is_none(),
+            "{nom}: le hook a parle a un serveur qui n'est pas root: {:?}",
+            p.recue.as_ref().map(Command::name)
+        );
+        assert_eq!(p.code, Some(4), "{nom}: stderr: {}", p.erreur);
+        assert!(
+            p.erreur.contains("n'a pas l'identite attendue du daemon")
+                && p.erreur.contains("n'a PAS ete reposee"),
+            "{nom}: le journal doit dire le refus et ce qui n'a pas eu lieu: {}",
+            p.erreur
+        );
+    }
+}
+
 /// Ce que la tranche existe pour etablir: `post suspend`, invoque a la main,
-/// fait arriver `Command::Reprise` au daemon.
+/// fait arriver `Command::Reprise` au daemon, et a lui seul.
 #[tokio::test(flavor = "multi_thread")]
 async fn le_hook_au_reveil_porte_la_reprise_jusqu_au_daemon() {
     let p = passer("reveil", "post", "suspend", Canal::Ouvert).await;
-    assert!(
-        matches!(p.recue, Some(Command::Reprise)),
-        "le daemon n'a pas recu de reprise (recu: {:?}, stderr: {})",
-        p.recue.as_ref().map(Command::name),
-        p.erreur
-    );
-    assert_eq!(p.code, Some(0), "stderr: {}", p.erreur);
+    verifier_le_reveil("suspend", &p);
 }
 
 /// Les quatre operations que systemd nomme passent toutes par le meme chemin.
 ///
 /// Une seule d'entre elles mesuree laisserait croire que le hook marche alors
-/// qu'il ne reconnaitrait qu'un mot.
+/// qu'il ne reconnaitrait qu'un mot. Hors root, le refus d'identite (4) et non
+/// celui d'invocation (2) montre que chacune a franchi la decision.
 #[tokio::test(flavor = "multi_thread")]
 async fn les_quatre_operations_de_systemd_portent_la_reprise() {
     for operation in [
@@ -233,11 +266,7 @@ async fn les_quatre_operations_de_systemd_portent_la_reprise() {
         "suspend-then-hibernate",
     ] {
         let p = passer(operation, "post", operation, Canal::Ouvert).await;
-        assert!(
-            matches!(p.recue, Some(Command::Reprise)),
-            "{operation}: rien recu (stderr: {})",
-            p.erreur
-        );
+        verifier_le_reveil(operation, &p);
     }
 }
 

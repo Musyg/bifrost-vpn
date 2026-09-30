@@ -26,8 +26,9 @@ Windows saute n'atteste rien sur cette plateforme. Voir le README pour le
 lancement avant une livraison Windows et la revision effectivement mesuree.
 
 Les comptes ci-dessous ont ete pris le 30/09/2026 sur l'arbre qui porte le
-portage des corrections du tableau de survie et des abstentions, puis D1b.3b et
-l'identite du serveur de D1b.3c; ils comptent les recettes de `prove` jusque-la. L'hote qui tient le role `essai-linux` a change le
+portage des corrections du tableau de survie et des abstentions, puis D1b.3b,
+l'identite du serveur de D1b.3c et sa verification par toutes les commandes de
+la CLI. L'hote qui tient le role `essai-linux` a change le
 29/09: ses comptes ne se comparent pas a ceux d'avant cette date.
 
 Compte honnete des recettes cargo, par hote. La colonne `reelles` est ce qui a
@@ -35,13 +36,14 @@ verifie quelque chose: `annoncees` moins `abstentions` moins `rouges`.
 
 | Hote | Annoncees | Abstentions | Rouges | Reelles |
 |---|---|---|---|---|
-| dev-windows | 1274 | 19 | 0 | 1255 |
-| essai-linux | 1291 | 26 | 0 | 1265 |
+| dev-windows | 1283 | 19 | 0 | 1264 |
+| essai-linux | 1298 | 26 | 0 | 1272 |
 
 Les deux lignes ont ete prises par `scripts/recettes-strict.sh`, chacune sur son
 hote: le portage a ajoute 14 recettes des deux cotes, D1b.3b 11 sur dev-windows et 22
 sur `essai-linux`, D1b.3c (identite du serveur de la declaration) 4 sur
-dev-windows et 5 sur `essai-linux`. Sur `essai-linux`
+dev-windows et 5 sur `essai-linux`, la verification du serveur par les commandes
+9 sur dev-windows et 7 sur `essai-linux`. Sur `essai-linux`
 une recette de plus est ignoree par construction
 (elle pose une route et ne tourne qu'en espace de noms reseau), et la garde des
 modes de scripts s'y abstient parce que la copie mesuree n'a pas de `.git` (elle
@@ -61,7 +63,7 @@ la prochaine action. Une cellule vide signalerait une tranche non finie.
 | 05 | Anonymat et chainage. Document redige; le chainage Tor et Nym n'est pas commence, et le document lui-meme le place apres les trois objectifs | Chainage Tor ou Nym, apres les objectifs 1 a 3 |
 | 06 | Architecture logicielle et packaging. Daemon, IPC authentifie, machine a etats et scripts d'installation faits (Linux et Windows, comptes dedies, ACL); ni interface graphique, ni MSI, ni .deb/.rpm, ni mise a jour TUF, ni provisioning; SBOM en CI | Interface graphique en jalon propre apres J2; paquets signes et mise a jour TUF |
 | 07 | Programme de securite produit. fmt, clippy, recettes, suite de fuite, cargo audit, cargo deny et SBOM en CI; politique de divulgation publiee (SECURITY.md, security.txt); inventaire unsafe ferme; cargo vet et fuzz absents, aucune cle PGP | Publier une cle PGP (champ Encryption); ajouter cargo vet et un harnais fuzz |
-| 09 | Souverainete verifiable. D1a: `prove binaire`. D1b.1: comparaison nft hors ligne. D1b.2: collecte Linux passive encadree par GETGEN. D1b.3a: `prove nft --politique` engendre la reference produit depuis une intention v1 explicite; 64 combinaisons confrontees au rendu applique en banc jetable. D1b.3b: `prove nft --politique-daemon --actif` prend pour attendu la politique que le daemon declare avoir posee (requete IPC en lecture, relue avant et apres la collecte); daemon reel en banc jetable: correspondance, quatre alterations en ecart, droits retires et daemon arrete non mesures. D1b.3c (identite): le client exige un serveur root (SO_PEERCRED) avant de lire la declaration, sinon UNMEASURED daemon-identity; regle Windows (proprietaire du pipe LocalSystem) livree dans bifrost-ipc, sans preuve Windows qui l'appelle encore. Ni preuve globale du VPN ni validation Windows | D1b.3c: objets nft hors perimetre, collecte WFP; identite du serveur pour les autres commandes |
+| 09 | Souverainete verifiable. D1a: `prove binaire`. D1b.1: comparaison nft hors ligne. D1b.2: collecte Linux passive encadree par GETGEN. D1b.3a: `prove nft --politique` engendre la reference produit depuis une intention v1 explicite; 64 combinaisons confrontees au rendu applique en banc jetable. D1b.3b: `prove nft --politique-daemon --actif` prend pour attendu la politique que le daemon declare avoir posee (requete IPC en lecture, relue avant et apres la collecte); daemon reel en banc jetable: correspondance, quatre alterations en ecart, droits retires et daemon arrete non mesures. D1b.3c (identite): le client exige un serveur root (SO_PEERCRED) avant de lire la declaration, sinon UNMEASURED daemon-identity; regle Windows (proprietaire du pipe LocalSystem) livree dans bifrost-ipc, sans preuve Windows qui l'appelle encore. Toutes les commandes de la CLI verifient aussi le serveur avant d'ecrire (root; Windows LocalSystem ou Administrateurs), refus en code 4, rien envoye; un compte ordinaire refuse sans rien recevoir en banc jetable. Ni preuve globale du VPN ni validation Windows | D1b.3c: objets nft hors perimetre, collecte WFP |
 
 ## Scripts
 
@@ -75,7 +77,7 @@ Sous `scripts/`:
 | recettes-strict.sh | Compte honnete des recettes cargo (vertes, abstentions, rouges); `--strict` echoue aussi sur abstention |
 | abstentions-budget.sh | Exige que chaque abstention de la CI figure dans la liste attendue du job |
 | check-strict.sh | Exige que les dix vecteurs de fuite soient PASSED |
-| preuve-nft-linux.sh | Collecte nft passive, ecart, refus de privileges et confrontation a la declaration d'un daemon reel, faux daemon non root refuse, dans des namespaces jetables (apres cargo build --workspace); sudo bash ./scripts/preuve-nft-linux.sh |
+| preuve-nft-linux.sh | Collecte nft passive, ecart, refus de privileges et confrontation a la declaration d'un daemon reel, faux daemon non root refuse, compteur non root que chaque commande refuse sans rien lui ecrire, dans des namespaces jetables (apres cargo build --workspace); sudo bash ./scripts/preuve-nft-linux.sh |
 | check-cibles.sh | Construit et verifie les cibles sur l'hote courant |
 | e2e-linux.sh | Bout en bout Linux: daemon reel, capture, montee du tunnel et etancheite |
 | banc-coeur-e2e.sh | Banc bout en bout d'un coeur anti-censure |

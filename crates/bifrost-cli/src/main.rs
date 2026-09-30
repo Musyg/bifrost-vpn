@@ -17,21 +17,25 @@ mod render;
 /// daemon lui-meme. Voir l'en-tete du module.
 #[cfg(target_os = "linux")]
 mod reprise_linux;
+mod serveur;
 
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
 
 use bifrost_ipc::protocol::{Command as IpcCommand, Request, Response};
-use bifrost_ipc::transport::IpcClient;
 
 #[derive(Parser, Debug)]
 #[command(
     name = "bifrost-cli",
     version,
-    about = "Client Bifrost: pilote le daemon, ne modifie rien lui-meme"
+    about = "Client Bifrost: pilote le daemon, ne modifie rien lui-meme",
+    after_help = "Code de sortie 4: le serveur du socket n'a pas l'identite attendue du \
+                  daemon, et rien ne lui a ete envoye (Linux: root; Windows: pipe \
+                  possede par LocalSystem ou par les Administrateurs)."
 )]
 struct Args {
-    /// Chemin du socket Unix ou du named pipe du daemon.
+    /// Chemin du socket Unix ou du named pipe du daemon. Le client verifie
+    /// l'identite de celui qui le sert avant d'y ecrire quoi que ce soit.
     #[arg(long, global = true, default_value_t = bifrost_ipc::default_endpoint())]
     socket: String,
 
@@ -288,11 +292,23 @@ enum CmdProfil {
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    let code = tokio::runtime::Builder::new_current_thread()
+    let issue = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?
-        .block_on(run(args))?;
-    std::process::exit(code);
+        .block_on(run(args));
+    // Un serveur refuse se dit par SON code, quel que soit le site d'appel
+    // qui l'a rencontre, et par son seul message: le contexte qu'un appelant
+    // aurait ajoute ("est-il demarre ?") serait faux.
+    match issue {
+        Ok(code) => std::process::exit(code),
+        Err(e) => match serveur::refus(&e) {
+            Some(refus) => {
+                eprintln!("{refus}");
+                std::process::exit(serveur::CODE_SERVEUR_REFUSE);
+            }
+            None => Err(e),
+        },
+    }
 }
 
 /// Scelle un profil et dit ce qu'il reste a faire.
@@ -522,6 +538,11 @@ fn ranger(quoi: &CmdProfil) -> anyhow::Result<i32> {
 /// la sonde n'a pas pu conclure - le meme code que les vecteurs de fuite
 /// emploient pour SKIPPED. Un verdict absent n'est pas un verdict negatif, et
 /// la sortie doit le dire aussi bien a un humain qu'a un script.
+///
+/// La seule commande qui ne rend pas le code 4 quand le serveur du socket est
+/// refuse, et c'est voulu: son code porte une MESURE de securite, et un `1`
+/// (interception) masque par un `4` serait une interception tue. Le refus se
+/// dit sur la sortie d'erreur, et rien n'est envoye.
 async fn inspecter_le_tls(json: bool, annoncer: bool, socket: &str) -> anyhow::Result<i32> {
     use bifrost_evasion::environnement::Mesure;
     use inspection::Chaine;
@@ -592,7 +613,7 @@ mitm_tls non mesure: {}",
     if annoncer {
         match verdict {
             Mesure::Vu(intercepte) => {
-                if let Err(e) = annoncer_le_verdict(socket, intercepte).await {
+                if let Err(e) = serveur::annoncer_le_verdict(socket, intercepte).await {
                     eprintln!("verdict non transmis au daemon: {e:#}");
                 }
             }
@@ -611,24 +632,6 @@ mitm_tls non mesure: {}",
     })
 }
 
-/// Porte le verdict au daemon.
-async fn annoncer_le_verdict(socket: &str, intercepte: bool) -> anyhow::Result<()> {
-    let mut client = IpcClient::connect(socket)
-        .await
-        .with_context(|| format!("connexion au daemon sur {socket}"))?;
-    let reponse = client
-        .request(&Request::new(IpcCommand::VerdictInspectionTls {
-            intercepte,
-        }))
-        .await
-        .context("dialogue avec le daemon")?;
-    match reponse {
-        Response::Ok => Ok(()),
-        Response::Error { message } => anyhow::bail!("{message}"),
-        autre => anyhow::bail!("reponse inattendue du daemon: {autre:?}"),
-    }
-}
-
 /// Porte la reprise au daemon.
 ///
 /// # Les codes de sortie sont le seul langage que le hook parle
@@ -641,7 +644,14 @@ async fn annoncer_le_verdict(socket: &str, intercepte: bool) -> anyhow::Result<(
 ///   aucun daemon n'a jamais ouvert ce canal sur cette machine;
 /// - `1`, le canal existe mais le dialogue a echoue: un daemon est tombe, ou
 ///   son superviseur ne repond plus. La politique n'a PAS ete reposee;
-/// - `2`, l'invocation ne respecte pas le contrat de `systemd-sleep`.
+/// - `2`, l'invocation ne respecte pas le contrat de `systemd-sleep`;
+/// - `4`, le serveur du socket n'a pas l'identite du daemon (root): rien ne
+///   lui a ete envoye, et la politique n'a PAS ete reposee.
+///
+/// Le hook tourne sous root: `systemd-sleep` est lance par
+/// `systemd-suspend.service` et ses voisines, sans `User=`. Le daemon, root
+/// lui aussi, est donc toujours admis; un socket tenu par un autre compte ne
+/// l'est jamais.
 ///
 /// Le troisieme cas du code `0` merite sa raison: sur une machine ou Bifrost
 /// est installe mais arrete, il n'y a aucune politique a reposer, et faire
@@ -669,13 +679,17 @@ async fn signaler_la_reprise(socket: &str, phase: &str, operation: &str) -> anyh
         Decision::Signaler => {}
     }
 
-    let mut client = match IpcClient::connect(socket).await {
+    let mut client = match serveur::joindre(socket).await {
         Ok(c) => c,
-        Err(IpcError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+        Err(serveur::Echec::Canal(IpcError::Io(e))) if e.kind() == std::io::ErrorKind::NotFound => {
             eprintln!("aucun daemon a l'ecoute sur {socket}: aucune politique a reposer");
             return Ok(0);
         }
-        Err(e) => bail!(
+        Err(serveur::Echec::Refuse(refus)) => {
+            eprintln!("{refus}\nLa politique n'a PAS ete reposee apres cette veille.");
+            return Ok(serveur::CODE_SERVEUR_REFUSE);
+        }
+        Err(serveur::Echec::Canal(e)) => bail!(
             "le canal {socket} existe mais le daemon n'y repond pas ({e}): \
              la politique n'a PAS ete reposee apres cette veille"
         ),
@@ -765,13 +779,20 @@ async fn desarmer_en_urgence(confirme: bool, socket: &str) -> anyhow::Result<i32
     // daemon sain: en faire une condition de refus rendrait la commande
     // inutilisable dans la moitie des situations ou elle sert. Mais desarmer
     // derriere le dos d'un daemon vivant le laisse croire qu'il protege, et
-    // cela doit s'ecrire a l'ecran avant, pas se decouvrir apres.
-    if IpcClient::connect(socket).await.is_ok() {
-        eprintln!(
+    // cela doit s'ecrire a l'ecran avant, pas se decouvrir apres. La sonde
+    // n'ecrit rien; elle verifie tout de meme qui repond, pour ne pas prendre
+    // un processus quelconque pour le daemon.
+    match serveur::presence(socket).await {
+        serveur::Presence::Daemon => eprintln!(
             "attention: un daemon repond encore sur {socket}. La voie ordinaire est\n\
              'bifrost-cli disconnect'; apres un desarmement d'urgence il continuera\n\
              d'annoncer un kill switch arme qui ne l'est plus."
-        );
+        ),
+        serveur::Presence::Autre => eprintln!(
+            "attention: le serveur de {socket} n'a pas l'identite attendue du daemon:\n\
+             ce n'est pas lui qui tient ce canal. Rien ne lui a ete envoye."
+        ),
+        serveur::Presence::Personne => {}
     }
 
     let candidats = ou_chercher_le_daemon();
@@ -903,13 +924,9 @@ async fn run(args: Args) -> anyhow::Result<i32> {
         }
     };
 
-    let mut client = IpcClient::connect(&args.socket).await.with_context(|| {
-        format!(
-            "connexion au daemon sur {}. Est-il demarre, et avez-vous le droit \
-             de le piloter ?",
-            args.socket
-        )
-    })?;
+    // Rien n'est ecrit avant que l'identite du serveur soit etablie; un refus
+    // remonte jusqu'a `main`, qui le rend en code 4.
+    let mut client = serveur::ouvrir(&args.socket).await?;
 
     let response = client
         .request(&Request::new(request))
