@@ -218,7 +218,8 @@ mod tests {
     fn un_repertoire_portant_le_nom_du_binaire_ne_passe_pas_pour_un_binaire() {
         // `exists()` seul rendrait vrai sur un repertoire, et le lancement
         // echouerait plus tard avec une erreur de permission incomprehensible.
-        let racine = std::env::temp_dir().join("bifrost-essai-coeur");
+        let racine =
+            std::env::temp_dir().join(format!("bifrost-essai-coeur-{}", std::process::id()));
         let faux = racine.join(format!("sing-box{}", extension_executable()));
         std::fs::create_dir_all(&faux).unwrap();
         let l = preparer(

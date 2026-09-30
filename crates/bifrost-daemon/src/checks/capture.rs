@@ -822,7 +822,10 @@ mod tests {
             println!("SKIPPED le_compte_tient_au_dela_du_plafond: tcpdump absent");
             return;
         }
-        let chemin = std::env::temp_dir().join("bifrost-releve-plafond.pcap");
+        let chemin = std::env::temp_dir().join(format!(
+            "bifrost-releve-plafond-{}.pcap",
+            std::process::id()
+        ));
         pcap_synthetique(&chemin, COMBIEN).expect("pcap synthetique ecrit");
         let releve = relever(&chemin, "ip").expect("relecture du pcap");
         let _ = std::fs::remove_file(&chemin);
@@ -906,7 +909,8 @@ mod tests {
     /// ce qui passait sur le lien quand un vecteur a renonce.
     #[test]
     fn le_pcap_s_efface_sauf_quand_il_sert_de_preuve() {
-        let jetable = std::env::temp_dir().join("bifrost-pcap-ephemere.pcap");
+        let jetable =
+            std::env::temp_dir().join(format!("bifrost-pcap-ephemere-{}.pcap", std::process::id()));
         std::fs::write(&jetable, b"pcap").expect("temoin ecrit");
         drop(Pcap::ephemere(jetable.clone()));
         assert!(
@@ -915,7 +919,8 @@ mod tests {
             jetable.display()
         );
 
-        let preuve = std::env::temp_dir().join("bifrost-pcap-garde.pcap");
+        let preuve =
+            std::env::temp_dir().join(format!("bifrost-pcap-garde-{}.pcap", std::process::id()));
         std::fs::write(&preuve, b"pcap").expect("temoin ecrit");
         let mut garde = Pcap::ephemere(preuve.clone());
         garde.garder();

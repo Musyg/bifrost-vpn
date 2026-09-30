@@ -37,15 +37,17 @@ la CLI, la correction du permis DNS Windows par famille, la garde des tubes
 sous pipefail, la preuve WFP par declaration, le retrait de CAP_SYS_ADMIN du
 service, les litteraux abimes par un transport d'antislashs et le trou FF
 de la garde des abstentions, la comparaison des objets nft nommes, puis la
-garde sans privilege du contrat de `check` sans banc et des drop-ins de l'unite. L'hote qui tient le role `essai-linux` a change le 29/09: ses comptes ne se comparent pas a ceux d'avant cette date.
+garde sans privilege du contrat de `check` sans banc et des drop-ins de l'unite, puis l'isolement des executions concurrentes
+d'une meme suite (repertoires temporaires par processus, ports sans personne
+tenus). L'hote qui tient le role `essai-linux` a change le 29/09: ses comptes ne se comparent pas a ceux d'avant cette date.
 
 Compte honnete des recettes cargo, par hote. La colonne `reelles` est ce qui a
 verifie quelque chose: `annoncees` moins `abstentions` moins `rouges`.
 
 | Hote | Annoncees | Abstentions | Rouges | Reelles |
 |---|---|---|---|---|
-| dev-windows | 1371 | 19 | 0 | 1352 |
-| essai-linux | 1391 | 25 | 0 | 1366 |
+| dev-windows | 1375 | 19 | 0 | 1356 |
+| essai-linux | 1395 | 25 | 0 | 1370 |
 
 Les deux lignes ont ete prises par `scripts/recettes-strict.sh`, chacune sur son
 hote: le portage a ajoute 14 recettes des deux cotes, D1b.3b 11 sur dev-windows et 22
@@ -63,7 +65,10 @@ comparaison des objets nft nommes 7 sur dev-windows et 8 sur `essai-linux` (la
 recette face au faux daemon est propre a Linux), la garde du contrat de `check`
 sans banc et des drop-ins de l'unite 7 sur dev-windows et 10 sur `essai-linux`
 (chaque raison reelle de ne pas monter le banc, la lecture du masque effectif et
-`linux::run_all()` sous un compte ordinaire sont propres a Linux). Sur `essai-linux` une recette de plus est ignoree par
+`linux::run_all()` sous un compte ordinaire sont propres a Linux), l'isolement
+des executions concurrentes 4 des deux cotes (la recette du port sans personne
+que personne ne peut prendre, et les trois recettes de la garde
+`partage_entre_executions.rs`). Sur `essai-linux` une recette de plus est ignoree par
 construction (elle pose une route et ne tourne qu'en espace de noms reseau).
 La ligne `essai-linux` a ete prise dans un clone, ou la garde des modes de
 scripts mesure (elle lit l'index); dans une copie sans `.git` elle s'abstient,

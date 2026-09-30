@@ -72,10 +72,11 @@ fn doublure(repertoire: &std::path::Path) -> (Lancement, String, port::Reservati
 
 /// Une adresse SOCKS plausible pour un coeur. Personne n'ecoute derriere: ce
 /// qui est eprouve ici est la PUBLICATION de l'adresse, pas le relais.
-fn socks_fictif() -> SocketAddr {
-    format!("127.0.0.1:{}", port::port_sans_personne().unwrap())
-        .parse()
-        .unwrap()
+///
+/// Le port est TENU: l'appelant garde la valeur rendue tant que l'adresse
+/// sert. Voir [`port::PortSansPersonne`].
+fn socks_fictif() -> port::PortSansPersonne {
+    port::port_sans_personne().unwrap()
 }
 
 /// Un repertoire de travail propre a CETTE execution de la recette.
@@ -199,12 +200,13 @@ async fn un_coeur_qui_sort_aussitot_est_signale_sans_attendre() {
     // Un coeur mal configure sort en une fraction de seconde. Continuer a
     // sonder son port pendant dix secondes perdrait la seule information
     // utile, qui est qu'il est mort.
+    let api_morte = port::port_sans_personne().unwrap();
     let lancement = Lancement {
         programme: binaire_du_daemon(),
         // --version fait sortir immediatement avec succes.
         arguments: vec!["--version".into()],
         configuration: PathBuf::from("."),
-        api_clash: Some(port::port_sans_personne().unwrap()),
+        api_clash: Some(api_morte.port()),
         utilisateur: None,
     };
     let debut = Instant::now();
@@ -613,6 +615,8 @@ async fn un_coeur_sans_api_clash_demarre_sans_rien_attendre() {
 fn l_atelier_lance_un_vrai_coeur_depuis_un_fil_synchrone() {
     let rep = repertoire_temporaire("atelier-cycle");
     let (lancement, secret, reserve) = doublure(&rep);
+    let socks_tenu = socks_fictif();
+    let adresse_socks = socks_tenu.adresse();
     // Rendu a l'instant ou la doublure va le prendre.
     reserve.liberer();
 
@@ -626,7 +630,7 @@ fn l_atelier_lance_un_vrai_coeur_depuis_un_fil_synchrone() {
     // Le fil du superviseur de tunnel: pas de runtime, il bloque.
     let fil = std::thread::spawn(move || {
         let lance = poignee
-            .lancer(Coeur::SingBox, lancement, &secret, socks_fictif())
+            .lancer(Coeur::SingBox, lancement, &secret, adresse_socks)
             .expect("la doublure doit se lancer par l'atelier");
         let pid = lance.pid.expect("un coeur lance a un pid");
         assert!(vivant(pid), "le processus doit tourner");
@@ -675,7 +679,8 @@ fn tuer(pid: u32) {
 fn un_coeur_qui_meurt_tout_seul_est_depublie() {
     let rep = repertoire_temporaire("mort-solitaire");
     let (lancement, secret, reserve) = doublure(&rep);
-    let socks = socks_fictif();
+    let socks_tenu = socks_fictif();
+    let socks = socks_tenu.adresse();
     // Rendu a l'instant ou la doublure va le prendre.
     reserve.liberer();
 
@@ -739,7 +744,8 @@ fn un_second_lancement_arrete_le_premier() {
     // Rendus a l'instant ou les doublures vont les prendre.
     reserve_a.liberer();
     reserve_b.liberer();
-    let (socks_a, socks_b) = (socks_fictif(), socks_fictif());
+    let (tenu_a, tenu_b) = (socks_fictif(), socks_fictif());
+    let (socks_a, socks_b) = (tenu_a.adresse(), tenu_b.adresse());
     assert_ne!(socks_a, socks_b, "deux coeurs, deux adresses");
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -800,7 +806,8 @@ fn arreter_sans_coeur_en_cours_reussit() {
 fn l_atelier_publie_le_coeur_actif_et_le_retire_a_l_arret() {
     let rep = repertoire_temporaire("atelier-publication");
     let (lancement, secret, reserve) = doublure(&rep);
-    let socks = socks_fictif();
+    let socks_tenu = socks_fictif();
+    let socks = socks_tenu.adresse();
     // Rendu a l'instant ou la doublure va le prendre.
     reserve.liberer();
 

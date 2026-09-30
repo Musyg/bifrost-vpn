@@ -268,10 +268,10 @@ mod tests {
     /// L'echec de transport est une panne locale, pas une reussite optimiste.
     #[tokio::test]
     async fn une_api_absente_refuse_la_bascule() {
-        // Un port ou personne n'ecoute: on lie puis on relache aussitot.
-        let libre = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let api = libre.local_addr().unwrap();
-        drop(libre);
+        // Un port ou personne n'ecoute, TENU pour que personne ne s'y mette:
+        // voir `super::super::port`.
+        let tenu = super::super::port::port_sans_personne().unwrap();
+        let api = tenu.adresse();
         assert!(matches!(
             basculer(&adresse_de(api), "second").await,
             Issue::Refusee { .. }

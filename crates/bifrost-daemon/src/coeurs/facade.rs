@@ -216,13 +216,16 @@ mod tests {
     /// connexion suivante.
     #[tokio::test]
     async fn un_coeur_declare_mais_injoignable_ne_fait_pas_attendre() {
-        // Un port qu'on vient de liberer: personne n'ecoute derriere.
-        let mort = {
-            let ecoute = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let a = ecoute.local_addr().unwrap();
-            drop(ecoute);
-            a
-        };
+        // Un port TENU sans ecoute: personne derriere, et personne ne peut s'y
+        // mettre. Un port lie puis relache, comme avant le 30/09/2026, peut
+        // etre rendu par l'attribueur de Windows a une autre liaison, y
+        // compris a la connexion sortante de la facade elle-meme, qui aboutit
+        // alors sur elle-meme: la facade relaie vers quelque chose qui ne
+        // ferme jamais, et la recette tombe sur son echeance. Rouge 2 fois sur
+        // 314 suites de ce crate lancees deux a deux, sur dev-windows, le
+        // 30/09/2026; 0 sur 314 avec le port tenu. Voir `super::super::port`.
+        let tenu = super::super::port::port_sans_personne().unwrap();
+        let mort = tenu.adresse();
         let (_tx, rx) = watch::channel(Some(mort));
         let (adresse, facade) = ouvrir("127.0.0.1:0".parse().unwrap(), rx).await.unwrap();
         tokio::spawn(facade.servir());
