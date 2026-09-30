@@ -419,7 +419,8 @@ pub struct TunnelConfig {
     #[serde(default = "default_mtu")]
     pub mtu: u32,
     pub dns: DnsPolicy,
-    /// Autorise le trafic vers les prefixes RFC1918 hors tunnel.
+    /// Autorise le trafic vers les prefixes RFC1918 hors tunnel, sauf le DNS
+    /// (:53) vers eux: il reste reserve a `dns.local_resolver`.
     #[serde(default)]
     pub allow_lan: bool,
     /// Ce qui porte le trafic, et ce qu'il exige.

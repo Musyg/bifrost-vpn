@@ -349,12 +349,13 @@ fn rapport_sans_banc(raison: &str, doh_bypass: impl Fn() -> CheckOutcome) -> Che
 #[cfg(target_os = "linux")]
 mod linux {
     use super::*;
+    use bifrost_core::checks::Verdict;
     use bifrost_core::ports::FirewallPolicy;
     use bifrost_core::state::{Action, Event, StateMachine};
     use bifrost_firewall::linux::ruleset;
     use netns::{
-        BANNIERE_PORT, Bench, CLIENT_ADDR, NS_CLIENT, NS_PHYS, PHYS_ADDR, PREFIX, TUN_CLIENT_ADDR,
-        TUN_SERVER_ADDR, VETH_PHYS, WG_CLIENT_IF, WG_PORT, WG_SERVER_IF,
+        BANNIERE_PORT, Bench, CLIENT_ADDR, NS_CLIENT, NS_PHYS, PHYS_ADDR, PHYS_ADDR6, PREFIX,
+        TUN_CLIENT_ADDR, TUN_SERVER_ADDR, VETH_PHYS, WG_CLIENT_IF, WG_PORT, WG_SERVER_IF,
     };
     use std::net::{IpAddr, Ipv4Addr};
     use std::path::Path;
@@ -792,6 +793,59 @@ mod linux {
         /// Vecteur de fuite: du trafic est sorti malgre le kill switch.
         pub fn fuite_malgre_kill_switch(compte: usize) -> String {
             format!("{compte} paquet(s) sortis malgre le kill switch")
+        }
+
+        /// `dns-leak`, LAN ouvert: le temoin du :53 vers le lien n'a pas pu
+        /// etre observe.
+        pub fn temoin_dns_du_lien_impossible(cause: &str) -> String {
+            format!("temoin du :53 vers le lien non observable: {cause}")
+        }
+
+        /// `dns-leak`, LAN ouvert: sans kill switch, le :53 vers le lien ne se
+        /// voit pas. Le zero mesure ensuite ne prouverait rien.
+        pub fn temoin_dns_du_lien_muet(sonde: &str) -> String {
+            format!(
+                "temoin negatif muet: sans kill switch, la sonde DNS vers le lien n'a produit \
+                 aucun paquet observable [{sonde}]. Le zero mesure ensuite, LAN ouvert, ne \
+                 prouverait rien."
+            )
+        }
+
+        /// `dns-leak`: le plan LAN ouvert n'a pas pu etre pose.
+        pub fn armement_lan_ouvert(cause: &str) -> String {
+            format!("armement du plan LAN ouvert impossible: {cause}")
+        }
+
+        /// `dns-leak`: le plan LAN ouvert ne laisse pas passer la sonde de
+        /// lien, hors :53. Un zero sur le :53 serait alors celui de la policy
+        /// drop, et ne dirait rien du drop qui lui est propre.
+        pub fn lan_ouvert_sans_effet(sonde: &str) -> String {
+            format!(
+                "le plan LAN ouvert ne laisse pas passer la sonde de lien, hors :53 [{sonde}]: \
+                 le LAN n'est pas ouvert, et un zero sur le :53 ne distinguerait pas son drop \
+                 de la policy drop."
+            )
+        }
+
+        /// `dns-leak`: la mesure du :53 vers le lien, LAN ouvert, a echoue.
+        pub fn mesure_dns_du_lien(cause: &str) -> String {
+            format!("mesure du :53 vers le lien, LAN ouvert, impossible: {cause}")
+        }
+
+        /// `dns-leak`: la reussite des deux moities.
+        pub fn zero_dns_vers_le_lien(seul: &str, temoin: usize, lien: usize) -> String {
+            format!(
+                "{seul}; LAN ouvert: {lien} paquet(s) de la sonde de lien passent, et 0 \
+                 requete :53 vers le lien ({temoin} paquet(s) sans kill switch)"
+            )
+        }
+
+        /// `dns-leak`: LAN ouvert, du :53 est sorti vers le lien.
+        pub fn dns_vers_le_lien_malgre_kill_switch(compte: usize) -> String {
+            format!(
+                "{compte} paquet(s) :53 sortis vers le lien sous kill switch, LAN ouvert: \
+                 l'acceptation du LAN laisse passer le DNS en clair hors tunnel"
+            )
         }
 
         /// Exemption du coeur: l'uid exempte ne parvient meme pas a sortir.
@@ -1352,6 +1406,31 @@ mod linux {
                 ("fuite/zero-sous-kill-switch", zero_sous_kill_switch(3)),
                 ("fuite/malgre-kill-switch", fuite_malgre_kill_switch(2)),
                 (
+                    "dns-leak/lien-temoin",
+                    temoin_dns_du_lien_impossible("veth sans adresse"),
+                ),
+                (
+                    "dns-leak/lien-temoin-muet",
+                    temoin_dns_du_lien_muet("voisin v4: sortie 0"),
+                ),
+                (
+                    "dns-leak/lan-ouvert",
+                    armement_lan_ouvert("ensemble refuse"),
+                ),
+                (
+                    "dns-leak/lan-ouvert-sans-effet",
+                    lan_ouvert_sans_effet("sortie 0: udp lan refuse"),
+                ),
+                ("dns-leak/lien-mesure", mesure_dns_du_lien("tcpdump tue")),
+                (
+                    "dns-leak/lien-zero",
+                    zero_dns_vers_le_lien(&zero_sous_kill_switch(6), 4, 3),
+                ),
+                (
+                    "dns-leak/lien-fuite",
+                    dns_vers_le_lien_malgre_kill_switch(7),
+                ),
+                (
                     "coeur/etrangle",
                     coeur_etrangle(super::super::probe::PROBE_V4),
                 ),
@@ -1529,12 +1608,7 @@ mod linux {
                 probe::Probe::All,
                 &capture::leak_filter(),
             ),
-            leak_vector(
-                &bench,
-                CheckVector::DnsLeak,
-                probe::Probe::Dns,
-                &capture::dns_filter(),
-            ),
+            dns_leak(&bench),
             leak_vector(
                 &bench,
                 CheckVector::Ipv6Leak,
@@ -1749,23 +1823,27 @@ mod linux {
     /// liste. Un ruleset ajoute plus tard est donc soit ajoute ici (couvert),
     /// soit revele par un ecart de compte (rouge).
     ///
-    /// L'entree du kill switch prend la politique la plus riche (tunnel, coeur
-    /// ET resolveur): son rendu porte alors toutes les formes de regle - marque,
-    /// skuid, ensembles ICMPv6 et LAN - donc son acceptation par nft couvre le
-    /// plus. Les variantes plus pauvres que le banc pose (sans exemption, sans
-    /// tunnel) n'en sont qu'un sous-ensemble syntaxique.
+    /// L'entree du kill switch prend la politique la plus riche (tunnel, coeur,
+    /// resolveur ET LAN ouvert): son rendu porte alors toutes les formes de
+    /// regle - marque, skuid, ensembles ICMPv6, ensembles du LAN et drops de
+    /// leur :53 - donc son acceptation par nft couvre le plus. Les variantes
+    /// plus pauvres que le banc pose (sans exemption, sans tunnel, LAN ferme)
+    /// n'en sont qu'un sous-ensemble syntaxique.
     ///
     /// Uniquement exercee par les recettes (acceptation par nft, compte des
     /// sites d'injection), d'ou `#[cfg(test)]`.
     #[cfg(test)]
     fn rulesets_du_banc() -> Vec<(&'static str, &'static str, String)> {
-        let politique_riche = bench_policy(
-            true,
-            Exemptions {
-                coeur: Some(977),
-                resolveur: Some(981),
-            },
-        );
+        let politique_riche = FirewallPolicy {
+            allow_lan: true,
+            ..bench_policy(
+                true,
+                Exemptions {
+                    coeur: Some(977),
+                    resolveur: Some(981),
+                },
+            )
+        };
         vec![
             ("kill-switch", NS_CLIENT, ruleset::render(&politique_riche)),
             (
@@ -1789,8 +1867,23 @@ mod linux {
     }
 
     fn arm(bench: &Bench, with_tunnel: bool, exemptions: Exemptions) -> bifrost_core::Result<()> {
-        let script = ruleset::render(&bench_policy(with_tunnel, exemptions));
-        bench.poser_nft(NS_CLIENT, &script)
+        armer(bench, &bench_policy(with_tunnel, exemptions))
+    }
+
+    /// Le plan du banc reseau local OUVERT (`allow_lan`), sans tunnel ni
+    /// exemption: celui sous lequel `dns-leak` mesure le :53 vers le lien.
+    fn politique_lan_ouvert() -> FirewallPolicy {
+        FirewallPolicy {
+            allow_lan: true,
+            ..bench_policy(false, Exemptions::AUCUNE)
+        }
+    }
+
+    /// Pose un plan du banc dans le namespace du client, rendu par le VRAI
+    /// generateur. Le seul site d'injection du kill switch du banc: `arm` et le
+    /// LAN ouvert de `dns-leak` y passent tous deux.
+    fn armer(bench: &Bench, politique: &FirewallPolicy) -> bifrost_core::Result<()> {
+        bench.poser_nft(NS_CLIENT, &ruleset::render(politique))
     }
 
     /// Ce qu'un desarmement a REELLEMENT fait.
@@ -2066,6 +2159,106 @@ mod linux {
                 guarded.preuves_dites(),
             )
         }
+    }
+
+    /// `dns-leak`: le kill switch seul, puis reseau local OUVERT.
+    ///
+    /// La premiere moitie est le patron commun de [`leak_vector`]: une requete
+    /// DNS vers un resolveur public ne sort plus une fois le kill switch pose.
+    /// La seconde mesure ce que le plan promet sous `allow_lan`: le LAN s'ouvre,
+    /// SAUF son :53. Sans elle, aucune mesure de la suite ne portait sur
+    /// `allow_lan`; or l'acceptation du LAN laissait sortir en clair le :53 vers
+    /// le lien, et rien ne le voyait (mesure du 30/09/2026 sur essai-linux,
+    /// avant la correction du rendu: huit requetes sur huit servies).
+    ///
+    /// Trois observations de la seconde moitie, chacune sous sa propre capture
+    /// cote phys:
+    ///
+    /// 1. SANS kill switch, la sonde DNS vers le voisin du lien, en IPv4 et en
+    ///    IPv6 unique-locale, doit se voir: sinon le zero qui suit ne prouverait
+    ///    rien.
+    /// 2. LAN ouvert, la sonde de LIEN (hors :53) doit se voir: sinon le plan
+    ///    pose n'ouvre pas le LAN, et un zero sur le :53 serait celui de la
+    ///    policy drop, pas celui du drop du :53 du LAN.
+    /// 3. LAN ouvert, la sonde DNS vers le lien ne doit plus se voir.
+    fn dns_leak(bench: &Bench) -> CheckOutcome {
+        let v = CheckVector::DnsLeak;
+        let seul = leak_vector(bench, v, probe::Probe::Dns, &capture::dns_filter());
+        if seul.verdict != Verdict::Passed {
+            return seul;
+        }
+        let exe = self_exe();
+
+        // 1. Temoin: sans filtres, le :53 vers le lien se voit.
+        if let Err(e) = disarm(bench) {
+            return CheckOutcome::skipped(v, motifs::desarmement_impossible(&e.to_string()));
+        }
+        let temoin = match dns_vers_le_lien(bench, &exe, "dns-leak-lien-temoin") {
+            Ok(t) => t,
+            Err(e) => return CheckOutcome::skipped(v, motifs::temoin_dns_du_lien_impossible(&e)),
+        };
+        if temoin.releve.compte == 0 {
+            return CheckOutcome::skipped(v, motifs::temoin_dns_du_lien_muet(&temoin.dit));
+        }
+
+        // 2. LAN ouvert: le lien, hors :53, passe.
+        if let Err(e) = armer(bench, &politique_lan_ouvert()) {
+            return CheckOutcome::skipped(v, motifs::armement_lan_ouvert(&e.to_string()));
+        }
+        let lien = match temoin_de_lien(bench, &exe, "dns-leak-lien-ouvert") {
+            Ok(t) => t,
+            Err(e) => return CheckOutcome::skipped(v, e),
+        };
+        if lien.releve.compte == 0 {
+            return CheckOutcome::skipped(v, motifs::lan_ouvert_sans_effet(&lien.dit));
+        }
+
+        // 3. LAN ouvert: le :53 vers le lien ne sort plus.
+        let sous = match dns_vers_le_lien(bench, &exe, "dns-leak-lien-arme") {
+            Ok(t) => t,
+            Err(e) => return CheckOutcome::skipped(v, motifs::mesure_dns_du_lien(&e)),
+        };
+        if sous.releve.compte == 0 {
+            CheckOutcome::passed(
+                v,
+                motifs::zero_dns_vers_le_lien(
+                    &seul.detail,
+                    temoin.releve.compte,
+                    lien.releve.compte,
+                ),
+            )
+        } else {
+            CheckOutcome::failed(
+                v,
+                motifs::dns_vers_le_lien_malgre_kill_switch(sous.releve.compte),
+                sous.releve.preuves_dites(),
+            )
+        }
+    }
+
+    /// Capture cote phys pendant que la sonde DNS vise le voisin du lien, en
+    /// IPv4 puis en IPv6 unique-locale. Rend le releve du :53 et ce que chaque
+    /// sonde a fait, compte rendu de la capture compris: un zero dont on ne
+    /// sait pas si la sonde a emis, ou si la capture a tout recu, ne mesure
+    /// rien.
+    fn dns_vers_le_lien(bench: &Bench, exe: &str, tag: &str) -> Result<TemoinDeLien, String> {
+        let cap = capture::Capture::start(bench, NS_PHYS, tag)
+            .map_err(|e| motifs::capture_non_demarree(&e.to_string()))?;
+        let mut dit = Vec::new();
+        for cible in [PHYS_ADDR, PHYS_ADDR6] {
+            let sonde = dire_sonde(bench, &[exe, "--probe-dns-lan", cible]);
+            dit.push(format!("{cible}: {sonde}"));
+        }
+        let (pcap, compte_rendu) = cap
+            .stop_bavard()
+            .map_err(|e| motifs::capture_non_arretee(&e.to_string()))?;
+        dit.push(format!("tcpdump: {compte_rendu}"));
+        let releve = capture::relever(pcap.chemin(), &capture::dns_filter())
+            .map_err(|e| motifs::analyse_du_pcap(&e.to_string()))?;
+        Ok(TemoinDeLien {
+            releve,
+            dit: dit.join("; "),
+        })
     }
 
     /// La chaine `output` telle que le noyau la voit, avec ses compteurs.

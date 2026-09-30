@@ -47,7 +47,9 @@ pub struct FirewallPolicy {
     pub fwmark: Option<u32>,
     /// Seule destination :53 autorisee hors tunnel.
     pub dns_resolver: IpAddr,
-    /// Autorise les prefixes RFC1918 hors tunnel.
+    /// Autorise les prefixes RFC1918 hors tunnel, sauf leur :53: le DNS vers
+    /// le LAN reste reserve a `dns_resolver` et aux exceptions par identite,
+    /// sous Linux comme sous Windows.
     pub allow_lan: bool,
     /// UID dedie sous lequel tourne le coeur anti-censure, quand il y en a un.
     ///

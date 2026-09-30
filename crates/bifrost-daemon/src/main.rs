@@ -379,6 +379,12 @@ struct Args {
     #[arg(long, hide = true, value_name = "IPV4")]
     probe_lan: Option<Ipv4Addr>,
 
+    /// Emet une requete DNS, en UDP puis en TCP, vers un voisin du LIEN.
+    /// Interne au harnais: la sonde du :53 vers le LAN, que `allow_lan` ne
+    /// doit pas ouvrir.
+    #[arg(long, hide = true, value_name = "IP")]
+    probe_dns_lan: Option<std::net::IpAddr>,
+
     /// Arme le kill switch du BANC de fuite, puis attend d'etre tue. Interne.
     ///
     /// C'est le processus que le vecteur `daemon-mort` fait mourir. Il arme par
@@ -1163,6 +1169,10 @@ fn main() -> anyhow::Result<()> {
     }
     if let Some(dst) = args.probe_lan {
         checks::probe::emit_lan(dst);
+        return Ok(());
+    }
+    if let Some(dst) = args.probe_dns_lan {
+        checks::probe::emit_dns_lan(dst);
         return Ok(());
     }
     #[cfg(target_os = "linux")]

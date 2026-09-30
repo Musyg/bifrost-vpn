@@ -16,7 +16,7 @@
 //! prouve rien, et le verdict n'a pas le droit de les confondre.
 
 use std::io::Write;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, UdpSocket};
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -189,6 +189,43 @@ pub fn emit_lan(dst: Ipv4Addr) {
     }
     if let Err(e) = TcpStream::connect_timeout(&SocketAddr::from((dst, PORT_LAN)), TIMEOUT) {
         signaler("tcp lan", &e);
+    }
+}
+
+/// Emet une requete DNS, en UDP puis en TCP, vers un VOISIN DU LIEN.
+///
+/// La sonde de `dns-leak` quand le LAN est ouvert. [`emit_dns`] vise un
+/// resolveur public, hors lien, que la policy drop jette de toute facon; celle-ci
+/// vise une adresse on-link, la ou `allow_lan` ouvre le passage: c'est la place
+/// du serveur DNS que DHCP annonce, la box typiquement. Seul le drop du :53 du
+/// LAN, pose avant l'acceptation du LAN, l'arrete; sans lui elle sort en clair.
+///
+/// Comme les autres sondes, elle signale ses echecs d'emission au lieu de les
+/// avaler: une capture vide dont on ne sait pas si la sonde a emis ne mesure
+/// rien.
+pub fn emit_dns_lan(dst: IpAddr) {
+    let cible = SocketAddr::new(dst, 53);
+    let locale = if dst.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" };
+    match UdpSocket::bind(locale) {
+        Ok(sock) => {
+            let _ = sock.set_write_timeout(Some(TIMEOUT));
+            if let Err(e) = sock.send_to(&dns_query(), cible) {
+                signaler("udp dns lan", &e);
+            }
+        }
+        Err(e) => signaler("bind udp dns lan", &e),
+    }
+    match TcpStream::connect_timeout(&cible, TIMEOUT) {
+        Ok(mut stream) => {
+            let query = dns_query();
+            let mut framed = (query.len() as u16).to_be_bytes().to_vec();
+            framed.extend_from_slice(&query);
+            let _ = stream.set_write_timeout(Some(TIMEOUT));
+            if let Err(e) = stream.write_all(&framed) {
+                signaler("ecriture tcp dns lan", &e);
+            }
+        }
+        Err(e) => signaler("tcp dns lan", &e),
     }
 }
 

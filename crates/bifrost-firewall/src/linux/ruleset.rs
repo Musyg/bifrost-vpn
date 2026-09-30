@@ -17,7 +17,8 @@ use bifrost_core::ports::FirewallPolicy;
 /// toucher aux regles des autres outils (Docker, ufw, l'agent de l'hote).
 pub const TABLE: &str = "bifrost";
 
-/// Prefixes RFC1918 et unique-local, autorises seulement si `allow_lan`.
+/// Prefixes RFC1918 et unique-local, autorises seulement si `allow_lan`, et
+/// jamais pour leur :53 hors resolveur declare (voir `render_lan_permit`).
 const LAN_V4: &str = "10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16";
 const LAN_V6: &str = "fc00::/7, fe80::/10";
 
@@ -96,16 +97,15 @@ fn render_output(s: &mut String, policy: &FirewallPolicy) {
     s.push_str("\t\t# NDP\n");
     s.push_str(&format!("\t\ticmpv6 type {{ {NDP_TYPES} }} accept\n\n"));
 
-    s.push_str("\t\t# DNS: uniquement vers le resolveur local. Tout autre :53\n");
-    s.push_str("\t\t# sortant tombe dans la policy drop.\n");
+    s.push_str("\t\t# DNS hors tunnel: uniquement vers le resolveur declare. Tout\n");
+    s.push_str("\t\t# autre :53 qui arrive ici tombe: dans la policy drop, ou,\n");
+    s.push_str("\t\t# LAN ouvert, dans le drop pose avant l'acceptation du LAN.\n");
     render_dns_permits(s, policy.dns_resolver);
 
     render_coeur_permit(s, policy);
 
     if policy.allow_lan {
-        s.push_str("\n\t\t# acces LAN active explicitement par l'utilisateur\n");
-        s.push_str(&format!("\t\tip daddr {{ {LAN_V4} }} accept\n"));
-        s.push_str(&format!("\t\tip6 daddr {{ {LAN_V6} }} accept\n"));
+        render_lan_permit(s);
     }
 
     s.push_str("\n\t\t# tout le reste est droppe par la policy. Le compteur sert\n");
@@ -191,6 +191,39 @@ fn render_resolveur_restriction(s: &mut String, policy: &FirewallPolicy) {
     s.push_str(&format!("\t\tmeta skuid {uid} tcp dport 53 accept\n"));
     s.push_str("\t\tudp dport 53 drop\n");
     s.push_str("\t\ttcp dport 53 drop\n\n");
+}
+
+/// Ouvre le LAN, que l'utilisateur a demande, sauf son :53.
+///
+/// Les drops du :53 precedent l'acceptation du LAN, dans les deux familles et
+/// en TCP comme en UDP, et c'est leur position qui les fait mordre: poses
+/// apres elle, ils seraient syntaxiquement corrects et sans le moindre effet.
+/// Sans eux, une requete DNS vers une adresse du LAN (le serveur DNS du lien
+/// physique, annonce par DHCP, typiquement la box) sortirait en clair par ce
+/// permis, hors tunnel. C'est la fuite que le reste du ruleset interdit, et
+/// celle que Windows ferme par le poids: `block-dns` (14) y passe au-dessus de
+/// `permit-lan-v4` et `permit-lan-v6` (11).
+///
+/// Ce qui passe encore, parce que c'est accepte PLUS HAUT dans la chaine: le
+/// resolveur declare (`dns_resolver`), meme quand il vit sur le LAN; le
+/// tunnel, y compris vers un resolveur d'une plage privee joint par lui; le
+/// trafic marque par WireGuard; le coeur, dont le :53 est deja tombe par ses
+/// propres drops; et le resolveur embarque, dont la restriction ferme deja le
+/// :53 pour tous les autres. Le reste du LAN reste ouvert, :853 compris,
+/// comme sous Windows ou `permit-lan` ne filtre aucun port.
+fn render_lan_permit(s: &mut String) {
+    s.push_str("\n\t\t# acces LAN active explicitement par l'utilisateur, sauf son\n");
+    s.push_str("\t\t# :53, qui tombe d'abord dans les deux familles: le resolveur\n");
+    s.push_str("\t\t# declare a deja son permit, plus haut.\n");
+    for (famille, prefixes) in [("ip", LAN_V4), ("ip6", LAN_V6)] {
+        for proto in ["udp", "tcp"] {
+            s.push_str(&format!(
+                "\t\t{famille} daddr {{ {prefixes} }} {proto} dport 53 drop\n"
+            ));
+        }
+    }
+    s.push_str(&format!("\t\tip daddr {{ {LAN_V4} }} accept\n"));
+    s.push_str(&format!("\t\tip6 daddr {{ {LAN_V6} }} accept\n"));
 }
 
 fn render_dns_permits(s: &mut String, resolver: IpAddr) {
@@ -562,6 +595,149 @@ mod tests {
         assert!(r.contains("10.0.0.0/8"));
         assert!(r.contains("192.168.0.0/16"));
         assert!(r.contains("fc00::/7"));
+    }
+
+    fn policy_lan() -> FirewallPolicy {
+        FirewallPolicy {
+            allow_lan: true,
+            ..policy()
+        }
+    }
+
+    /// Les deux familles du LAN, avec leurs prefixes tels que le rendu les ecrit.
+    const FAMILLES_DU_LAN: [(&str, &str); 2] = [("ip", LAN_V4), ("ip6", LAN_V6)];
+
+    /// Sous `allow_lan`, le :53 du LAN tombe AVANT son acceptation.
+    ///
+    /// Le defaut que ces drops ferment: `ip daddr { LAN } accept` acceptait
+    /// aussi le :53 vers une adresse du LAN (la box, typiquement), et aucun
+    /// drop ne le precedait sans resolveur embarque. Mesure avant correction le
+    /// 30/09/2026 sur essai-linux, ruleset rendu par ce code dans un namespace
+    /// jetable: huit requetes sur huit (UDP et TCP; IPv4, IPv6 unique-locale et
+    /// de lien) arrivaient au serveur DNS du LAN. Poses apres l'acceptation,
+    /// les drops ne mordraient pas: c'est la position que la recette garde,
+    /// famille par famille et protocole par protocole, regle entiere.
+    #[test]
+    fn sous_allow_lan_le_53_du_lan_tombe_avant_son_acceptation() {
+        let r = render(&policy_lan());
+        for (famille, prefixes) in FAMILLES_DU_LAN {
+            let acceptation = ligne_de(&r, &format!("{famille} daddr {{ {prefixes} }} accept"));
+            for proto in ["udp", "tcp"] {
+                let drop = ligne_de(
+                    &r,
+                    &format!("{famille} daddr {{ {prefixes} }} {proto} dport 53 drop"),
+                );
+                assert!(
+                    drop < acceptation,
+                    "{famille}/{proto}: le drop du :53 du LAN suit son acceptation, sans effet\n{r}"
+                );
+            }
+        }
+    }
+
+    /// Le cas legitime: la box DECLAREE comme resolveur. Son permit, dans sa
+    /// famille, precede le drop du :53 du LAN, donc elle reste servie. Une
+    /// correction qui poserait les drops au-dessus des permits DNS couperait
+    /// toute resolution a qui a declare un resolveur local de son reseau.
+    #[test]
+    fn un_resolveur_declare_sur_le_lan_reste_admis() {
+        for (resolveur, famille, prefixes) in [
+            ("192.168.1.1", "ip", LAN_V4),
+            ("10.0.0.53", "ip", LAN_V4),
+            ("fd00::53", "ip6", LAN_V6),
+            ("fe80::1", "ip6", LAN_V6),
+        ] {
+            let p = FirewallPolicy {
+                dns_resolver: resolveur.parse().unwrap(),
+                ..policy_lan()
+            };
+            let r = render(&p);
+            for proto in ["udp", "tcp"] {
+                let permit = ligne_de(
+                    &r,
+                    &format!("{famille} daddr {resolveur} {proto} dport 53 accept"),
+                );
+                let drop = ligne_de(
+                    &r,
+                    &format!("{famille} daddr {{ {prefixes} }} {proto} dport 53 drop"),
+                );
+                assert!(
+                    permit < drop,
+                    "{resolveur}/{proto}: le resolveur declare est bloque par le drop du LAN\n{r}"
+                );
+            }
+        }
+    }
+
+    /// Le bloc LAN est le SEUL apport d'`allow_lan`, et il est pose en dernier.
+    ///
+    /// Sur 32 politiques (tunnel, marque, coeur, resolveur embarque, resolveur
+    /// v4 ou v6), le rendu avec LAN, prive de son bloc, est mot pour mot celui
+    /// sans LAN: le permit du resolveur declare, l'acceptation du tunnel, la
+    /// marque, les drops du coeur et la restriction du resolveur embarque ne
+    /// changent ni de forme ni d'ordre. Et le bloc sortant est d'un seul tenant,
+    /// drops d'abord, juste avant le compteur de la chaine.
+    #[test]
+    fn le_bloc_lan_ne_change_aucune_autre_regle() {
+        let mut bloc_sortie: Vec<String> = Vec::new();
+        for (famille, prefixes) in FAMILLES_DU_LAN {
+            for proto in ["udp", "tcp"] {
+                bloc_sortie.push(format!(
+                    "{famille} daddr {{ {prefixes} }} {proto} dport 53 drop"
+                ));
+            }
+        }
+        for (famille, prefixes) in FAMILLES_DU_LAN {
+            bloc_sortie.push(format!("{famille} daddr {{ {prefixes} }} accept"));
+        }
+        bloc_sortie.push("counter comment \"bifrost-output-dropped\"".to_owned());
+        let bloc_sortie: Vec<String> = bloc_sortie
+            .iter()
+            .map(|l| regles_nft::normaliser(l).unwrap())
+            .collect();
+        let bloc_entree: Vec<String> = FAMILLES_DU_LAN
+            .iter()
+            .map(|(famille, prefixes)| {
+                regles_nft::normaliser(&format!("{famille} saddr {{ {prefixes} }} accept")).unwrap()
+            })
+            .collect();
+        for n in 0u8..32 {
+            let base = FirewallPolicy {
+                tunnel_interface: (n & 1 == 1).then(|| "wg0".into()),
+                fwmark: (n & 2 == 2).then_some(0xca6c),
+                coeur_uid: (n & 4 == 4).then_some(977),
+                resolveur_uid: (n & 8 == 8).then_some(981),
+                resolveur_embarque: n & 8 == 8,
+                dns_resolver: if n & 16 == 16 {
+                    IpAddr::V6(Ipv6Addr::LOCALHOST)
+                } else {
+                    IpAddr::V4(Ipv4Addr::LOCALHOST)
+                },
+                ..policy()
+            };
+            let sans = regles_nft::lignes_normalisees(&render(&base));
+            let avec = regles_nft::lignes_normalisees(&render(&FirewallPolicy {
+                allow_lan: true,
+                ..base.clone()
+            }));
+            // Le bloc sortant, d'un seul tenant et dans cet ordre, compteur compris.
+            let debut = avec
+                .windows(bloc_sortie.len())
+                .position(|w| w == bloc_sortie.as_slice())
+                .unwrap_or_else(|| {
+                    panic!("cas {n}: bloc LAN sortant absent ou desordonne\n{avec:#?}")
+                });
+            let mut reste = avec.clone();
+            reste.drain(debut..debut + bloc_sortie.len() - 1);
+            for ligne in &bloc_entree {
+                let i = reste
+                    .iter()
+                    .position(|l| l == ligne)
+                    .unwrap_or_else(|| panic!("cas {n}: acceptation entrante absente: {ligne}"));
+                reste.remove(i);
+            }
+            assert_eq!(reste, sans, "cas {n}: le LAN a change une autre regle");
+        }
     }
 
     /// Le remplacement doit etre atomique: creation puis suppression de la
