@@ -229,7 +229,35 @@ pub const TABLEAU: &[Observation] = &[
     // mesure, et Aeza est un hebergeur dont des plages sont connues bloquees
     // en Russie - un blocage d'IP y ressemblerait a un blocage de protocole.
     obs(Technique::Hysteria2, Pays::Russie, Statut::Degrade, 2026, 9),
-    obs(Technique::Hysteria2, Pays::Iran, Statut::Mort, 2026, 1),
+    // # Corrigee le 30 septembre 2026: Mort (2026-01) -> Incertain (2026-06)
+    //
+    // net4people/bbs #586 ("Iran: Internet shutdown from 7 UTC 28 February
+    // 2026", etiquete Iran par le mainteneur du forum), commentaire de mat48
+    // du 2026-06-13T04:31:27Z - date relevee par l'API GitHub, texte lu dans le
+    // fil: "Hysteria2" et "AnyTLS" "are working perfect on all the networks
+    // other than Rightel". Le meme auteur avait ecrit le 2026-06-01 ne tester
+    // que depuis Irancell, Mokhaberat et Hamrah-e-aval, trois reseaux iraniens,
+    // vers un serveur hors d'Iran.
+    //
+    // La cellule disait `Mort (UDP off)` sur des sources de 2025 (Nym,
+    // juin 2025) ramenees a 2026-01 faute de mois. C'est la premiere source
+    // primaire datee posterieure a la cellule qui parle d'Hysteria2 en Iran, et
+    // elle la contredit: la regle du tableau ne permet pas de la garder `Mort`.
+    // Elle ne permet pas non plus d'aller plus loin qu'`Incertain`: UN
+    // temoignage, sans mesure, d'un auteur qui se dit amateur, et qui nomme
+    // lui-meme un reseau ou cela ne passe pas. Tenir ou tomber selon le reseau
+    // est la definition d'`Incertain`, ecrite "Mort/Degrade" dans le document.
+    // Le releve des rafraichissements precedents ne pouvait pas le trouver: ils
+    // ne lisaient que les fils ouverts apres leur propre date de passage, et ce
+    // fil date de fevrier.
+    //
+    // Effet mesure par `selection::planifier` au 30/09/2026, environnement
+    // vierge, memoire vide: aucune elimination n'est perdue, la cellule `Mort`
+    // etant perimee depuis le 02/04/2026. Le rang de survie passe de 4 a 3. En
+    // mode Auto le plan iranien ne bouge pas, REALITY (`Incertain` elle aussi)
+    // la precedant par l'ordre de declaration; en mode Rapide, Hysteria2 passe
+    // devant WireGuard nu, reste `Mort`.
+    obs(Technique::Hysteria2, Pays::Iran, Statut::Incertain, 2026, 6),
     obs(
         Technique::Hysteria2,
         Pays::Turkmenistan,
@@ -258,7 +286,21 @@ pub const TABLEAU: &[Observation] = &[
     // Degrade et non Mort: le blocage est dit generalise, pas total, et une
     // parade existe meme si elle n'est pas a notre portee. La date reste
     // juillet 2026, le dernier mois nomme par la source.
-    obs(Technique::AmneziaWg, Pays::Russie, Statut::Degrade, 2026, 7),
+    //
+    // # Redatee le 30 septembre 2026: 2026-07 -> 2026-08, statut inchange.
+    //
+    // hub.xeovo.com, fil 208 ("It looks like AmneziaWG locations started to
+    // get blocked in Russia"), publie le 2026-08-04T22:35:57+00:00, date
+    // relevee dans l'attribut `datetime` de la page et non dans un resume.
+    // Un commentaire du 2026-08-05T07:06:11+00:00 precise que le 4 aout, entre
+    // 12 et 13 h heure de Moscou, les donnees ont cesse de passer par AmneziaWG
+    // en filaire comme en mobile, deux emplacements continuant de passer;
+    // l'equipe de l'exploitant l'attribue a un blocage d'IP. Degrade, pas Mort:
+    // certaines IP passent. Le rafraichissement du 04/09/2026 avait lu cette
+    // source et l'avait ecartee parce qu'elle precedait le 20 aout, date du
+    // passage precedent; la regle du tableau compare a la date de la CELLULE,
+    // et la source lui est posterieure.
+    obs(Technique::AmneziaWg, Pays::Russie, Statut::Degrade, 2026, 8),
     obs(Technique::AmneziaWg, Pays::Iran, Statut::Degrade, 2026, 7),
     obs(
         Technique::AmneziaWg,
@@ -367,6 +409,14 @@ impl Observation {
 ///
 /// Regle corrigee: la ligne `Mort` la plus recente, plus
 /// [`FRAICHEUR_POUR_ELIMINER_JOURS`].
+///
+/// Reverifiee le 30/09/2026, jour meme de l'echeance. Le rafraichissement de ce
+/// jour n'a trouve aucune source posterieure a REALITY/Turkmenistan (2026-07),
+/// n'a redate aucune cellule `Mort`, et en a retire une du compte
+/// (Hysteria2/Iran, devenue `Incertain`). La constante ne bouge donc pas: le
+/// tableau n'ecarte plus rien a partir d'aujourd'hui, et la garde
+/// `inertie_du_tableau_est_celle_de_la_selection` mesure en plus qu'aucun plan
+/// ne change plus ensuite, dans aucun pays ni aucun mode.
 pub const TABLEAU_INERTE_A_PARTIR_DU: Date = Date::new(2026, 9, 30);
 
 /// Le tableau peut-il encore eliminer QUOI QUE CE SOIT a cette date.
@@ -439,12 +489,17 @@ mod tests {
     ///
     /// La consequence est ce qui compte: en Chine, en Russie et en Iran, le
     /// tableau n'elimine plus RIEN depuis le 1er juillet 2026. La Chine et la
-    /// Russie n'ont qu'une ligne `Mort`, WireGuard nu (2026-04); l'Iran en a
-    /// DEUX, Hysteria2 (2026-01) et WireGuard nu (2026-04). C'est la plus
+    /// Russie n'ont qu'une ligne `Mort`, WireGuard nu (2026-04); l'Iran en
+    /// avait DEUX, Hysteria2 (2026-01) et WireGuard nu (2026-04). C'est la plus
     /// TARDIVE des peremptions qui gouverne la date, celle d'Hysteria2 etant
     /// echue des le 02/04/2026, et les trois colonnes cessent donc d'eliminer
     /// le meme jour. Seul le Turkmenistan garde une elimination, et elle
     /// expire le 30 septembre.
+    ///
+    /// Depuis le 30/09/2026, Hysteria2/Iran est `Incertain` (juin 2026): le
+    /// tableau ne compte plus que six cellules `Mort`, et l'Iran n'en a plus
+    /// qu'une. L'assertion ne change pas: elle porte sur ce qui elimine, et
+    /// Hysteria2/Iran n'eliminait deja plus rien le 20/09.
     #[test]
     fn au_20_septembre_2026_une_seule_cellule_elimine_encore() {
         let jour = Date::new(2026, 9, 20);
@@ -470,8 +525,9 @@ mod tests {
     /// quatre documents ont affirme.
     ///
     /// Les lignes de juillet ont 50 jours, celles de juin 80: toutes trois dans
-    /// la fenetre de 90. Seules Hysteria2 (janvier) et WireGuard nu (avril)
-    /// sont perimees.
+    /// la fenetre de 90. WireGuard nu (avril) est perime. Hysteria2 l'etait
+    /// aussi dans le tableau tel qu'il etait le 20 aout; voir plus bas pourquoi
+    /// il ne l'est plus dans le tableau tel qu'il est.
     #[test]
     fn au_20_aout_2026_le_tableau_mord_encore() {
         let jour = Date::new(2026, 8, 20);
@@ -492,13 +548,29 @@ mod tests {
                 attendue.nom()
             );
         }
-        for perimee in [Technique::Hysteria2, Technique::WireGuardNu] {
-            assert!(
-                !fraiches.contains(&perimee),
-                "{} n'est mesuree qu'en janvier, en avril ou dans le futur: aucune observation fraiche",
-                perimee.nom()
-            );
-        }
+        assert!(
+            !fraiches.contains(&Technique::WireGuardNu),
+            "wireguard-nu n'est mesure qu'en avril: aucune observation fraiche au 20/08"
+        );
+        // Hysteria2 est sortie de la liste des perimees le 30/09/2026. Ce jour-la
+        // le rafraichissement a date Hysteria2/Iran de juin 2026 (`Incertain`,
+        // net4people/bbs #586, commentaire du 2026-06-13): relu contre le
+        // tableau PRESENT, le 20 aout portait donc une observation fraiche
+        // d'Hysteria2. Une recette qui fige un jour passe se lit contre le
+        // tableau d'aujourd'hui, et un rafraichissement peut dater une cellule
+        // d'avant son propre passage: le passe du tableau bouge avec lui. Ce qui
+        // ne bouge pas, et c'est ce que cette recette existe pour dire, c'est
+        // qu'une observation fraiche qui n'est pas `Mort` n'eliminait rien.
+        let hysteria2_fraiches: Vec<(Pays, Statut)> = TABLEAU
+            .iter()
+            .filter(|o| o.technique == Technique::Hysteria2 && o.assez_fraiche_pour_eliminer(jour))
+            .map(|o| (o.pays, o.statut))
+            .collect();
+        assert_eq!(
+            hysteria2_fraiches,
+            vec![(Pays::Iran, Statut::Incertain)],
+            "au 20/08/2026, la seule observation fraiche d'Hysteria2 est iranienne et `Incertain`: elle ne peut rien eliminer"
+        );
         // Le vocabulaire a ete corrige le 20/09/2026. `fraiches` dit "porte une
         // observation fraiche", PAS "peut eliminer": les cellules fraiches de
         // XHTTP-CDN et d'AmneziaWG sont `Fonctionne` ou `Degrade` et n'ont

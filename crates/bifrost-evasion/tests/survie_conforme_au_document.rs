@@ -9,7 +9,8 @@
 //! l'espace de travail, comme les gardes de source de `suivi_a_jour.rs` et de
 //! `bifrost-daemon`, puis compare, pour les cinq techniques candidates du
 //! produit et pour chacun des quatre pays censeurs, le statut ET la date que
-//! chaque cote porte.
+//! chaque cote porte. Depuis le 30/09/2026, elle compare aussi le jour a partir
+//! duquel le document annonce le tableau inerte a `TABLEAU_INERTE_A_PARTIR_DU`.
 //!
 //! # La legende, codee explicitement
 //!
@@ -23,7 +24,7 @@
 
 use std::path::PathBuf;
 
-use bifrost_evasion::survie::{Pays, statut};
+use bifrost_evasion::survie::{Pays, TABLEAU_INERTE_A_PARTIR_DU, statut};
 use bifrost_evasion::{Date, Statut, Technique};
 
 fn racine() -> PathBuf {
@@ -300,4 +301,68 @@ fn chaque_technique_candidate_a_le_meme_statut_et_la_meme_date_que_le_document()
         "survie.rs et le tableau du document 04 partie 1 divergent:\n  {}",
         ecarts.join("\n  ")
     );
+}
+
+/// La forme sous laquelle le document 04 cite la constante d'inertie.
+const MARQUE_INERTIE: &str = "TABLEAU_INERTE_A_PARTIR_DU = ";
+
+/// Chaque date AAAA-MM-JJ que le document ecrit juste apres
+/// [`MARQUE_INERTIE`], et le nombre de fois ou il nomme la constante.
+fn dates_d_inertie_du_document(doc: &str) -> (Vec<String>, usize) {
+    let citations = doc.matches("TABLEAU_INERTE_A_PARTIR_DU").count();
+    let dates = doc
+        .match_indices(MARQUE_INERTIE)
+        .map(|(i, _)| {
+            doc[i + MARQUE_INERTIE.len()..]
+                .chars()
+                .take(10)
+                .collect::<String>()
+        })
+        .collect();
+    (dates, citations)
+}
+
+/// Le jour d'inertie que le document 04 annonce est celui que le code porte.
+///
+/// # Pourquoi cet elargissement, le 30/09/2026
+///
+/// Le rafraichissement de ce jour reecrit le paragraphe du document 04 qui
+/// annonce ce jour, et rien ne liait ce paragraphe a la constante: la garde
+/// comparait les vingt cellules, jamais la date d'inertie ecrite en prose. Or
+/// c'est exactement la forme d'affirmation qui s'est demodee en silence deux
+/// fois - dans quatre documents avant le 20/08/2026, puis dans le `README.md`
+/// du 04/09 au 20/09/2026, qui annoncait le 30 septembre pendant que le code
+/// disait le 1er decembre.
+///
+/// Le document cite donc la constante sous une forme unique,
+/// "`TABLEAU_INERTE_A_PARTIR_DU = AAAA-MM-JJ`", et chaque citation doit porter
+/// la date du code. Une citation sans date ferait taire la garde: elle est
+/// refusee aussi.
+#[test]
+fn le_document_annonce_le_jour_d_inertie_que_porte_le_code() {
+    let doc = lire_doc();
+    let (dates, citations) = dates_d_inertie_du_document(&doc);
+    assert!(
+        !dates.is_empty(),
+        "le document 04 ne cite plus {MARQUE_INERTIE:?} suivi d'une date: la garde ne verifie plus rien"
+    );
+    assert_eq!(
+        dates.len(),
+        citations,
+        "le document 04 nomme TABLEAU_INERTE_A_PARTIR_DU {citations} fois, dont {} seulement sous la forme \
+         {MARQUE_INERTIE:?}AAAA-MM-JJ: une citation sans date echappe a la garde",
+        dates.len()
+    );
+    let attendue = format!(
+        "{:04}-{:02}-{:02}",
+        TABLEAU_INERTE_A_PARTIR_DU.annee,
+        TABLEAU_INERTE_A_PARTIR_DU.mois,
+        TABLEAU_INERTE_A_PARTIR_DU.jour
+    );
+    for date in &dates {
+        assert_eq!(
+            date, &attendue,
+            "le document 04 annonce le tableau inerte a partir du {date}, le code a partir du {attendue}"
+        );
+    }
 }
