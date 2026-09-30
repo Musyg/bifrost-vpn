@@ -107,6 +107,21 @@ upstream = ["10.2.0.1"]
         assert!(err.contains("invalide"), "message inattendu: {err}");
     }
 
+    /// Une table que le noyau se reserve est refusee des le client, avec le
+    /// fichier, la valeur et ce qu'il faut changer: c'est ce message que voit
+    /// qui a importe un tel profil.
+    #[test]
+    fn une_table_reservee_est_refusee_des_le_client() {
+        let fautif = PROFIL.replace("fwmark = 51820\n", "fwmark = 51820\nrouting_table = 255\n");
+        assert_ne!(fautif, PROFIL, "le remplacement doit avoir porte");
+        let f = ecrire(&fautif);
+        let err = load(f.path()).unwrap_err().to_string();
+        assert!(err.contains(&f.path().display().to_string()), "{err}");
+        assert!(err.contains("routing_table = 255"), "{err}");
+        assert!(err.contains("'local'"), "{err}");
+        assert!(err.contains("Retirer la ligne routing_table"), "{err}");
+    }
+
     #[test]
     fn une_cle_malformee_est_refusee() {
         let f =

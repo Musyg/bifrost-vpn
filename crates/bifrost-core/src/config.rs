@@ -604,6 +604,28 @@ impl TunnelConfig {
                         .into(),
                 ));
             }
+            // Meme forme que la marque nulle: une valeur que le type admet et
+            // que le noyau lit autrement. Le demontage fait `ip route flush
+            // table <T>`, et le montage le fait aussi quand il echoue. Mesure en
+            // espaces de noms jetables le 30/09/2026: avec 254 la pose echoue
+            // sur la route par defaut du systeme, puis le nettoyage vide
+            // `main`; avec 255 la pose reussit et le demontage vide `local`;
+            // avec 0 le nettoyage vide toutes les tables. Refusee partout,
+            // Windows compris, ou la table ne sert pas: un profil passe d'une
+            // machine a l'autre.
+            if let Some(nom) = crate::routage::table_reservee(wg.routing_table) {
+                return Err(Error::Config(format!(
+                    "routing_table = {table} designe la table '{nom}', que le noyau \
+                     Linux se reserve (tables reservees: {liste}). Le tunnel y \
+                     melerait ses routes a celles du systeme, et son demontage \
+                     (ip route flush table {table}) en retirerait les routes du \
+                     systeme. Retirer la ligne routing_table du profil pour \
+                     reprendre la table dediee par defaut ({DEFAULT_ROUTING_TABLE}), \
+                     ou choisir une autre table",
+                    table = wg.routing_table,
+                    liste = crate::routage::liste_des_tables_reservees(),
+                )));
+            }
         }
         if !(576..=9000).contains(&self.mtu) {
             return Err(Error::Config(format!("mtu hors plage: {}", self.mtu)));
@@ -801,6 +823,72 @@ mod tests {
         let mut c = sample();
         wg(&mut c).fwmark = 0;
         assert!(c.validate().is_err());
+    }
+
+    /// Les tables que le noyau se reserve (`rt_class_t`,
+    /// `include/uapi/linux/rtnetlink.h`), en litteraux: retirer une valeur de
+    /// `routage::TABLES_RESERVEES` doit faire rougir cette recette. Le message
+    /// nomme la table, la valeur fautive, et ce qu'il faut changer.
+    #[test]
+    fn config_rejette_les_tables_reservees_au_noyau() {
+        for (table, nom) in [
+            (0u32, "unspec"),
+            (253, "default"),
+            (254, "main"),
+            (255, "local"),
+        ] {
+            let mut c = sample();
+            wg(&mut c).routing_table = table;
+            let e = match c.validate() {
+                Ok(()) => panic!("routing_table = {table} acceptee"),
+                Err(e) => e.to_string(),
+            };
+            assert!(
+                e.contains(&format!("routing_table = {table} ")),
+                "la valeur fautive doit etre nommee: {e}"
+            );
+            assert!(e.contains(&format!("'{nom}'")), "et la table du noyau: {e}");
+            assert!(
+                e.contains("Retirer la ligne routing_table") && e.contains("51820"),
+                "et ce qu'il faut changer: {e}"
+            );
+        }
+    }
+
+    /// Le temoin du precedent: les voisines des tables reservees passent.
+    /// Sans lui, un `validate` qui refuserait toute table le satisferait.
+    #[test]
+    fn config_accepte_les_tables_voisines_des_reservees() {
+        for table in [1u32, 252, 256, DEFAULT_ROUTING_TABLE, u32::MAX] {
+            let mut c = sample();
+            wg(&mut c).routing_table = table;
+            c.validate()
+                .unwrap_or_else(|e| panic!("routing_table = {table} refusee: {e}"));
+        }
+    }
+
+    /// Un profil deja ecrit avec une table reservee se LIT: la forme du
+    /// fichier n'a pas change. C'est la validation qui le refuse, comme pour
+    /// une marque nulle, et c'est elle que le client, l'IPC et le daemon
+    /// appellent avant tout montage.
+    #[test]
+    fn un_profil_ecrit_avec_une_table_reservee_se_lit_mais_ne_se_valide_pas() {
+        let json = serde_json::json!({
+            "interface": "wg0",
+            "private_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaA=",
+            "addresses": ["10.2.0.2/32"],
+            "routing_table": 254,
+            "peer": {
+                "public_key": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbA=",
+                "endpoint": { "addr": "203.0.113.7:51820" },
+                "allowed_ips": ["0.0.0.0/0"]
+            },
+            "dns": { "local_resolver": "127.0.0.1", "upstream": ["10.2.0.1"] }
+        });
+        let c: TunnelConfig = serde_json::from_value(json).expect("la forme a plat doit se lire");
+        assert_eq!(c.wireguard().unwrap().routing_table, 254);
+        let e = c.validate().expect_err("254 doit etre refusee").to_string();
+        assert!(e.contains("'main'"), "{e}");
     }
 
     /// Le pendant du precedent, et la raison d'etre de l'enumeration: un

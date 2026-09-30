@@ -3525,6 +3525,30 @@ mod tests {
         );
     }
 
+    /// Une connexion dont la table est reservee au noyau est refusee a la
+    /// porte: ni politique posee, ni peripherique monte ou demonte. Le chemin
+    /// est celui de l'IPC (`Connect` comme `ConnectStored`). Le temoin est la
+    /// recette precedente: le meme profil, table libre, monte.
+    #[test]
+    fn une_table_reservee_est_refusee_avant_tout_armement() {
+        for table in [0u32, 253, 254, 255] {
+            let mut c = cfg();
+            if let Portage::Wireguard(w) = &mut c.portage {
+                w.routing_table = table;
+            }
+            let (issue, montes, politiques) = selection(Decision::default(), c, false);
+            let e = issue
+                .expect_err(&format!("la table {table} devait etre refusee"))
+                .to_string();
+            assert!(e.contains(&format!("routing_table = {table} ")), "{e}");
+            assert!(montes.is_empty(), "rien ne devait monter: {montes:?}");
+            assert!(
+                politiques.is_empty(),
+                "aucune politique ne devait etre posee: {politiques:?}"
+            );
+        }
+    }
+
     /// La voie par coeur est joignable par `Connect`, et c'est le defaut que
     /// ce cablage corrige.
     ///

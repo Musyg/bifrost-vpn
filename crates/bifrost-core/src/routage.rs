@@ -58,7 +58,44 @@ pub const TABLE_LOCAL: u32 = 255;
 /// Les tables que le noyau se reserve (`RT_TABLE_UNSPEC`, `RT_TABLE_DEFAULT`,
 /// `RT_TABLE_MAIN`, `RT_TABLE_LOCAL`). Une table de tunnel qui en serait une
 /// melangerait les routes du tunnel a celles du systeme.
+///
+/// C'est la SEULE liste: la validation de la configuration, la pose et le
+/// demontage WireGuard (`netcfg` dans le daemon) et la preuve `prove routes` la
+/// lisent toutes, par [`table_reservee`] ou directement. Le demontage fait
+/// `ip route flush table <T>`: avec 254 il vide `main`, avec 255 `local`, avec 0
+/// toutes les tables (iproute2 lit 0 comme `all`), avec 253 `default`.
 pub const TABLES_RESERVEES: [u32; 4] = [0, 253, TABLE_MAIN, TABLE_LOCAL];
+
+/// Le nom que le noyau donne a une table qu'il se reserve, ou `None` si la
+/// table est libre pour un tunnel.
+///
+/// [`TABLES_RESERVEES`] decide, et elle seule: le nom ne sert qu'au message.
+/// `RT_TABLE_COMPAT` (252) n'en fait pas partie. Ce n'est pas une table du
+/// noyau mais la valeur qu'il ecrit dans le champ de huit bits d'une route
+/// dont la table depasse 255, la vraie table voyageant dans `RTA_TABLE`;
+/// iproute2 lit `RTA_TABLE` et pose, liste et vide la table 252 comme une
+/// autre.
+pub fn table_reservee(table: u32) -> Option<&'static str> {
+    if !TABLES_RESERVEES.contains(&table) {
+        return None;
+    }
+    Some(match table {
+        0 => "unspec",
+        253 => "default",
+        TABLE_MAIN => "main",
+        TABLE_LOCAL => "local",
+        _ => "reservee",
+    })
+}
+
+/// Les tables reservees, pour un message: `0, 253, 254, 255`.
+pub fn liste_des_tables_reservees() -> String {
+    TABLES_RESERVEES
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
 
 /// Table de routage du chemin par coeur. `0xb1f` se lit "bif"; le choix et ses
 /// raisons sont documentes dans l'aiguillage du daemon, qui la reexporte.
@@ -429,6 +466,33 @@ mod tests {
                 assert!(!p.regles(f).is_empty(), "{f:?}");
                 assert_eq!(p.routes(f)[0].table, p.table_du_tunnel());
             }
+        }
+    }
+
+    /// Les tables reservees, ecrites ici en litteraux lus dans `rt_class_t`
+    /// (`include/uapi/linux/rtnetlink.h`, v7.0) et non tires de
+    /// [`TABLES_RESERVEES`]: retirer une valeur de la liste doit faire rougir
+    /// cette recette, pas la suivre.
+    #[test]
+    fn chaque_table_reservee_du_noyau_est_nommee() {
+        for (table, nom) in [
+            (0, "unspec"),
+            (253, "default"),
+            (254, "main"),
+            (255, "local"),
+        ] {
+            assert_eq!(table_reservee(table), Some(nom), "table {table}");
+        }
+        assert_eq!(liste_des_tables_reservees(), "0, 253, 254, 255");
+    }
+
+    /// Les voisines restent libres: 252 (`RT_TABLE_COMPAT`, voir
+    /// [`table_reservee`]), 1, 256, la table par defaut de wg-quick et du
+    /// produit, et la plus grande.
+    #[test]
+    fn les_tables_voisines_ne_sont_pas_reservees() {
+        for table in [1, 252, 256, 51820, u32::MAX] {
+            assert_eq!(table_reservee(table), None, "table {table}");
         }
     }
 

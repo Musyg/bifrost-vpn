@@ -6,6 +6,9 @@
 //!
 //! `routage_produit wireguard <interface> <fwmark> <table>`
 //! `routage_produit coeur <interface> [<uid>]`
+//!
+//! Une table que le noyau se reserve est refusee par la pose: code 3, message
+//! sur la sortie d'erreur, rien sur la sortie standard.
 
 #[cfg(target_os = "linux")]
 fn main() {
@@ -14,11 +17,21 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let cmds = match args.as_slice() {
-        ["wireguard", interface, marque, table] => netcfg::add_routing(&configuration(
+        // La configuration ne passe pas par la validation: c'est la pose
+        // elle-meme qui refuse une table que le noyau se reserve. Le refus
+        // sort sur la sortie d'erreur, sans une seule ligne sur la sortie
+        // standard, que le banc applique telle quelle.
+        ["wireguard", interface, marque, table] => match netcfg::add_routing(&configuration(
             interface,
             marque.parse().expect("fwmark entier"),
             table.parse().expect("table entiere"),
-        )),
+        )) {
+            Ok(cmds) => cmds,
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(3);
+            }
+        },
         ["coeur", interface] => aiguillage::poser(&aiguillage::Aiguillage {
             interface: (*interface).to_owned(),
             coeur_uid: None,

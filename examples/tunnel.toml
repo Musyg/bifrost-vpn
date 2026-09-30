@@ -23,7 +23,9 @@ mtu = 1420
 # defaut est celle de wg-quick. Ne pas mettre 0.
 fwmark = 51820
 
-# Table de routage dediee. Facultatif.
+# Table de routage dediee. Facultatif. Jamais une table que le noyau Linux se
+# reserve (0, 253 default, 254 main, 255 local): le demontage du tunnel la
+# viderait. Un profil qui en porte une est refuse.
 routing_table = 51820
 
 # Autoriser le trafic vers les prefixes prives hors tunnel. Faux par defaut:
