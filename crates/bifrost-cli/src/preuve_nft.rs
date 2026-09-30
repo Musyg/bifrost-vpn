@@ -104,7 +104,8 @@ impl Rapport {
     }
 }
 
-fn heure() -> Option<u128> {
+/// Horodatage d'un rapport de preuve, partage avec `prove routes`.
+pub(crate) fn heure() -> Option<u128> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .ok()
@@ -307,7 +308,9 @@ fn analyser(octets: &[u8]) -> Result<Capture, &'static str> {
     Ok(capture)
 }
 
-fn lire(chemin: &Path) -> Result<Vec<u8>, &'static str> {
+/// Lecture bornee d'un fichier regulier, stable pendant la lecture. Partagee
+/// avec `prove routes`, qui lit son intention par le meme chemin.
+pub(crate) fn lire(chemin: &Path) -> Result<Vec<u8>, &'static str> {
     let initial = std::fs::symlink_metadata(chemin).map_err(|_| "fichier inaccessible")?;
     if !initial.is_file() || initial.len() > MAX_OCTETS {
         return Err("fichier non regulier ou trop grand");

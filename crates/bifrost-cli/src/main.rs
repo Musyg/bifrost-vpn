@@ -13,6 +13,11 @@ mod preuve_nft;
 mod preuve_nft_daemon;
 #[cfg(target_os = "linux")]
 mod preuve_nft_linux;
+/// Regles de routage et routes: le plan du produit confronte au noyau. Pur,
+/// sauf la collecte, qui est Linux.
+mod preuve_routes;
+#[cfg(target_os = "linux")]
+mod preuve_routes_linux;
 mod preuve_wfp;
 mod profile;
 mod render;
@@ -207,6 +212,20 @@ enum CmdPreuve {
         #[arg(long = "politique-daemon", required = true)]
         politique_daemon: bool,
         /// Lecture seule du moteur courant, sans elevation ni changement.
+        #[arg(long, required = true)]
+        actif: bool,
+    },
+    /// Linux: compare les regles de routage et les routes du namespace courant
+    /// au plan que le produit pose pour une intention (chemin WireGuard ou
+    /// coeur). Lecture seule du noyau, deux fois, sans elevation ni changement;
+    /// le rapport ne porte que des categories et des comptes.
+    Routes {
+        /// Intention de routage v1: schema_version, chemin, interface, fwmark,
+        /// table, coeur_uid.
+        #[arg(long)]
+        intention: std::path::PathBuf,
+        /// Lecture seule du noyau courant. Seule forme pour l'instant, exigee
+        /// pour que la ligne dise que le noyau est lu.
         #[arg(long, required = true)]
         actif: bool,
     },
@@ -901,6 +920,17 @@ async fn run(args: Args) -> anyhow::Result<i32> {
             quoi: CmdPreuve::Wfp { .. },
         } => {
             let rapport = preuve_wfp::verifier_declaration(&args.socket).await;
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&rapport)?);
+            } else {
+                print!("{}", rapport.texte());
+            }
+            return Ok(rapport.code());
+        }
+        Cmd::Prove {
+            quoi: CmdPreuve::Routes { intention, .. },
+        } => {
+            let rapport = preuve_routes::verifier(intention);
             if args.json {
                 println!("{}", serde_json::to_string_pretty(&rapport)?);
             } else {
