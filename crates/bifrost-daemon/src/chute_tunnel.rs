@@ -109,7 +109,9 @@ fn politique(interface: &str, luid: u64, lan: bool) -> FirewallPolicy {
 fn adaptateur(i: usize) -> anyhow::Result<Adapter> {
     let nt = WireGuardNt::load().map_err(|e| {
         anyhow!(
-            "chargement de wireguard.dll: {e}. Ces deux vecteurs demandent              WireGuardNT, dont l'adaptateur fournit le LUID que le plan WFP              conditionne"
+            "chargement de wireguard.dll: {e}. Ces deux vecteurs demandent \
+             WireGuardNT, dont l'adaptateur fournit le LUID que le plan WFP \
+             conditionne"
         )
     })?;
     Adapter::create_with_guid(nt, NOM_ADAPTATEUR, &adapter::CHUTE_GUID[i % 2])

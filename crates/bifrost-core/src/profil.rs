@@ -374,10 +374,7 @@ impl FromStr for CertificatPem {
                 "certificat: aucune ligne '-----END CERTIFICATE-----'. Le PEM est tronque".into(),
             ));
         }
-        Ok(Self(lignes.join(
-            "
-",
-        )))
+        Ok(Self(lignes.join("\n")))
     }
 }
 

@@ -904,10 +904,7 @@ mod tests {
     fn un_diagnostic_ne_porte_pas_de_sequences_d_echappement() {
         let j = JournalErreur::default();
         j.pousser(PLAINTE_REELLE);
-        j.pousser(
-            "
-",
-        );
+        j.pousser("\n");
         let dit = j.dernieres_lignes(1);
         assert!(!dit.contains('\u{1b}'), "diagnostic colore: {dit:?}");
         assert!(

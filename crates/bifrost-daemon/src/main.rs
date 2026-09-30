@@ -1047,13 +1047,12 @@ fn avertir_si_overlay_ferme(politique: &bifrost_core::demarrage::PolitiqueDemarr
         return;
     }
     println!(
-        "
-AVERTISSEMENT: la plage CGNAT 100.64.0.0/10 n'est PAS ouverte.
-               Une machine joignable uniquement par un reseau overlay
-               (Tailscale, ZeroTier, Nebula) deviendra INJOIGNABLE apres
-               redemarrage, et il faudra s'y rendre.
-               Sortie de secours depuis la machine elle-meme:
-                 bifrost-daemon --demarrage retirer"
+        "\nAVERTISSEMENT: la plage CGNAT 100.64.0.0/10 n'est PAS ouverte.\n               \
+         Une machine joignable uniquement par un reseau overlay\n               \
+         (Tailscale, ZeroTier, Nebula) deviendra INJOIGNABLE apres\n               \
+         redemarrage, et il faudra s'y rendre.\n               \
+         Sortie de secours depuis la machine elle-meme:\n                 \
+         bifrost-daemon --demarrage retirer"
     );
 }
 
@@ -1079,17 +1078,14 @@ fn demarrage_cli(
                 politique.reseau_local, politique.overlay_cgnat, politique.ipv6
             );
             println!(
-                "{} regles, {} filtres par duree de vie, {} au total (boot-time + persistants)
-",
+                "{} regles, {} filtres par duree de vie, {} au total (boot-time + persistants)\n",
                 plan.len(),
                 filtres,
                 filtres * 2
             );
             for f in &plan {
                 println!(
-                    "  [{:>2}] {:<7} {}
-        couches: {}
-        conditions: {}",
+                    "  [{:>2}] {:<7} {}\n        couches: {}\n        conditions: {}",
                     f.weight,
                     match f.action {
                         wfp_plan::Action::Permit => "PERMIT",
@@ -1528,8 +1524,7 @@ fn main() -> anyhow::Result<()> {
         #[cfg(windows)]
         if verbe == "poser" || verbe == "retirer" {
             println!(
-                "{}
-",
+                "{}\n",
                 bifrost_daemon::checks::doh_pose_registre::avertissement()
             );
         }
@@ -2846,8 +2841,7 @@ fn telemetrie_commande(args: &Args) -> anyhow::Result<()> {
             telemetrie::restaurer(&args.telemetrie_journal).map_err(|e| anyhow::anyhow!(e))?;
         rapport.imprimer();
         println!(
-            "
-{} rendu(s), {} refuse(s), {} echec(s)",
+            "\n{} rendu(s), {} refuse(s), {} echec(s)",
             rapport.compte("POSE"),
             rapport.compte("REFUSE"),
             rapport.compte("ECHEC")
@@ -2859,8 +2853,7 @@ fn telemetrie_commande(args: &Args) -> anyhow::Result<()> {
         let rapport = telemetrie::etat(profil);
         rapport.imprimer();
         println!(
-            "
-{} deja conforme(s), {} a poser, {} hors portee, {} sans objet",
+            "\n{} deja conforme(s), {} a poser, {} hors portee, {} sans objet",
             rapport.compte("DEJA"),
             rapport.compte("A POSER"),
             rapport.compte("REFUSE"),
@@ -2878,8 +2871,7 @@ fn telemetrie_commande(args: &Args) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!(e))?;
     rapport.imprimer();
     println!(
-        "
-{} pose(s), {} deja conforme(s), {} refuse(s), {} sans objet, {} echec(s)",
+        "\n{} pose(s), {} deja conforme(s), {} refuse(s), {} sans objet, {} echec(s)",
         rapport.compte("POSE"),
         rapport.compte("DEJA"),
         rapport.compte("REFUSE"),

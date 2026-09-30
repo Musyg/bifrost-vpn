@@ -530,20 +530,17 @@ fn verifier_liste_rougit_sur_entete_qui_porte_le_mot_run_sans_numero() {
     let d = bac("entete-mot-seul");
     let liste = ecrire(
         &d.join("liste.txt"),
-        "# Releve 2026-09-14 sur le runner, huit runs rouges, commite le 05/09.
-         SKIPPED: creer un espace de noms reseau demande CAP_NET_ADMIN
-",
+        "# Releve 2026-09-14 sur le runner, huit runs rouges, commite le 05/09.\n\
+         SKIPPED: creer un espace de noms reseau demande CAP_NET_ADMIN\n",
     );
     let (ok, sortie) = budget(&["--verifier-liste", &liste]);
     assert!(
         !ok,
-        "un en-tete qui ne cite ni numero de run ni SHA de commit doit faire rougir:
-{sortie}"
+        "un en-tete qui ne cite ni numero de run ni SHA de commit doit faire rougir:\n{sortie}"
     );
     assert!(
         sortie.contains("par son numero") && sortie.contains("par son SHA"),
-        "les deux manques doivent etre nommes:
-{sortie}"
+        "les deux manques doivent etre nommes:\n{sortie}"
     );
 }
 

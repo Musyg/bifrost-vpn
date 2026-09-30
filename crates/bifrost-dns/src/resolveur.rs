@@ -128,7 +128,9 @@ impl ResolveurChiffre {
             let absolu = blocage.is_absolute() || blocage.to_string_lossy().starts_with('/');
             if !absolu {
                 return Err(Error::Config(format!(
-                    "le fichier des noms refuses doit etre un chemin absolu,                      recu {}. Relatif, il se resout par rapport au repertoire                      de la configuration, base differente de celle du cache",
+                    "le fichier des noms refuses doit etre un chemin absolu, \
+                     recu {}. Relatif, il se resout par rapport au repertoire \
+                     de la configuration, base differente de celle du cache",
                     blocage.display()
                 )));
             }

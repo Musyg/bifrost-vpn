@@ -303,8 +303,7 @@ pub fn selftest(
     match juger(chiffres, &fuites, transport.is_ok()) {
         Issue::Reussi => {
             println!(
-                "
-exit-ip: PASSED - la banniere est passee par le tunnel, et aucun paquet en clair vers {} ni vers le temoin public {} n'est apparu sur les {} composant(s) captures",
+                "\nexit-ip: PASSED - la banniere est passee par le tunnel, et aucun paquet en clair vers {} ni vers le temoin public {} n'est apparu sur les {} composant(s) captures",
                 cible.ip(),
                 temoin_public.ip(),
                 ids.len()
@@ -315,10 +314,7 @@ exit-ip: PASSED - la banniere est passee par le tunnel, et aucun paquet en clair
             if let Err(e) = &transport {
                 println!("  la recette de transport a echoue: {e:#}");
             }
-            println!(
-                "
-exit-ip: SKIPPED - {raison}"
-            );
+            println!("\nexit-ip: SKIPPED - {raison}");
             Ok(())
         }
         Issue::Echec(raison) => Err(anyhow::anyhow!("exit-ip: FAILED - {raison}")),
@@ -442,7 +438,7 @@ Cartes reseau :\r
         // machine voisine serait imputee a la mauvaise, et une preuve fausse
         // est pire qu'une absence de preuve.
         let trace = "[00]1.1::x [Microsoft-Windows-PktMon] PktGroupId 1, Composant 15
-	02-00-00-00-00-01 > 02-00-00-00-00-02, ethertype IPv4 (0x0800), length 60: 198.51.100.9.1 > 10.88.0.12.7000: Flags [S]
+\t02-00-00-00-00-01 > 02-00-00-00-00-02, ethertype IPv4 (0x0800), length 60: 198.51.100.9.1 > 10.88.0.12.7000: Flags [S]
 ";
         assert!(fuites(&paquets(trace), &[tunnel()]).is_empty());
         assert_eq!(

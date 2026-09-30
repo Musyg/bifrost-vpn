@@ -34,16 +34,17 @@ Les comptes ci-dessous ont ete pris le 30/09/2026 sur l'arbre qui porte le
 portage des corrections du tableau de survie et des abstentions, puis D1b.3b,
 l'identite du serveur de D1b.3c, sa verification par toutes les commandes de
 la CLI, la correction du permis DNS Windows par famille, la garde des tubes
-sous pipefail, la preuve WFP par declaration, puis le retrait de
-CAP_SYS_ADMIN du service. L'hote qui tient le role `essai-linux` a change le 29/09: ses comptes ne se comparent pas a ceux d'avant cette date.
+sous pipefail, la preuve WFP par declaration, le retrait de CAP_SYS_ADMIN du
+service, puis les litteraux abimes par un transport d'antislashs et le trou FF
+de la garde des abstentions. L'hote qui tient le role `essai-linux` a change le 29/09: ses comptes ne se comparent pas a ceux d'avant cette date.
 
 Compte honnete des recettes cargo, par hote. La colonne `reelles` est ce qui a
 verifie quelque chose: `annoncees` moins `abstentions` moins `rouges`.
 
 | Hote | Annoncees | Abstentions | Rouges | Reelles |
 |---|---|---|---|---|
-| dev-windows | 1355 | 19 | 0 | 1336 |
-| essai-linux | 1371 | 25 | 0 | 1346 |
+| dev-windows | 1357 | 19 | 0 | 1338 |
+| essai-linux | 1373 | 25 | 0 | 1348 |
 
 Les deux lignes ont ete prises par `scripts/recettes-strict.sh`, chacune sur son
 hote: le portage a ajoute 14 recettes des deux cotes, D1b.3b 11 sur dev-windows et 22
@@ -55,7 +56,8 @@ tournent sur les deux hotes), la garde des tubes sous pipefail 6 des deux
 cotes, la preuve WFP par declaration 51 sur dev-windows et 48 sur
 `essai-linux`, le retrait de CAP_SYS_ADMIN du service 7 sur dev-windows et 13 sur
 `essai-linux` (les gardes de l'unite tournent sur les deux hotes; le refus
-nomme du harnais et la relecture des captures sont propres a Linux). Sur `essai-linux` une recette de plus est ignoree par
+nomme du harnais et la relecture des captures sont propres a Linux), la garde des antislashs
+manges 2 des deux cotes. Sur `essai-linux` une recette de plus est ignoree par
 construction (elle pose une route et ne tourne qu'en espace de noms reseau).
 La ligne `essai-linux` a ete prise dans un clone, ou la garde des modes de
 scripts mesure (elle lit l'index); dans une copie sans `.git` elle s'abstient,

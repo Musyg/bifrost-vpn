@@ -171,7 +171,16 @@ fn aucun_fichier_texte_du_depot_ne_porte_de_caractere_de_controle() {
 /// pouvait l'attraper. La recette voisine ne le voyait pas non plus, la
 /// tabulation etant exclue de `est_de_controle` a juste titre - elle est
 /// legitime dans un `.md` ou un `.sh`.
-const TABULATIONS_ADMISES: [&str; 1] = ["crates/bifrost-daemon/src/exit_ip.rs"];
+///
+/// La liste est vide depuis le 30/09/2026. Son unique entree,
+/// `crates/bifrost-daemon/src/exit_ip.rs`, etait admise comme une sortie de
+/// PktMon recopiee telle quelle. Relue ce jour-la: la tabulation etait nee
+/// dans le meme commit que deux litteraux du meme fichier abimes par le meme
+/// transport (un `\n` devenu vrai saut de ligne), et les deux autres fixtures
+/// de la meme sortie, dans le meme fichier, l'ecrivent `\t`. C'etait donc un
+/// echappement interprete, pas une fixture: il est redevenu `\t`, et la valeur
+/// est la meme. La liste reste le moyen de declarer une vraie fixture un jour.
+const TABULATIONS_ADMISES: [&str; 0] = [];
 
 /// Les fichiers `.rs` du depot, chemin relatif a la racine.
 fn sources_rust(dossier: &Path, trouves: &mut Vec<(String, usize)>) {
