@@ -374,6 +374,165 @@ jq -e '.verdict == "UNMEASURED" and .reason == "serveur de la declaration non pr
 test ! -e "$BAC/faux/requetes"
 echo 'PASSED: faux daemon non root sur un --socket choisi -> non mesure (daemon-identity), sans une requete; le meme rejeu sous root passe (limite de la regle)'
 
+# --- Toutes les commandes verifient leur serveur, pas seulement la preuve ---
+#
+# Avant, `connect --config` envoyait le profil, cle privee comprise, a
+# quiconque tenait le --socket. Un faux serveur COMPTE ici ce qu'il recoit,
+# connexion par connexion, et ne repond jamais. Servi par un compte non root,
+# chaque commande du client qui parle au daemon doit le joindre (une
+# connexion), refuser en 4 et ne lui avoir rien ecrit. Temoin: le meme faux
+# serveur sous root recoit `connect --config`, et la cle privee JETABLE du
+# profil de test avec; sans lui, le zero de la branche refusee pourrait venir
+# d'un compteur aveugle. Le vrai daemon, root, reste admis: `connect` et
+# `status` plus haut, le hook de reprise et `disconnect` plus bas.
+COMPTE_PY='
+import socket, sys
+chemin, journal = sys.argv[1], sys.argv[2]
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.bind(chemin)
+s.listen(8)
+while True:
+    c, _ = s.accept()
+    c.settimeout(5)
+    d = b""
+    try:
+        while not d.endswith(b"\n"):
+            b = c.recv(65536)
+            if not b:
+                break
+            d += b
+    except socket.timeout:
+        pass
+    with open(journal + ".octets", "ab") as j:
+        j.write(d)
+    with open(journal, "a") as j:
+        j.write("%d\n" % len(d))
+    c.close()
+'
+COMPTE="$BAC/faux/c.sock"
+JOURNAL="$BAC/faux/compte"
+# Une paire JETABLE, tiree par le daemon du banc, pour ce seul passage.
+CLE=$("$DAEMON" --genkey | cut -d' ' -f1)
+PAIR=$("$DAEMON" --genkey | cut -d' ' -f2)
+test -n "$CLE"
+test -n "$PAIR"
+cat > "$BAC/profil-wg.toml" <<TOML
+interface = "bfsecipc0"
+private_key = "$CLE"
+addresses = ["198.51.100.2/32"]
+
+[peer]
+public_key = "$PAIR"
+endpoint = { addr = "192.0.2.10:51820" }
+allowed_ips = ["0.0.0.0/0", "::/0"]
+
+[dns]
+local_resolver = "127.0.0.1"
+upstream = ["198.51.100.53"]
+TOML
+chmod 600 "$BAC/profil-wg.toml"
+# Le prefixe (vide, ou setpriv) choisit le compte du compteur. Meme regle que
+# faux_daemon: le PID releve EST l'interprete, et il est tue par PID.
+compteur() {
+  rm -f "$COMPTE" "$JOURNAL" "$JOURNAL.octets"
+  ip netns exec "$NSD" "$@" python3 -c "$COMPTE_PY" "$COMPTE" "$JOURNAL" &
+  PID_FAUX=$!
+  for _ in $(seq 1 40); do
+    if [ -S "$COMPTE" ]; then break; fi
+    kill -0 "$PID_FAUX"
+    sleep 0.25
+  done
+  test -S "$COMPTE"
+  ip netns pids "$NSD" | grep -x "$PID_FAUX" >/dev/null
+}
+arreter_compteur() {
+  kill "$PID_FAUX"
+  wait "$PID_FAUX" 2>/dev/null || true
+  PID_FAUX=""
+}
+# Attend la ligne de la connexion, puis rend le nombre d'octets qu'elle a porte.
+octets_recus() {
+  for _ in $(seq 1 40); do
+    if [ -s "$JOURNAL" ]; then break; fi
+    sleep 0.25
+  done
+  test "$(wc -l < "$JOURNAL")" = 1
+  cat "$JOURNAL"
+}
+# `refuse <etiquette> <arguments du client...>`
+refuse() {
+  local etiquette=$1
+  shift
+  rm -f "$JOURNAL" "$JOURNAL.octets"
+  CODE=0
+  ip netns exec "$NSD" "$CLI" --socket "$COMPTE" "$@" > "$BAC/cmd.out" 2> "$BAC/cmd.err" || CODE=$?
+  if [ "$CODE" != 4 ] || [ "$(octets_recus)" != 0 ]; then
+    echo "$etiquette: code $CODE, octets $(cat "$JOURNAL" 2>/dev/null)" >&2
+    return 1
+  fi
+  grep -F "n'a pas l'identite attendue du daemon" "$BAC/cmd.err" >/dev/null
+  test ! -s "$BAC/cmd.out"
+  echo "   $etiquette: refuse (4), 1 connexion, 0 octet"
+}
+compteur
+CODE=0
+ip netns exec "$NSD" "$CLI" --socket "$COMPTE" connect --config "$BAC/profil-wg.toml" > "$BAC/cmd.out" 2>&1 || CODE=$?
+test "$CODE" != 4
+test "$(octets_recus)" -gt 0
+grep -F "$CLE" "$JOURNAL.octets" >/dev/null
+arreter_compteur
+echo 'PASSED: temoin, compteur root -> connect --config admis, la cle jetable lui arrive'
+compteur setpriv --reuid=65534 --regid=65534 --clear-groups
+refuse 'connect --config' connect --config "$BAC/profil-wg.toml"
+refuse 'connect' connect
+refuse 'disconnect' disconnect
+refuse 'status' status
+refuse '--json status' --json status
+refuse 'check' check
+refuse 'reprise' reprise --phase post --operation suspend
+# Le hook tel que l'installateur le depose, par son interprete: code 4, rien
+# d'ecrit, et le journal dit que rien n'a ete repose.
+HOOK="$RACINE/packaging/systemd/system-sleep/bifrost-reprise"
+rm -f "$JOURNAL" "$JOURNAL.octets"
+CODE=0
+ip netns exec "$NSD" env BIFROST_CLI="$CLI" BIFROST_SOCKET="$COMPTE" sh "$HOOK" post suspend 2> "$BAC/cmd.err" || CODE=$?
+test "$CODE" = 4
+test "$(octets_recus)" = 0
+grep -F "n'a PAS ete reposee" "$BAC/cmd.err" >/dev/null
+echo '   hook bifrost-reprise: refuse (4), 1 connexion, 0 octet'
+# La sonde d'emergency-disarm, avec une copie du client et un daemon LEURRE a
+# cote d'elle: le vrai binaire privilegie n'est jamais lance.
+mkdir "$BAC/urgence"
+cp "$CLI" "$BAC/urgence/bifrost-cli"
+printf '#!/bin/sh\nexit 0\n' > "$BAC/urgence/bifrost-daemon"
+chmod 755 "$BAC/urgence" "$BAC/urgence/bifrost-cli" "$BAC/urgence/bifrost-daemon"
+rm -f "$JOURNAL" "$JOURNAL.octets"
+ip netns exec "$NSD" "$BAC/urgence/bifrost-cli" --socket "$COMPTE" emergency-disarm --je-sais-ce-que-je-fais > "$BAC/cmd.out" 2> "$BAC/cmd.err"
+test "$(octets_recus)" = 0
+grep -F "n'a pas l'identite attendue du daemon" "$BAC/cmd.err" >/dev/null
+if grep -F 'un daemon repond encore' "$BAC/cmd.err" >/dev/null; then
+  echo "la sonde a pris le compteur non root pour le daemon" >&2
+  exit 1
+fi
+arreter_compteur
+echo '   emergency-disarm: la sonde n ecrit rien et ne prend pas le compteur pour le daemon'
+ip netns exec "$NSD" "$BAC/urgence/bifrost-cli" --socket "$SOCKET" emergency-disarm --je-sais-ce-que-je-fais > "$BAC/cmd.out" 2> "$BAC/cmd.err"
+grep -F 'un daemon repond encore' "$BAC/cmd.err" >/dev/null
+echo 'PASSED: compteur non root -> chaque commande refuse en 4 sans lui ecrire un octet; le vrai daemon reste reconnu'
+# Le hook, cette fois face au vrai daemon: il passe, et la politique est
+# reposee. Meme attente que `reposer`, par le chemin de production.
+AVANT=$(ip netns exec "$NSD" nft -s list table inet bifrost)
+ip netns exec "$NSD" env BIFROST_CLI="$CLI" BIFROST_SOCKET="$SOCKET" sh "$HOOK" post suspend 2> "$BAC/cmd.err"
+grep -F 'signalee au daemon' "$BAC/cmd.err" >/dev/null
+REPOSEE=0
+for _ in $(seq 1 40); do
+  if [ "$(ip netns exec "$NSD" nft -s list table inet bifrost)" != "$AVANT" ]; then REPOSEE=1; break; fi
+  sleep 0.25
+done
+test "$REPOSEE" = 1
+correspond
+echo 'PASSED: le hook de reprise, sous root face au vrai daemon, repose la politique'
+
 # Regle retiree: le drop du :53 du coeur, celui qui l'empeche de resoudre en clair.
 H=$(handle 'any(.expr[]; .match.left.meta.key? == "skuid") and any(.expr[]; has("drop"))')
 test "$H" != null

@@ -16,6 +16,16 @@
 //! Le pendant Windows de cette mesure existe et va plus loin - il ENDORT la
 //! machine: `bifrost_daemon::reprise::selftest`, derriere
 //! `--reprise-selftest`. Il n'a pas d'equivalent ici pour la raison ci-dessus.
+//!
+//! # Deux branches, selon le compte
+//!
+//! Le client exige du serveur l'identite du daemon, root. En production le hook
+//! et le daemon sont root tous les deux (`systemd-sleep` n'a pas de `User=`).
+//! Ici le vrai `serve` tourne sous le compte de la recette: sous root, la
+//! reprise arrive au superviseur; sous un compte ordinaire, ce serveur est un
+//! faux daemon pour le client, et RIEN ne doit arriver au superviseur. Les deux
+//! branches mesurent; la premiere se mesure en passe privilegiee et dans le
+//! banc `scripts/preuve-nft-linux.sh`, face au vrai daemon.
 
 #![cfg(target_os = "linux")]
 
@@ -116,15 +126,39 @@ async fn le_hook_de_veille_fait_arriver_la_reprise_au_superviseur() {
     .expect("le hook doit rendre la main");
 
     let erreur = String::from_utf8_lossy(&sortie.stderr).trim().to_owned();
-    let recu = rx.recv_timeout(PATIENCE);
+    let root = euid() == 0;
+    // Hors root, le client a refuse AVANT d'ecrire: s'il avait parle, il
+    // aurait attendu la reponse du daemon avant de rendre la main, donc toute
+    // commande serait deja dans le canal. Le delai ne couvre que le trajet.
+    let recu = rx.recv_timeout(if root {
+        PATIENCE
+    } else {
+        Duration::from_secs(2)
+    });
     let _ = std::fs::remove_dir_all(&rep);
 
-    assert_eq!(sortie.status.code(), Some(0), "le hook a echoue: {erreur}");
-    // `Cmd` ne derive pas `Debug` et ne doit pas le deriver: `Cmd::Connect`
-    // porte une cle privee, qu'un `{:?}` egare suffirait a mettre au journal.
-    assert!(
-        matches!(recu, Ok(Cmd::Reprise)),
-        "aucune Cmd::Reprise n'est arrivee au superviseur. Au reveil, la \
-         politique ne serait pas reposee. stderr du hook: {erreur}"
-    );
+    if root {
+        assert_eq!(sortie.status.code(), Some(0), "le hook a echoue: {erreur}");
+        // `Cmd` ne derive pas `Debug` et ne doit pas le deriver: `Cmd::Connect`
+        // porte une cle privee, qu'un `{:?}` egare suffirait a mettre au journal.
+        assert!(
+            matches!(recu, Ok(Cmd::Reprise)),
+            "aucune Cmd::Reprise n'est arrivee au superviseur. Au reveil, la \
+             politique ne serait pas reposee. stderr du hook: {erreur}"
+        );
+    } else {
+        assert_eq!(
+            sortie.status.code(),
+            Some(4),
+            "un serveur non root doit etre refuse en 4: {erreur}"
+        );
+        assert!(
+            recu.is_err(),
+            "une commande est arrivee au superviseur par un serveur non root"
+        );
+        assert!(
+            erreur.contains("n'a pas l'identite attendue du daemon"),
+            "le journal du hook doit dire le refus: {erreur}"
+        );
+    }
 }

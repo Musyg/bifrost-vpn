@@ -50,19 +50,47 @@ pub fn default_endpoint() -> String {
 //
 // Le serveur authentifie ses clients (SO_PEERCRED, DACL du pipe). L'inverse
 // n'existait pas: le client parlait a quiconque servait le chemin qu'on lui
-// donnait. Pour piloter, c'est le choix de l'utilisateur; pour une PREUVE qui
-// confronte le noyau a ce que le daemon declare, c'est une faille: n'importe
-// quel processus peut servir une declaration taillee pour un noyau altere, et
-// la preuve dirait MATCH. `IpcClient::connect_verified` ferme ce cas, avant
-// d'envoyer le moindre octet au serveur.
+// donnait. Pour une PREUVE qui confronte le noyau a ce que le daemon declare,
+// n'importe quel processus pouvait servir une declaration taillee pour un
+// noyau altere, et la preuve disait MATCH. Pour piloter, c'etait pire: `connect
+// --config` envoyait le profil, cle privee comprise, a qui tenait le socket, et
+// sous Windows le nom du pipe par defaut est libre des que le service est
+// arrete. Mesure du 30/09/2026, depuis un compte non eleve: le client de
+// `5baf9f3` ecrit 506 octets, dont la cle privee, dans un pipe
+// `bifrost-daemon` cree par ce compte.
+//
+// `IpcClient::connect_verified` est desormais la SEULE facon d'ouvrir un
+// client: il n'existe plus de constructeur qui ecrive avant d'avoir etabli
+// l'identite du serveur, et un site d'appel ne peut donc pas l'oublier.
 
 /// Ce que le client exige du processus qui sert le canal.
+///
+/// Deux regles et non une, parce qu'elles ne repondent pas a la meme question.
+/// La preuve (`Privileged`) exporte un constat sur ce que le DAEMON declare, et
+/// ne l'admet que sous l'identite du service. Les commandes (`Elevated`)
+/// confient un profil ou un ordre a un serveur, et n'exigent de lui que les
+/// droits que le daemon exige de lui-meme pour demarrer (`ensure_privileged`):
+/// ce qu'un compte non privilegie ne peut jamais avoir. Sous Linux les deux se
+/// confondent (root); sous Windows la seconde admet aussi un pipe possede par
+/// les Administrateurs, celui que cree un daemon lance en console elevee.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServerRequirement {
-    /// Un serveur privilegie. Linux: l'uid EFFECTIF du processus qui a appele
-    /// `listen(2)` sur le socket, tel que `SO_PEERCRED` le rend, vaut 0.
-    /// Windows: le proprietaire du pipe nomme est LocalSystem (`S-1-5-18`).
+    /// Un serveur privilegie, pour une PREUVE. Linux: l'uid EFFECTIF du
+    /// processus qui a appele `listen(2)` sur le socket, tel que `SO_PEERCRED`
+    /// le rend, vaut 0. Windows: le proprietaire du pipe nomme est LocalSystem
+    /// (`S-1-5-18`).
     Privileged,
+    /// Un serveur qui a les droits du daemon, pour une COMMANDE. Linux: comme
+    /// `Privileged`, l'uid effectif vaut 0. Windows: le proprietaire du pipe
+    /// est LocalSystem ou les Administrateurs (`S-1-5-32-544`).
+    ///
+    /// Un compte non eleve ne peut ni creer un pipe possede par l'un ou
+    /// l'autre, ni le leur attribuer apres coup (`ERROR_INVALID_OWNER`): le
+    /// noyau n'accepte comme proprietaire que l'utilisateur du jeton ou un
+    /// groupe ACTIF marque `SE_GROUP_OWNER`, et les Administrateurs ne sont
+    /// actifs que dans un jeton eleve. Garde par
+    /// `un_compte_sans_administrateurs_actifs_ne_fabrique_aucun_pipe_admis`.
+    Elevated,
     /// Linux: exactement cet uid effectif. Pour les recettes qui servent un
     /// faux daemon sous leur propre compte; une preuve ne s'en sert jamais.
     #[cfg(unix)]
@@ -75,12 +103,16 @@ pub enum ServerRequirement {
 /// ni pid, ni SID ne sortent de ce module.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServerRule {
-    /// Linux, `ServerRequirement::Privileged`.
+    /// Linux, `ServerRequirement::Privileged` ou `Elevated`.
     RootPeerCredentials,
     /// Linux, `ServerRequirement::Uid`: recettes seulement.
     UidPeerCredentials,
-    /// Windows, `ServerRequirement::Privileged`.
+    /// Windows, `ServerRequirement::Privileged` ou `Elevated`: pipe de
+    /// LocalSystem.
     WindowsSystemPipeOwner,
+    /// Windows, `ServerRequirement::Elevated` seulement: pipe des
+    /// Administrateurs. Jamais rendue a une preuve.
+    WindowsAdministratorsPipeOwner,
 }
 
 impl ServerRule {
@@ -89,6 +121,7 @@ impl ServerRule {
             ServerRule::RootPeerCredentials => "root-peer-credentials",
             ServerRule::UidPeerCredentials => "uid-peer-credentials",
             ServerRule::WindowsSystemPipeOwner => "windows-system-pipe-owner",
+            ServerRule::WindowsAdministratorsPipeOwner => "windows-administrators-pipe-owner",
         }
     }
 }
@@ -311,13 +344,8 @@ mod imp {
     }
 
     impl IpcClient {
-        pub async fn connect(path: impl AsRef<Path>) -> Result<Self> {
-            let stream = UnixStream::connect(path.as_ref()).await?;
-            Ok(Self::from_stream(stream))
-        }
-
         /// Se connecte, puis exige du SERVEUR l'identite demandee, avant
-        /// d'ecrire le moindre octet.
+        /// d'ecrire le moindre octet. Le seul constructeur du client.
         ///
         /// `SO_PEERCRED` sur le socket du client rend les identifiants que le
         /// noyau a copies depuis le socket d'ecoute au `connect(2)`, eux-memes
@@ -381,7 +409,11 @@ mod imp {
         attendu: ServerRequirement,
     ) -> std::result::Result<ServerRule, ServerIdentityError> {
         match attendu {
-            ServerRequirement::Privileged if uid == 0 => Ok(ServerRule::RootPeerCredentials),
+            // Une seule regle pour la preuve et les commandes: sous Linux, le
+            // daemon n'a qu'une identite possible (`ensure_privileged`).
+            ServerRequirement::Privileged | ServerRequirement::Elevated if uid == 0 => {
+                Ok(ServerRule::RootPeerCredentials)
+            }
             ServerRequirement::Uid(exige) if uid == exige => Ok(ServerRule::UidPeerCredentials),
             _ => Err(ServerIdentityError::Refused),
         }
@@ -406,7 +438,7 @@ mod imp {
         #[test]
         fn seul_l_uid_exige_passe() {
             use ServerIdentityError::Refused;
-            use ServerRequirement::{Privileged, Uid};
+            use ServerRequirement::{Elevated, Privileged, Uid};
             for (uid, attendu, issue) in [
                 (0, Privileged, Ok(ServerRule::RootPeerCredentials)),
                 (1, Privileged, Err(Refused)),
@@ -416,6 +448,12 @@ mod imp {
                 (65534, Privileged, Err(Refused)),
                 // -1: aucun identifiant copie par le noyau.
                 (u32::MAX, Privileged, Err(Refused)),
+                // Les commandes: la meme regle, sans exception.
+                (0, Elevated, Ok(ServerRule::RootPeerCredentials)),
+                (1, Elevated, Err(Refused)),
+                (1000, Elevated, Err(Refused)),
+                (65534, Elevated, Err(Refused)),
+                (u32::MAX, Elevated, Err(Refused)),
                 (1000, Uid(1000), Ok(ServerRule::UidPeerCredentials)),
                 (0, Uid(1000), Err(Refused)),
                 (1001, Uid(1000), Err(Refused)),
@@ -425,30 +463,33 @@ mod imp {
         }
 
         /// Sur un vrai socket, servi par CE processus: refuse s'il n'est pas
-        /// root, admis s'il l'est. Les deux branches mesurent, aucune ne
-        /// s'abstient; et l'exigence d'uid explicite passe dans les deux.
+        /// root, admis s'il l'est, pour la preuve comme pour les commandes.
+        /// Les deux branches mesurent, aucune ne s'abstient; et l'exigence
+        /// d'uid explicite passe dans les deux.
         #[tokio::test]
         async fn un_serveur_du_compte_courant_n_est_admis_que_s_il_est_root() {
             let path = chemin("courant");
             let _serveur = IpcServer::bind(&path, AuthPolicy::default(), None)
                 .await
                 .expect("bind");
-            let issue = IpcClient::connect_verified(&path, ServerRequirement::Privileged)
-                .await
-                .map(|(_, regle)| regle);
-            if euid() == 0 {
-                assert!(
-                    matches!(issue, Ok(ServerRule::RootPeerCredentials)),
-                    "{issue:?}"
-                );
-            } else {
-                assert!(
-                    matches!(
-                        issue,
-                        Err(IpcError::ServerIdentity(ServerIdentityError::Refused))
-                    ),
-                    "{issue:?}"
-                );
+            for attendu in [ServerRequirement::Privileged, ServerRequirement::Elevated] {
+                let issue = IpcClient::connect_verified(&path, attendu)
+                    .await
+                    .map(|(_, regle)| regle);
+                if euid() == 0 {
+                    assert!(
+                        matches!(issue, Ok(ServerRule::RootPeerCredentials)),
+                        "{attendu:?}: {issue:?}"
+                    );
+                } else {
+                    assert!(
+                        matches!(
+                            issue,
+                            Err(IpcError::ServerIdentity(ServerIdentityError::Refused))
+                        ),
+                        "{attendu:?}: {issue:?}"
+                    );
+                }
             }
             let issue = IpcClient::connect_verified(&path, ServerRequirement::Uid(euid()))
                 .await
@@ -481,7 +522,7 @@ mod imp {
     };
     use windows_sys::Win32::Security::{
         IsWellKnownSid, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
-        SECURITY_ATTRIBUTES, WinLocalSystemSid,
+        SECURITY_ATTRIBUTES, WinBuiltinAdministratorsSid, WinLocalSystemSid,
     };
 
     /// SDDL du named pipe.
@@ -518,49 +559,7 @@ mod imp {
         }
 
         fn create_instance(&self, first: bool) -> Result<NamedPipeServer> {
-            let mut wide: Vec<u16> = PIPE_SDDL.encode_utf16().collect();
-            wide.push(0);
-
-            let mut psd: *mut c_void = std::ptr::null_mut();
-            // SAFETY: `wide` est une chaine UTF-16 terminee par un zero, et
-            // `psd` recoit un descripteur alloue par le systeme qu'on libere
-            // avec LocalFree avant de sortir de la fonction.
-            let ok = unsafe {
-                ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                    wide.as_ptr(),
-                    SDDL_REVISION_1,
-                    &mut psd,
-                    std::ptr::null_mut(),
-                )
-            };
-            if ok == 0 {
-                return Err(std::io::Error::last_os_error().into());
-            }
-
-            let mut sa = SECURITY_ATTRIBUTES {
-                nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
-                lpSecurityDescriptor: psd,
-                bInheritHandle: 0,
-            };
-
-            let mut opts = ServerOptions::new();
-            opts.first_pipe_instance(first)
-                // Un client distant ne doit jamais pouvoir piloter le daemon.
-                .reject_remote_clients(true);
-
-            // SAFETY: `sa` reste vivant pendant tout l'appel, et son
-            // lpSecurityDescriptor pointe sur un descripteur valide.
-            let result = unsafe {
-                opts.create_with_security_attributes_raw(
-                    &self.path,
-                    &mut sa as *mut _ as *mut c_void,
-                )
-            };
-
-            // SAFETY: psd a ete alloue par ConvertStringSecurityDescriptor... .
-            unsafe { LocalFree(psd) };
-
-            Ok(result?)
+            create_pipe(&self.path, PIPE_SDDL, first)
         }
 
         pub async fn accept(&mut self) -> Result<Connection> {
@@ -586,6 +585,54 @@ mod imp {
         pub fn policy(&self) -> &AuthPolicy {
             &self.policy
         }
+    }
+
+    /// Cree une instance du pipe `path` avec le descripteur `sddl`.
+    ///
+    /// Le chemin du daemon (`PIPE_SDDL`) et celui des recettes qui fabriquent
+    /// un pipe d'un autre proprietaire: le meme appel, pour que ce qu'elles
+    /// mesurent soit ce que le daemon fait.
+    fn create_pipe(path: &str, sddl: &str, first: bool) -> Result<NamedPipeServer> {
+        let mut wide: Vec<u16> = sddl.encode_utf16().collect();
+        wide.push(0);
+
+        let mut psd: *mut c_void = std::ptr::null_mut();
+        // SAFETY: `wide` est une chaine UTF-16 terminee par un zero, et
+        // `psd` recoit un descripteur alloue par le systeme qu'on libere
+        // avec LocalFree avant de sortir de la fonction.
+        let ok = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                wide.as_ptr(),
+                SDDL_REVISION_1,
+                &mut psd,
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+
+        let mut sa = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: psd,
+            bInheritHandle: 0,
+        };
+
+        let mut opts = ServerOptions::new();
+        opts.first_pipe_instance(first)
+            // Un client distant ne doit jamais pouvoir piloter le daemon.
+            .reject_remote_clients(true);
+
+        // SAFETY: `sa` reste vivant pendant tout l'appel, et son
+        // lpSecurityDescriptor pointe sur un descripteur valide.
+        let result = unsafe {
+            opts.create_with_security_attributes_raw(path, &mut sa as *mut _ as *mut c_void)
+        };
+
+        // SAFETY: psd a ete alloue par ConvertStringSecurityDescriptor... .
+        unsafe { LocalFree(psd) };
+
+        Ok(result?)
     }
 
     /// Sur Windows, l'autorisation est portee par la DACL du pipe: seuls SYSTEM
@@ -640,11 +687,25 @@ mod imp {
         writer: tokio::io::WriteHalf<NamedPipeClient>,
     }
 
-    /// Le proprietaire de l'objet que designe `handle` est-il LocalSystem?
+    /// Le proprietaire d'un pipe, tel que la decision le lit: trois classes,
+    /// et rien d'autre ne sort de ce module.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum PipeOwner {
+        /// LocalSystem, `S-1-5-18`: le daemon installe en service.
+        LocalSystem,
+        /// Les Administrateurs, `S-1-5-32-544`: proprietaire par defaut des
+        /// objets crees par un jeton eleve, donc d'un daemon lance en console
+        /// elevee.
+        Administrators,
+        /// Tout autre compte ou groupe.
+        Other,
+    }
+
+    /// Le proprietaire de l'objet que designe `handle`.
     ///
     /// La comparaison est confiee au systeme (`IsWellKnownSid`), jamais a une
     /// chaine: une forme textuelle equivalente ne peut pas la tromper.
-    fn owner_is_local_system(handle: RawHandle) -> std::result::Result<bool, ServerIdentityError> {
+    fn pipe_owner(handle: RawHandle) -> std::result::Result<PipeOwner, ServerIdentityError> {
         let mut proprietaire: PSID = std::ptr::null_mut();
         let mut descripteur: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
         // SAFETY: `handle` est une poignee vivante tenue par l'appelant; les
@@ -666,36 +727,48 @@ mod imp {
         if rc != 0 || descripteur.is_null() {
             return Err(ServerIdentityError::Unreadable);
         }
-        let systeme = sid_is_local_system(proprietaire);
+        let classe = classify_owner(proprietaire);
         // SAFETY: `descripteur` a ete alloue par GetSecurityInfo pour nous;
         // `proprietaire`, qui pointe dedans, n'est plus lu apres.
         unsafe { LocalFree(descripteur as _) };
-        Ok(systeme)
+        Ok(classe)
     }
 
-    fn sid_is_local_system(sid: PSID) -> bool {
+    fn classify_owner(sid: PSID) -> PipeOwner {
+        if sid.is_null() {
+            return PipeOwner::Other;
+        }
         // SAFETY: IsWellKnownSid lit un SID valide; un pointeur nul est ecarte
         // avant l'appel.
-        !sid.is_null() && unsafe { IsWellKnownSid(sid, WinLocalSystemSid) } != 0
+        if unsafe { IsWellKnownSid(sid, WinLocalSystemSid) } != 0 {
+            PipeOwner::LocalSystem
+        // SAFETY: idem.
+        } else if unsafe { IsWellKnownSid(sid, WinBuiltinAdministratorsSid) } != 0 {
+            PipeOwner::Administrators
+        } else {
+            PipeOwner::Other
+        }
     }
 
-    fn decide_pipe_owner(systeme: bool) -> std::result::Result<ServerRule, ServerIdentityError> {
-        if systeme {
-            Ok(ServerRule::WindowsSystemPipeOwner)
-        } else {
-            Err(ServerIdentityError::Refused)
+    /// La decision, fonction pure du proprietaire lu et de l'exigence.
+    fn decide_pipe_owner(
+        proprietaire: PipeOwner,
+        attendu: ServerRequirement,
+    ) -> std::result::Result<ServerRule, ServerIdentityError> {
+        match (proprietaire, attendu) {
+            (PipeOwner::LocalSystem, _) => Ok(ServerRule::WindowsSystemPipeOwner),
+            (PipeOwner::Administrators, ServerRequirement::Elevated) => {
+                Ok(ServerRule::WindowsAdministratorsPipeOwner)
+            }
+            _ => Err(ServerIdentityError::Refused),
         }
     }
 
     impl IpcClient {
-        pub async fn connect(path: impl AsRef<Path>) -> Result<Self> {
-            let path = path.as_ref().to_string_lossy().into_owned();
-            let pipe = ClientOptions::new().open(&path)?;
-            Ok(Self::from_pipe(pipe))
-        }
-
-        /// Se connecte, puis exige que le pipe appartienne a LocalSystem,
-        /// avant d'ecrire le moindre octet.
+        /// Se connecte, puis exige du proprietaire du pipe l'identite
+        /// demandee (LocalSystem pour une preuve, LocalSystem ou les
+        /// Administrateurs pour une commande), avant d'ecrire le moindre
+        /// octet. Le seul constructeur du client.
         ///
         /// # Pourquoi le proprietaire du pipe, et pas le jeton du serveur
         ///
@@ -715,21 +788,25 @@ mod imp {
         /// restauration. Mesure le meme jour depuis un jeton non eleve: creer
         /// un pipe `O:SY` ou `O:BA` rend `ERROR_INVALID_OWNER` (1307), et un
         /// pipe cree sous SYSTEM avec le SDDL du daemon appartient a
-        /// `S-1-5-18`.
+        /// `S-1-5-18`. Remesure le 30/09/2026, et desormais gardee par une
+        /// recette: sans Administrateurs actifs dans le jeton, ni la creation
+        /// d'un pipe `O:BA` ou `O:SY`, ni l'attribution de son propre pipe aux
+        /// Administrateurs n'aboutissent (1307 les trois fois).
         ///
         /// Ce que la regle ne dit pas: que le pipe est celui du daemon. Un
         /// pipe de LocalSystem dont la DACL laisse d'autres comptes creer des
         /// instances peut etre servi, instance par instance, par un tiers.
-        /// Celui du daemon ne le permet pas (`PIPE_SDDL`: SYSTEM et
-        /// Administrateurs seulement).
+        /// Celui du daemon ne le permet pas a un compte ordinaire
+        /// (`PIPE_SDDL`: SYSTEM et Administrateurs seulement), mais le permet
+        /// a un processus eleve: la regle stricte de la preuve n'ecarte donc
+        /// pas les Administrateurs pendant que le daemon tourne.
         pub async fn connect_verified(
             path: impl AsRef<Path>,
             attendu: ServerRequirement,
         ) -> Result<(Self, ServerRule)> {
-            let ServerRequirement::Privileged = attendu;
             let path = path.as_ref().to_string_lossy().into_owned();
             let pipe = ClientOptions::new().open(&path)?;
-            let regle = decide_pipe_owner(owner_is_local_system(pipe.as_raw_handle())?)?;
+            let regle = decide_pipe_owner(pipe_owner(pipe.as_raw_handle())?, attendu)?;
             Ok((Self::from_pipe(pipe), regle))
         }
 
@@ -757,11 +834,17 @@ mod imp {
     #[cfg(test)]
     mod tests_identite_serveur {
         use super::*;
+        use windows_sys::Win32::Security::Authorization::SetSecurityInfo;
         use windows_sys::Win32::Security::{
-            CreateWellKnownSid, SECURITY_MAX_SID_SIZE, WELL_KNOWN_SID_TYPE,
-            WinAuthenticatedUserSid, WinBuiltinAdministratorsSid, WinBuiltinUsersSid,
-            WinLocalServiceSid, WinNetworkServiceSid, WinWorldSid,
+            CheckTokenMembership, CreateWellKnownSid, SECURITY_MAX_SID_SIZE, WELL_KNOWN_SID_TYPE,
+            WinAuthenticatedUserSid, WinBuiltinUsersSid, WinLocalServiceSid, WinNetworkServiceSid,
+            WinWorldSid,
         };
+
+        /// `ERROR_INVALID_OWNER`: le proprietaire demande n'est ni
+        /// l'utilisateur du jeton, ni un de ses groupes actifs marques
+        /// `SE_GROUP_OWNER`.
+        const PROPRIETAIRE_INVALIDE: u32 = 1307;
 
         fn nom(suffixe: &str) -> String {
             format!(
@@ -788,15 +871,45 @@ mod imp {
             tampon
         }
 
-        /// LocalSystem, et lui seul. Les comptes voisins sont nommes: les
-        /// Administrateurs (proprietaires des pipes crees par un processus
-        /// eleve), les deux comptes de service, et les groupes larges.
+        /// Les Administrateurs sont-ils ACTIFS dans le jeton de ce processus?
+        ///
+        /// Faux dans le jeton filtre d'un administrateur non eleve (le groupe y
+        /// est en refus seulement) comme dans celui d'un compte ordinaire; vrai
+        /// dans un jeton eleve et sous SYSTEM. C'est la ligne de partage de la
+        /// regle des commandes, lue par le systeme et non devinee.
+        fn administrateurs_actifs() -> bool {
+            let mut ba = sid(WinBuiltinAdministratorsSid);
+            let mut membre = 0;
+            // SAFETY: jeton nul, donc celui du fil ou une copie du jeton
+            // primaire; le SID est valide et vit jusqu'a la fin de l'appel;
+            // `membre` est une variable locale.
+            let ok = unsafe {
+                CheckTokenMembership(std::ptr::null_mut(), ba.as_mut_ptr() as PSID, &mut membre)
+            };
+            assert!(
+                ok != 0,
+                "CheckTokenMembership: {}",
+                std::io::Error::last_os_error()
+            );
+            membre != 0
+        }
+
+        /// Trois classes de proprietaire, et la decision de chaque exigence.
+        /// Les comptes voisins sont nommes: les deux comptes de service (le
+        /// resolveur chiffre tourne sous LocalService) et les groupes larges.
         #[test]
-        fn seul_le_proprietaire_local_system_passe() {
+        fn chaque_proprietaire_a_sa_decision() {
+            use PipeOwner::{Administrators, LocalSystem, Other};
+            use ServerIdentityError::Refused;
+            use ServerRequirement::{Elevated, Privileged};
             let mut systeme = sid(WinLocalSystemSid);
-            assert!(sid_is_local_system(systeme.as_mut_ptr() as PSID));
+            assert_eq!(classify_owner(systeme.as_mut_ptr() as PSID), LocalSystem);
+            let mut administrateurs = sid(WinBuiltinAdministratorsSid);
+            assert_eq!(
+                classify_owner(administrateurs.as_mut_ptr() as PSID),
+                Administrators
+            );
             for genre in [
-                WinBuiltinAdministratorsSid,
                 WinLocalServiceSid,
                 WinNetworkServiceSid,
                 WinWorldSid,
@@ -804,83 +917,248 @@ mod imp {
                 WinBuiltinUsersSid,
             ] {
                 let mut autre = sid(genre);
-                assert!(!sid_is_local_system(autre.as_mut_ptr() as PSID), "{genre}");
+                assert_eq!(classify_owner(autre.as_mut_ptr() as PSID), Other, "{genre}");
             }
-            assert!(!sid_is_local_system(std::ptr::null_mut()));
-            assert_eq!(
-                decide_pipe_owner(true),
-                Ok(ServerRule::WindowsSystemPipeOwner)
-            );
-            assert_eq!(decide_pipe_owner(false), Err(ServerIdentityError::Refused));
+            assert_eq!(classify_owner(std::ptr::null_mut()), Other);
+            for (proprietaire, attendu, issue) in [
+                (
+                    LocalSystem,
+                    Privileged,
+                    Ok(ServerRule::WindowsSystemPipeOwner),
+                ),
+                (
+                    LocalSystem,
+                    Elevated,
+                    Ok(ServerRule::WindowsSystemPipeOwner),
+                ),
+                // La preuve n'admet jamais les Administrateurs.
+                (Administrators, Privileged, Err(Refused)),
+                (
+                    Administrators,
+                    Elevated,
+                    Ok(ServerRule::WindowsAdministratorsPipeOwner),
+                ),
+                (Other, Privileged, Err(Refused)),
+                (Other, Elevated, Err(Refused)),
+            ] {
+                assert_eq!(
+                    decide_pipe_owner(proprietaire, attendu),
+                    issue,
+                    "{proprietaire:?} {attendu:?}"
+                );
+            }
+        }
+
+        /// Ce que le client rend, selon le proprietaire lu cote SERVEUR et
+        /// l'exigence. Ecrit en clair plutot que recalcule par
+        /// `decide_pipe_owner`: une recette qui demanderait a la decision ce
+        /// qu'elle doit attendre de la decision ne mesurerait rien.
+        fn attendu_du_client(
+            proprietaire: PipeOwner,
+            attendu: ServerRequirement,
+        ) -> Option<ServerRule> {
+            match (proprietaire, attendu) {
+                (PipeOwner::LocalSystem, _) => Some(ServerRule::WindowsSystemPipeOwner),
+                (PipeOwner::Administrators, ServerRequirement::Elevated) => {
+                    Some(ServerRule::WindowsAdministratorsPipeOwner)
+                }
+                (PipeOwner::Administrators, ServerRequirement::Privileged) => None,
+                (PipeOwner::Other, _) => None,
+            }
         }
 
         /// Un pipe servi par CE processus, avec le descripteur par defaut:
-        /// son proprietaire est le compte qui l'a cree (ou les
-        /// Administrateurs s'il est eleve). Refuse, sauf si ce processus est
-        /// lui-meme LocalSystem, auquel cas il est admis: les deux branches
-        /// mesurent.
+        /// son proprietaire est le compte qui l'a cree (les Administrateurs si
+        /// le jeton est eleve, LocalSystem sous SYSTEM). Refuse pour les deux
+        /// exigences sauf proprietaire privilegie: chaque branche mesure,
+        /// aucune ne s'abstient. Un pipe neuf par exigence: une instance ne
+        /// sert qu'un client.
         #[tokio::test]
-        async fn un_pipe_du_compte_courant_n_est_admis_que_sous_system() {
-            let nom = nom("courant");
-            let serveur = ServerOptions::new()
-                .first_pipe_instance(true)
-                .reject_remote_clients(true)
-                .create(&nom)
-                .expect("creation du pipe");
-            let systeme = owner_is_local_system(serveur.as_raw_handle()).expect("proprietaire");
-            let issue = IpcClient::connect_verified(&nom, ServerRequirement::Privileged)
-                .await
-                .map(|(_, regle)| regle);
-            if systeme {
-                assert!(
-                    matches!(issue, Ok(ServerRule::WindowsSystemPipeOwner)),
-                    "{issue:?}"
-                );
-            } else {
-                assert!(
-                    matches!(
-                        issue,
-                        Err(IpcError::ServerIdentity(ServerIdentityError::Refused))
+        async fn un_pipe_du_compte_courant_n_est_admis_que_selon_son_proprietaire() {
+            let actifs = administrateurs_actifs();
+            for attendu in [ServerRequirement::Privileged, ServerRequirement::Elevated] {
+                let nom = nom(&format!("courant-{attendu:?}"));
+                let serveur = ServerOptions::new()
+                    .first_pipe_instance(true)
+                    .reject_remote_clients(true)
+                    .create(&nom)
+                    .expect("creation du pipe");
+                let proprietaire = pipe_owner(serveur.as_raw_handle()).expect("proprietaire");
+                if !actifs {
+                    // Sans Administrateurs actifs, le pipe ne peut appartenir
+                    // qu'au compte courant: c'est le cas qui compte.
+                    assert_eq!(proprietaire, PipeOwner::Other);
+                }
+                let issue = IpcClient::connect_verified(&nom, attendu)
+                    .await
+                    .map(|(_, regle)| regle);
+                match attendu_du_client(proprietaire, attendu) {
+                    Some(regle) => {
+                        assert!(
+                            matches!(issue, Ok(r) if r == regle),
+                            "{attendu:?}: {issue:?}"
+                        )
+                    }
+                    None => assert!(
+                        matches!(
+                            issue,
+                            Err(IpcError::ServerIdentity(ServerIdentityError::Refused))
+                        ),
+                        "{attendu:?}: {issue:?}"
                     ),
-                    "{issue:?}"
-                );
+                }
             }
         }
 
         /// Le pipe du VRAI serveur, avec `PIPE_SDDL`, servi par ce processus.
-        /// Hors LocalSystem il n'est jamais admis: un client non eleve ne
-        /// l'ouvre meme pas (la DACL ne nomme que SYSTEM et les
-        /// Administrateurs), un client eleve l'ouvre et trouve pour
-        /// proprietaire les Administrateurs, pas SYSTEM.
+        /// Un client sans Administrateurs actifs ne l'ouvre meme pas (la DACL
+        /// ne nomme que SYSTEM et les Administrateurs); un client eleve
+        /// l'ouvre et trouve pour proprietaire les Administrateurs: refuse
+        /// pour une preuve, admis pour une commande.
         #[tokio::test]
-        async fn le_pipe_du_daemon_hors_system_n_est_jamais_admis() {
-            let nom = nom("daemon");
-            let serveur = IpcServer::bind(&nom, AuthPolicy::default(), None)
+        async fn le_pipe_du_daemon_n_est_admis_que_selon_son_proprietaire() {
+            for attendu in [ServerRequirement::Privileged, ServerRequirement::Elevated] {
+                let nom = nom(&format!("daemon-{attendu:?}"));
+                let serveur = IpcServer::bind(&nom, AuthPolicy::default(), None)
+                    .await
+                    .expect("bind");
+                let proprietaire = pipe_owner(
+                    serveur
+                        .next
+                        .as_ref()
+                        .expect("instance prete")
+                        .as_raw_handle(),
+                )
+                .expect("proprietaire");
+                let issue = IpcClient::connect_verified(&nom, attendu)
+                    .await
+                    .map(|(_, regle)| regle);
+                match issue {
+                    Ok(regle) => assert_eq!(
+                        Some(regle),
+                        attendu_du_client(proprietaire, attendu),
+                        "{attendu:?}"
+                    ),
+                    Err(IpcError::Io(e)) => {
+                        assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied, "{e}");
+                        assert!(!administrateurs_actifs(), "{attendu:?}: {e}");
+                    }
+                    Err(IpcError::ServerIdentity(ServerIdentityError::Refused)) => {
+                        assert_eq!(
+                            attendu_du_client(proprietaire, attendu),
+                            None,
+                            "{attendu:?}"
+                        )
+                    }
+                    Err(autre) => panic!("{attendu:?}: {autre}"),
+                }
+            }
+        }
+
+        /// La premisse de la regle des commandes, gardee: sans
+        /// Administrateurs actifs dans son jeton, un compte ne fabrique aucun
+        /// pipe que `Elevated` admettrait. Ni en le creant `O:BA` ou `O:SY`,
+        /// ni en attribuant apres coup son propre pipe aux Administrateurs:
+        /// `ERROR_INVALID_OWNER` les trois fois. Les DACL sont grandes
+        /// ouvertes: la seule barriere mesuree est le proprietaire.
+        ///
+        /// Avec les Administrateurs actifs (jeton eleve, SYSTEM), `O:BA` et
+        /// l'attribution aboutissent, et le pipe est admis pour une commande:
+        /// c'est la limite de la regle, mesuree elle aussi.
+        #[tokio::test]
+        async fn un_compte_sans_administrateurs_actifs_ne_fabrique_aucun_pipe_admis() {
+            let actifs = administrateurs_actifs();
+            for (etiquette, sddl) in [
+                ("o-ba", "O:BAD:P(A;;GA;;;WD)"),
+                ("o-sy", "O:SYD:P(A;;GA;;;WD)"),
+            ] {
+                let nom = nom(etiquette);
+                match create_pipe(&nom, sddl, true) {
+                    Err(IpcError::Io(e)) => assert_eq!(
+                        e.raw_os_error(),
+                        Some(PROPRIETAIRE_INVALIDE as i32),
+                        "{sddl}: {e}"
+                    ),
+                    Err(autre) => panic!("{sddl}: {autre}"),
+                    Ok(serveur) => {
+                        assert!(
+                            actifs,
+                            "{sddl}: un jeton sans Administrateurs actifs a cree un pipe a ce proprietaire"
+                        );
+                        let proprietaire =
+                            pipe_owner(serveur.as_raw_handle()).expect("proprietaire");
+                        assert_ne!(proprietaire, PipeOwner::Other, "{sddl}");
+                        let issue = IpcClient::connect_verified(&nom, ServerRequirement::Elevated)
+                            .await
+                            .map(|(_, regle)| regle);
+                        assert_eq!(
+                            issue.ok(),
+                            attendu_du_client(proprietaire, ServerRequirement::Elevated),
+                            "{sddl}"
+                        );
+                    }
+                }
+            }
+
+            let nom = nom("attribue");
+            let serveur = ServerOptions::new()
+                .first_pipe_instance(true)
+                .reject_remote_clients(true)
+                .write_owner(true)
+                .create(&nom)
+                .expect("creation du pipe");
+            let mut administrateurs = sid(WinBuiltinAdministratorsSid);
+            // SAFETY: la poignee est vivante et ouverte avec WRITE_OWNER; seul
+            // le proprietaire est pose, groupe, DACL et SACL sont nuls; le SID
+            // vit jusqu'a la fin de l'appel.
+            let rc = unsafe {
+                SetSecurityInfo(
+                    serveur.as_raw_handle() as _,
+                    SE_KERNEL_OBJECT,
+                    OWNER_SECURITY_INFORMATION,
+                    administrateurs.as_mut_ptr() as PSID,
+                    std::ptr::null_mut(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                )
+            };
+            let proprietaire = pipe_owner(serveur.as_raw_handle()).expect("proprietaire");
+            if actifs {
+                assert_eq!(rc, 0, "attribution aux Administrateurs sous jeton eleve");
+                assert_eq!(proprietaire, PipeOwner::Administrators);
+            } else {
+                assert_eq!(
+                    rc, PROPRIETAIRE_INVALIDE,
+                    "un jeton sans Administrateurs actifs a attribue son pipe aux Administrateurs"
+                );
+                assert_eq!(proprietaire, PipeOwner::Other);
+            }
+        }
+
+        /// Ce qui protege le pipe du daemon PENDANT qu'il tourne. Son
+        /// proprietaire est LocalSystem, et une instance de plus, creee par un
+        /// tiers, recevrait des clients qui liraient ce proprietaire-la. Or
+        /// une instance de plus exige `FILE_CREATE_PIPE_INSTANCE` sur la DACL
+        /// du pipe EXISTANT, et `PIPE_SDDL` ne l'accorde qu'a SYSTEM et aux
+        /// Administrateurs: sans eux, ce compte ne s'intercale pas, meme en
+        /// proposant son propre descripteur, grand ouvert. Avec eux il le
+        /// peut: la limite de la regle stricte de la preuve, mesuree aussi.
+        #[tokio::test]
+        async fn sans_administrateurs_actifs_aucune_instance_ne_s_ajoute_au_pipe_du_daemon() {
+            let nom = nom("instance");
+            let _daemon = IpcServer::bind(&nom, AuthPolicy::default(), None)
                 .await
                 .expect("bind");
-            let systeme = owner_is_local_system(
-                serveur
-                    .next
-                    .as_ref()
-                    .expect("instance prete")
-                    .as_raw_handle(),
-            )
-            .expect("proprietaire");
-            let issue = IpcClient::connect_verified(&nom, ServerRequirement::Privileged)
-                .await
-                .map(|(_, regle)| regle);
-            match issue {
-                Ok(regle) => assert!(
-                    systeme && regle == ServerRule::WindowsSystemPipeOwner,
-                    "admis hors SYSTEM: {regle:?}"
-                ),
-                Err(IpcError::Io(e)) => {
-                    assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied, "{e}")
+            let issue = create_pipe(&nom, "D:P(A;;GA;;;WD)", false).map(|_| ());
+            if administrateurs_actifs() {
+                assert!(issue.is_ok(), "{issue:?}");
+            } else {
+                match issue {
+                    Err(IpcError::Io(e)) => {
+                        assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied, "{e}")
+                    }
+                    autre => panic!("une instance s'est ajoutee au pipe du daemon: {autre:?}"),
                 }
-                Err(IpcError::ServerIdentity(ServerIdentityError::Refused)) => {
-                    assert!(!systeme)
-                }
-                Err(autre) => panic!("{autre}"),
             }
         }
     }
@@ -1027,6 +1305,10 @@ mod tests_regles_serveur {
         assert_eq!(
             ServerRule::WindowsSystemPipeOwner.name(),
             "windows-system-pipe-owner"
+        );
+        assert_eq!(
+            ServerRule::WindowsAdministratorsPipeOwner.name(),
+            "windows-administrators-pipe-owner"
         );
         for message in [
             ServerIdentityError::Unreadable.to_string(),

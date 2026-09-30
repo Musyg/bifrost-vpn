@@ -269,10 +269,44 @@ Limites: la regle dit qui ecoute, pas que c'est le daemon. Un serveur root, ou u
 pipe de LocalSystem, qui n'est pas le daemon est admis (mesure: un rejeu sous
 root correspond). Un socket d'ecoute cree par root puis confie a un autre
 processus garde les identifiants de root. Un pipe de LocalSystem dont la DACL
-laisse d'autres comptes creer des instances peut etre servi par un tiers; celui
-du daemon ne le permet pas. Un daemon Windows lance en console eleve cree un pipe
-possede par les Administrateurs et n'est pas admis. Les autres commandes de la
-CLI ne verifient pas encore le serveur.
+laisse d'autres comptes creer des instances peut etre servi par un tiers; celle
+du daemon ne l'accorde qu'a SYSTEM et aux Administrateurs, donc a un processus
+eleve (un compte non eleve y est refuse, mesure; le cas eleve est infere de la
+DACL). Un daemon Windows lance en console eleve cree un pipe possede par les
+Administrateurs et n'est pas admis par la preuve.
+
+Les commandes verifient aussi le serveur, livre. `connect` (avec ou sans
+`--config`), `disconnect`, `status`, `check`, `inspection-tls --annoncer`, la
+sonde d'`emergency-disarm` et `reprise` (le hook de veille) etablissent
+l'identite du serveur avant d'ecrire le moindre octet: `bifrost_ipc` n'a plus
+de client qui s'en dispense (`IpcClient::connect_verified` est son seul
+constructeur). Leur regle exige les droits que le daemon exige de lui-meme pour
+demarrer: Linux, uid effectif 0 (`root-peer-credentials`); Windows, un pipe
+possede par LocalSystem (`windows-system-pipe-owner`) ou par les Administrateurs
+(`windows-administrators-pipe-owner`), ce qui admet le daemon lance en console
+elevee. Un compte non privilegie ne peut servir ni l'une ni l'autre (mesure). La
+preuve garde la sienne, LocalSystem seul sous Windows: elle exporte un constat
+sur ce que le daemon declare. Refus: un message qui nomme le socket et la regle,
+jamais un uid, un pid ou un SID, rien d'envoye, code de sortie 4, aucune option
+pour s'en passer; `inspection-tls --annoncer` garde le code de sa mesure et dit
+le refus sur la sortie d'erreur. Le hook de reprise tourne sous root
+(`systemd-sleep` n'a pas de `User=`); face a un serveur d'un autre compte il rend
+4 et journalise que la politique n'a pas ete reposee.
+
+Constat avant correction, mesure le 30/09/2026 sur le client de `5baf9f3` face a
+un faux serveur du compte courant: `connect --config` lui ecrivait 506 octets,
+cle privee du profil comprise; les autres commandes, leur requete; la sonde
+d'`emergency-disarm` n'ecrivait rien mais le prenait pour le daemon. Sous
+Windows, service arrete, un compte non eleve a cree le pipe au nom par defaut et
+recu le profil d'un `connect --config` lance sans `--socket`. Sous Linux, le
+chemin par defaut n'est pas prenable par un compte ordinaire; `--socket` pouvait
+designer n'importe quel chemin. Acceptation: sans privilege sur les deux
+plateformes, un faux serveur du compte courant recoit une connexion et zero
+octet de chaque commande, qui rend 4; banc jetable, un compteur root recoit
+`connect --config` et la cle jetable du profil de test (temoin), le meme sous un
+compte ordinaire ne recoit rien d'aucune commande ni du hook, et le hook, face au
+vrai daemon, repose la politique. Non mesures: le service Windows reel sous
+LocalSystem, et le pipe des Administrateurs de bout en bout.
 
 Acceptation, banc jetable: un faux daemon qui rejoue la vraie declaration sur un
 `--socket` choisi, noyau conforme, rend MATCH sous root et UNMEASURED

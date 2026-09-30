@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 use bifrost_ipc::protocol::{Command, Request, Response};
 use bifrost_ipc::transport::{IpcClient, IpcServer};
-use bifrost_ipc::{AuthPolicy, PeerIdentity};
+use bifrost_ipc::{AuthPolicy, PeerIdentity, ServerRequirement};
 
 fn socket_path(nom: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
@@ -23,6 +23,16 @@ fn socket_path(nom: &str) -> PathBuf {
 fn euid() -> u32 {
     // SAFETY: geteuid ne touche a rien et ne peut pas echouer.
     unsafe { libc::geteuid() }
+}
+
+/// Un client de ces recettes. Le seul constructeur du client verifie toujours
+/// le serveur: ici le serveur est CE processus, et le client exige son uid,
+/// la regle des recettes. Ce qui est eprouve reste la decision du serveur.
+async fn client_verifie(path: &std::path::Path) -> IpcClient {
+    let (client, _) = IpcClient::connect_verified(path, ServerRequirement::Uid(euid()))
+        .await
+        .expect("connect");
+    client
 }
 
 /// Le serveur repond a une requete puis rend la main.
@@ -54,7 +64,7 @@ async fn un_processus_non_autorise_ne_peut_pas_piloter_le_daemon() {
         .expect("bind");
     tokio::spawn(serve_once(server));
 
-    let mut client = IpcClient::connect(&path).await.expect("connect");
+    let mut client = client_verifie(&path).await;
     let response = client
         .request(&Request::new(Command::Status))
         .await
@@ -83,7 +93,7 @@ async fn un_uid_explicitement_autorise_est_accepte() {
     let server = IpcServer::bind(&path, policy, None).await.expect("bind");
     tokio::spawn(serve_once(server));
 
-    let mut client = IpcClient::connect(&path).await.expect("connect");
+    let mut client = client_verifie(&path).await;
     let response = client
         .request(&Request::new(Command::Status))
         .await
@@ -189,7 +199,7 @@ async fn l_identite_du_pair_est_renseignee() {
     let mut server = IpcServer::bind(&path, policy, None).await.expect("bind");
 
     let connexion = tokio::spawn(async move { server.accept().await });
-    let _client = IpcClient::connect(&path).await.expect("connect");
+    let _client = client_verifie(&path).await;
     let conn = connexion.await.expect("join").expect("accept");
 
     let peer: &PeerIdentity = conn.peer();
