@@ -19,6 +19,29 @@
 //! ordre d'evaluation, que [`Plan::ordre_d_evaluation`] deduit de l'ordre de
 //! pose et de la regle du noyau (voir cette fonction). Le chemin par coeur pose
 //! des priorites fixes.
+//!
+//! # Ne retirer que ce que le produit a pose
+//!
+//! Chaque regle et chaque route du plan porte l'etiquette du produit,
+//! [`PROTOCOLE_PRODUIT`], et le retrait ([`Plan::arguments_retrait`]) est le
+//! miroir exact de la pose: meme selecteur, meme table, meme priorite quand le
+//! plan en fixe une, meme interface pour une route, et la meme etiquette. Le
+//! noyau retire la PREMIERE regle qui correspond a ce que la requete precise,
+//! et tient pour joker tout ce qu'elle ne precise pas (`rule_find`,
+//! `net/core/fib_rules.c`, v7.0, lu le 30/09/2026): sans l'etiquette, ni le
+//! selecteur complet ni la priorite ne designent une regle a coup sur. Mesure
+//! le 30/09/2026 sur essai-linux (noyau 7.0, iproute2 6.1.0), en namespace
+//! jetable: `rule del lookup main suppress_prefixlength 0 pref 9110` retire
+//! une regle tierce `from 192.0.2.0/24 lookup main suppress_prefixlength 0
+//! pref 9110` posee avant celle du produit; avec `protocol`, seule celle du
+//! produit part. Les routes se retirent une par une, par leur interface et
+//! leur etiquette, jamais par `ip route flush table`, qui vidait la table du
+//! tiers qui l'occupait aussi.
+//!
+//! Avant la pose, [`Plan::occupation`] dit ce qu'un tiers occupe deja: une
+//! route dans la table du tunnel, une regle qui la consulte, ou (WireGuard)
+//! une regle sur la marque du produit. Le montage refuse alors, sans rien
+//! poser ([`Plan::refus_d_occupation`]).
 
 /// Famille d'adresses. Le produit traite toujours les DEUX, meme sans adresse
 /// IPv6 au tunnel: une famille sans route est une famille qui sort par la porte
@@ -100,6 +123,29 @@ pub fn liste_des_tables_reservees() -> String {
 /// Table de routage du chemin par coeur. `0xb1f` se lit "bif"; le choix et ses
 /// raisons sont documentes dans l'aiguillage du daemon, qui la reexporte.
 pub const TABLE_COEUR: u32 = 0xb1f;
+
+/// L'etiquette de propriete que le produit pose sur chacune de ses regles
+/// (`protocol`, attribut FRA_PROTOCOL) et de ses routes (`proto`, champ
+/// `rtm_protocol`), dans les deux chemins.
+///
+/// Le noyau ne l'interprete pas: `include/uapi/linux/rtnetlink.h` (v7.0) dit
+/// des valeurs a partir de RTPROT_STATIC qu'elles sont << just passed from
+/// user and back as is >>, pour distinguer les demons de routage. Mais il la
+/// COMPARE quand une suppression la precise: `rule_find`
+/// (`net/core/fib_rules.c`) saute une regle d'une autre etiquette, et
+/// `fib_table_delete` (`net/ipv4/fib_trie.c`) une route IPv4 d'un autre
+/// protocole (lus dans la v7.0 le 30/09/2026). En IPv6 c'est MESURE, pas lu.
+/// Un noyau qui ne comparerait pas l'etiquette retirerait comme avant, par
+/// correspondance: ce n'est pas mesure ailleurs que sur la v7.0. C'est ce qui rend
+/// le retrait exact: une regle ou une route d'un tiers ne porte pas cette
+/// etiquette, quelle que soit sa ressemblance avec celle du produit. Mesure
+/// sur essai-linux, noyau 7.0, dans les deux familles: voir l'en-tete du
+/// module.
+///
+/// `0xb1` (177), comme `0xb1f` pour la table du coeur. Aucun protocole n'y est
+/// attribue, ni dans `rtnetlink.h` (v7.0) ni dans le `rt_protos` d'iproute2
+/// 6.1.0 (releves le 30/09/2026).
+pub const PROTOCOLE_PRODUIT: u8 = 0xb1;
 /// Chemin par coeur: le compte du coeur sort dehors, en premier.
 pub const PREF_COEUR: u32 = 9100;
 /// Chemin par coeur: le LAN garde ses routes connectees, pas la route par defaut.
@@ -321,66 +367,278 @@ impl Plan {
 
     /// Les arguments d'`ip` de chaque etape, dans l'ordre de pose.
     ///
-    /// La graphie est celle que chaque chemin employait avant D1c.1, gardee a
-    /// l'octet pres (recettes du daemon): WireGuard ecrit `table` et
-    /// `0.0.0.0/0` (`::/0`), le coeur ecrit `lookup` et `default`. Pour
-    /// iproute2 ce sont des synonymes; les garder evite de changer une seule
-    /// commande executee en production.
+    /// La graphie est celle que chaque chemin employait avant D1c.1: WireGuard
+    /// ecrit `table` et `0.0.0.0/0` (`::/0`), le coeur ecrit `lookup` et
+    /// `default`; pour iproute2 ce sont des synonymes. Chaque commande porte en
+    /// plus, en dernier, l'etiquette du produit ([`PROTOCOLE_PRODUIT`]):
+    /// `protocol 177` sur une regle (`ip-rule(8)`), `proto 177` sur une route
+    /// (`ip-route(8)`). Elle ne change aucune decision de routage; elle permet
+    /// au retrait de ne designer que ce que le produit a pose.
     pub fn arguments_ip(&self) -> Vec<Vec<String>> {
-        let wg = matches!(self.chemin, Chemin::WireGuard { .. });
-        let mot_table = if wg { "table" } else { "lookup" };
         self.etapes
             .iter()
-            .map(|etape| match etape {
-                Etape::Route(r) => {
-                    let defaut = match (wg, r.famille) {
-                        (true, Famille::Ipv4) => "0.0.0.0/0",
-                        (true, Famille::Ipv6) => "::/0",
-                        (false, _) => "default",
-                    };
-                    vec![
-                        r.famille.option_ip().to_owned(),
-                        "route".to_owned(),
-                        "add".to_owned(),
-                        defaut.to_owned(),
-                        "dev".to_owned(),
-                        r.interface.clone(),
-                        "table".to_owned(),
-                        r.table.to_string(),
-                    ]
-                }
-                Etape::Regle(r) => {
-                    let mut a = vec![
-                        r.famille.option_ip().to_owned(),
-                        "rule".to_owned(),
-                        "add".to_owned(),
-                    ];
-                    match r.selecteur {
-                        Selecteur::Tout => {}
-                        Selecteur::HorsMarque(m) => {
-                            a.extend(["not".to_owned(), "fwmark".to_owned(), m.to_string()]);
-                        }
-                        Selecteur::Compte(u) => {
-                            a.extend(["uidrange".to_owned(), format!("{u}-{u}")]);
-                        }
-                    }
-                    a.push(mot_table.to_owned());
-                    match r.consultation {
-                        Consultation::Table(t) => a.push(t.to_string()),
-                        Consultation::Main => a.push("main".to_owned()),
-                        Consultation::MainSansDefaut => a.extend([
-                            "main".to_owned(),
-                            "suppress_prefixlength".to_owned(),
-                            "0".to_owned(),
-                        ]),
-                    }
-                    if let Some(p) = r.priorite {
-                        a.extend(["pref".to_owned(), p.to_string()]);
-                    }
-                    a
-                }
-            })
+            .map(|etape| self.argv(etape, "add"))
             .collect()
+    }
+
+    /// Les arguments d'`ip` du retrait, dans l'ordre ou le produit les
+    /// execute: pour chaque famille, la regle qui envoie au tunnel d'abord,
+    /// puis les autres regles de la derniere posee a la premiere, puis la
+    /// route. C'est l'ordre que chaque chemin suivait avant.
+    ///
+    /// Chaque commande est la commande de pose, `add` devenu `del`, a l'octet
+    /// pres: meme selecteur, meme table, meme priorite quand le plan en fixe
+    /// une, meme interface pour la route, meme etiquette. Rien n'est retire par
+    /// table entiere ni par priorite seule. Voir l'en-tete du module pour ce
+    /// que le noyau fait d'une requete moins precise.
+    pub fn arguments_retrait(&self) -> Vec<Vec<String>> {
+        let tunnel = self.table_du_tunnel();
+        let mut sortie = Vec::new();
+        for famille in Famille::TOUTES {
+            let mut regles: Vec<&Etape> = self
+                .etapes
+                .iter()
+                .filter(|e| matches!(e, Etape::Regle(r) if r.famille == famille))
+                .collect();
+            regles.reverse();
+            // Tri stable: la regle vers le tunnel passe devant, les autres
+            // gardent l'ordre inverse de la pose.
+            regles.sort_by_key(
+                |e| !matches!(e, Etape::Regle(r) if r.consultation == Consultation::Table(tunnel)),
+            );
+            let routes = self
+                .etapes
+                .iter()
+                .rev()
+                .filter(|e| matches!(e, Etape::Route(r) if r.famille == famille));
+            for etape in regles.into_iter().chain(routes) {
+                sortie.push(self.argv(etape, "del"));
+            }
+        }
+        sortie
+    }
+
+    /// Une etape, en arguments d'`ip`, pour le verbe donne (`add` ou `del`).
+    fn argv(&self, etape: &Etape, verbe: &str) -> Vec<String> {
+        let wg = matches!(self.chemin, Chemin::WireGuard { .. });
+        let mot_table = if wg { "table" } else { "lookup" };
+        let etiquette = PROTOCOLE_PRODUIT.to_string();
+        match etape {
+            Etape::Route(r) => {
+                let defaut = match (wg, r.famille) {
+                    (true, Famille::Ipv4) => "0.0.0.0/0",
+                    (true, Famille::Ipv6) => "::/0",
+                    (false, _) => "default",
+                };
+                vec![
+                    r.famille.option_ip().to_owned(),
+                    "route".to_owned(),
+                    verbe.to_owned(),
+                    defaut.to_owned(),
+                    "dev".to_owned(),
+                    r.interface.clone(),
+                    "table".to_owned(),
+                    r.table.to_string(),
+                    "proto".to_owned(),
+                    etiquette,
+                ]
+            }
+            Etape::Regle(r) => {
+                let mut a = vec![
+                    r.famille.option_ip().to_owned(),
+                    "rule".to_owned(),
+                    verbe.to_owned(),
+                ];
+                match r.selecteur {
+                    Selecteur::Tout => {}
+                    Selecteur::HorsMarque(m) => {
+                        a.extend(["not".to_owned(), "fwmark".to_owned(), m.to_string()]);
+                    }
+                    Selecteur::Compte(u) => {
+                        a.extend(["uidrange".to_owned(), format!("{u}-{u}")]);
+                    }
+                }
+                a.push(mot_table.to_owned());
+                match r.consultation {
+                    Consultation::Table(t) => a.push(t.to_string()),
+                    Consultation::Main => a.push("main".to_owned()),
+                    Consultation::MainSansDefaut => a.extend([
+                        "main".to_owned(),
+                        "suppress_prefixlength".to_owned(),
+                        "0".to_owned(),
+                    ]),
+                }
+                if let Some(p) = r.priorite {
+                    a.extend(["pref".to_owned(), p.to_string()]);
+                }
+                a.extend(["protocol".to_owned(), etiquette]);
+                a
+            }
+        }
+    }
+
+    /// Ce qu'un tiers occupe deja de ce que ce plan veut poser, lu dans le
+    /// noyau avant la premiere commande. Vide: la voie est libre.
+    ///
+    /// Ce qui porte l'etiquette du produit est au produit (un reste d'une
+    /// session precedente, que le montage retire d'abord) et n'occupe rien.
+    /// Pour le reste, trois cas, dans chaque famille:
+    ///
+    /// - une route dans la table du tunnel: la table est celle d'un autre;
+    /// - une regle qui consulte la table du tunnel, dont une regle identique a
+    ///   celle du plan (`not fwmark M table T`): un tiers y envoie deja du
+    ///   trafic;
+    /// - WireGuard seulement, une regle sur la marque du produit (`fwmark M`,
+    ///   inversee ou non, masque complet): la marque est celle d'un autre
+    ///   WireGuard, dont le kill switch laisserait sortir les paquets.
+    ///
+    /// Une regle tierce identique a `table main suppress_prefixlength 0`, que
+    /// pose tout wg-quick, n'occupe rien: elle ne consulte pas la table du
+    /// tunnel, et le retrait etiquete ne la touche pas.
+    pub fn occupation(&self, regles: &[RegleLue], routes: &[RouteLue]) -> Vec<Occupation> {
+        let table = self.table_du_tunnel();
+        let marque = match self.chemin {
+            Chemin::WireGuard { marque, .. } => Some(marque),
+            Chemin::Coeur { .. } => None,
+        };
+        let mut sortie = Vec::new();
+        for famille in Famille::TOUTES {
+            let nombre = routes
+                .iter()
+                .filter(|r| {
+                    r.famille == famille && r.table == table && r.protocole != PROTOCOLE_PRODUIT
+                })
+                .count();
+            if nombre > 0 {
+                sortie.push(Occupation::RoutesDansLaTable {
+                    famille,
+                    table,
+                    nombre,
+                });
+            }
+            for r in regles
+                .iter()
+                .filter(|r| r.famille == famille && r.protocole != PROTOCOLE_PRODUIT)
+            {
+                if r.table == Some(table) {
+                    sortie.push(Occupation::RegleVersLaTable {
+                        famille,
+                        priorite: r.priorite,
+                        table,
+                    });
+                } else if let Some(m) = marque
+                    && r.marque == Some((m, u32::MAX))
+                {
+                    sortie.push(Occupation::RegleSurLaMarque {
+                        famille,
+                        priorite: r.priorite,
+                        marque: m,
+                    });
+                }
+            }
+        }
+        sortie
+    }
+
+    /// Le refus nomme d'un montage dont la voie est occupee: quoi, ou, et
+    /// quoi faire. Rien n'a ete pose quand il est rendu.
+    pub fn refus_d_occupation(&self, occupations: &[Occupation]) -> String {
+        let detail = occupations
+            .iter()
+            .map(Occupation::decrire)
+            .collect::<Vec<_>>()
+            .join("; ");
+        match self.chemin {
+            Chemin::WireGuard { marque, table } => format!(
+                "montage refuse: la table {table} ou la marque {marque} est deja employee \
+                 par un tiers ({detail}). Aucune regle, aucune route, aucune interface n'est \
+                 posee. Choisir dans le profil une routing_table qu'aucune route ni regle \
+                 n'emploie, et une fwmark qu'aucune regle n'emploie: wg-quick prend 51820 \
+                 pour les deux quand cette table est libre"
+            ),
+            Chemin::Coeur { .. } => format!(
+                "montage refuse: la table {TABLE_COEUR} du chemin par coeur est deja \
+                 employee par un tiers ({detail}). Aucune regle, aucune route, aucune \
+                 interface n'est posee. Cette table est fixee par le produit: retirer ce \
+                 qui l'occupe, ou arreter le tiers qui s'y est pose"
+            ),
+        }
+    }
+}
+
+/// Une regle telle que la lit la verification d'occupation: ce qui decide
+/// d'un conflit, rien d'autre.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RegleLue {
+    pub famille: Famille,
+    pub priorite: u32,
+    /// La table consultee, si l'action de la regle est d'en consulter une
+    /// (FR_ACT_TO_TBL); `None` pour un saut, un rejet ou une regle neutre.
+    pub table: Option<u32>,
+    /// `fwmark` de la regle, (valeur, masque), inversee ou non.
+    pub marque: Option<(u32, u32)>,
+    /// FRA_PROTOCOL: qui l'a posee.
+    pub protocole: u8,
+}
+
+/// Une route telle que la lit la verification d'occupation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RouteLue {
+    pub famille: Famille,
+    pub table: u32,
+    /// `rtm_protocol`: qui l'a posee.
+    pub protocole: u8,
+}
+
+/// Ce qu'un tiers occupe deja de ce que le plan veut poser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Occupation {
+    /// Des routes d'un tiers dans la table du tunnel.
+    RoutesDansLaTable {
+        famille: Famille,
+        table: u32,
+        nombre: usize,
+    },
+    /// Une regle d'un tiers qui consulte la table du tunnel.
+    RegleVersLaTable {
+        famille: Famille,
+        priorite: u32,
+        table: u32,
+    },
+    /// Une regle d'un tiers sur la marque du produit.
+    RegleSurLaMarque {
+        famille: Famille,
+        priorite: u32,
+        marque: u32,
+    },
+}
+
+impl Occupation {
+    /// Une ligne du refus.
+    pub fn decrire(&self) -> String {
+        match *self {
+            Occupation::RoutesDansLaTable {
+                famille,
+                table,
+                nombre,
+            } => format!("{}: {nombre} route(s) dans la table {table}", famille.nom()),
+            Occupation::RegleVersLaTable {
+                famille,
+                priorite,
+                table,
+            } => format!(
+                "{}: regle de priorite {priorite} vers la table {table}",
+                famille.nom()
+            ),
+            Occupation::RegleSurLaMarque {
+                famille,
+                priorite,
+                marque,
+            } => format!(
+                "{}: regle de priorite {priorite} sur la marque {marque}",
+                famille.nom()
+            ),
+        }
     }
 }
 
@@ -393,32 +651,311 @@ mod tests {
     }
 
     /// Les deux chemins, rendus: la meme liste que les recettes du daemon
-    /// figent sur la base (`la_pose_*_est_celle_de_la_base_a_l_octet_pres`).
+    /// figent (`la_pose_*_est_celle_de_la_base_a_l_octet_pres`). La graphie
+    /// historique, chaque commande suivie de l'etiquette du produit.
     #[test]
     fn le_rendu_de_chaque_chemin_est_la_graphie_historique() {
         assert_eq!(
             lignes(&Plan::wireguard("wg0", 51820, 51820)),
             [
-                "-4 route add 0.0.0.0/0 dev wg0 table 51820",
-                "-4 rule add not fwmark 51820 table 51820",
-                "-4 rule add table main suppress_prefixlength 0",
-                "-6 route add ::/0 dev wg0 table 51820",
-                "-6 rule add not fwmark 51820 table 51820",
-                "-6 rule add table main suppress_prefixlength 0",
+                "-4 route add 0.0.0.0/0 dev wg0 table 51820 proto 177",
+                "-4 rule add not fwmark 51820 table 51820 protocol 177",
+                "-4 rule add table main suppress_prefixlength 0 protocol 177",
+                "-6 route add ::/0 dev wg0 table 51820 proto 177",
+                "-6 rule add not fwmark 51820 table 51820 protocol 177",
+                "-6 rule add table main suppress_prefixlength 0 protocol 177",
             ]
         );
         assert_eq!(
             lignes(&Plan::coeur("bftun0", Some(4242))),
             [
-                "-4 route add default dev bftun0 table 2847",
-                "-4 rule add uidrange 4242-4242 lookup main pref 9100",
-                "-4 rule add lookup main suppress_prefixlength 0 pref 9110",
-                "-4 rule add lookup 2847 pref 9120",
-                "-6 route add default dev bftun0 table 2847",
-                "-6 rule add uidrange 4242-4242 lookup main pref 9100",
-                "-6 rule add lookup main suppress_prefixlength 0 pref 9110",
-                "-6 rule add lookup 2847 pref 9120",
+                "-4 route add default dev bftun0 table 2847 proto 177",
+                "-4 rule add uidrange 4242-4242 lookup main pref 9100 protocol 177",
+                "-4 rule add lookup main suppress_prefixlength 0 pref 9110 protocol 177",
+                "-4 rule add lookup 2847 pref 9120 protocol 177",
+                "-6 route add default dev bftun0 table 2847 proto 177",
+                "-6 rule add uidrange 4242-4242 lookup main pref 9100 protocol 177",
+                "-6 rule add lookup main suppress_prefixlength 0 pref 9110 protocol 177",
+                "-6 rule add lookup 2847 pref 9120 protocol 177",
             ]
+        );
+    }
+
+    fn lignes_retrait(p: &Plan) -> Vec<String> {
+        p.arguments_retrait().iter().map(|a| a.join(" ")).collect()
+    }
+
+    /// Le retrait, commande par commande et dans l'ordre: celui que chaque
+    /// chemin suivait (regle du tunnel, autres regles, route; IPv4 puis IPv6),
+    /// chaque commande la pose a l'octet pres, `add` devenu `del`.
+    #[test]
+    fn le_retrait_de_chaque_chemin_est_le_miroir_de_sa_pose() {
+        assert_eq!(
+            lignes_retrait(&Plan::wireguard("wg0", 51820, 51820)),
+            [
+                "-4 rule del not fwmark 51820 table 51820 protocol 177",
+                "-4 rule del table main suppress_prefixlength 0 protocol 177",
+                "-4 route del 0.0.0.0/0 dev wg0 table 51820 proto 177",
+                "-6 rule del not fwmark 51820 table 51820 protocol 177",
+                "-6 rule del table main suppress_prefixlength 0 protocol 177",
+                "-6 route del ::/0 dev wg0 table 51820 proto 177",
+            ]
+        );
+        assert_eq!(
+            lignes_retrait(&Plan::coeur("bftun0", Some(4242))),
+            [
+                "-4 rule del lookup 2847 pref 9120 protocol 177",
+                "-4 rule del lookup main suppress_prefixlength 0 pref 9110 protocol 177",
+                "-4 rule del uidrange 4242-4242 lookup main pref 9100 protocol 177",
+                "-4 route del default dev bftun0 table 2847 proto 177",
+                "-6 rule del lookup 2847 pref 9120 protocol 177",
+                "-6 rule del lookup main suppress_prefixlength 0 pref 9110 protocol 177",
+                "-6 rule del uidrange 4242-4242 lookup main pref 9100 protocol 177",
+                "-6 route del default dev bftun0 table 2847 proto 177",
+            ]
+        );
+    }
+
+    /// Pour chaque plan, le retrait et la pose sont en bijection: chaque
+    /// commande de pose a exactement une commande de retrait qui ne differe
+    /// que par le verbe, et chaque commande porte l'etiquette. Aucune ne vide
+    /// une table ni ne designe une regle par sa seule priorite.
+    #[test]
+    fn chaque_retrait_designe_exactement_une_pose() {
+        for p in [
+            Plan::wireguard("wg0", 1, 100),
+            Plan::wireguard("bf-wg_9", 0x1f2e3d, 30303),
+            Plan::coeur("bftun0", None),
+            Plan::coeur("bftun0", Some(1000)),
+        ] {
+            let mut pose: Vec<Vec<String>> = p.arguments_ip();
+            let mut retrait: Vec<Vec<String>> = p
+                .arguments_retrait()
+                .into_iter()
+                .map(|mut a| {
+                    assert_eq!(a[2], "del", "{a:?}");
+                    a[2] = "add".to_owned();
+                    a
+                })
+                .collect();
+            assert_eq!(pose.len(), retrait.len());
+            pose.sort();
+            retrait.sort();
+            assert_eq!(pose, retrait);
+            for a in p.arguments_retrait() {
+                assert!(!a.iter().any(|m| m == "flush"), "{a:?}");
+                let n = a.len();
+                assert_eq!(a[n - 1], "177", "{a:?}");
+                assert!(a[n - 2] == "protocol" || a[n - 2] == "proto", "{a:?}");
+                if a[1] == "rule" {
+                    assert!(
+                        a.iter().any(|m| m == "table" || m == "lookup"),
+                        "une regle retiree par sa seule priorite: {a:?}"
+                    );
+                } else {
+                    assert!(a.iter().any(|m| m == "dev"), "{a:?}");
+                }
+            }
+        }
+    }
+
+    fn regle_lue(famille: Famille, priorite: u32, table: Option<u32>) -> RegleLue {
+        RegleLue {
+            famille,
+            priorite,
+            table,
+            marque: None,
+            protocole: 0,
+        }
+    }
+
+    /// Ce que le noyau pose de lui-meme, et un namespace ordinaire: rien
+    /// n'occupe la voie d'aucun plan.
+    fn regles_du_noyau() -> Vec<RegleLue> {
+        let mut v = Vec::new();
+        for f in Famille::TOUTES {
+            for (p, t) in [(0, 255), (32766, 254), (32767, 253)] {
+                v.push(RegleLue {
+                    protocole: 2,
+                    ..regle_lue(f, p, Some(t))
+                });
+            }
+        }
+        v
+    }
+
+    fn routes_ordinaires() -> Vec<RouteLue> {
+        let mut v = Vec::new();
+        for f in Famille::TOUTES {
+            for (t, p) in [(254, 3), (254, 2), (255, 2)] {
+                v.push(RouteLue {
+                    famille: f,
+                    table: t,
+                    protocole: p,
+                });
+            }
+        }
+        v
+    }
+
+    #[test]
+    fn une_voie_libre_n_est_pas_occupee() {
+        for p in [
+            Plan::wireguard("wg0", 51820, 51820),
+            Plan::coeur("bftun0", Some(4242)),
+        ] {
+            assert_eq!(p.occupation(&regles_du_noyau(), &routes_ordinaires()), []);
+        }
+    }
+
+    /// La table du tunnel porte une route d'un tiers, dans une famille puis
+    /// dans l'autre: occupee, par famille, avec le nombre de routes.
+    #[test]
+    fn une_route_tierce_dans_la_table_du_tunnel_l_occupe() {
+        for (p, t) in [
+            (Plan::wireguard("wg0", 51820, 51820), 51820),
+            (Plan::coeur("bftun0", None), TABLE_COEUR),
+        ] {
+            for f in Famille::TOUTES {
+                let mut routes = routes_ordinaires();
+                for _ in 0..2 {
+                    routes.push(RouteLue {
+                        famille: f,
+                        table: t,
+                        protocole: 0,
+                    });
+                }
+                assert_eq!(
+                    p.occupation(&regles_du_noyau(), &routes),
+                    [Occupation::RoutesDansLaTable {
+                        famille: f,
+                        table: t,
+                        nombre: 2
+                    }]
+                );
+            }
+        }
+    }
+
+    /// Une regle tierce qui consulte la table du tunnel l'occupe, a n'importe
+    /// quelle priorite; la meme regle vers une autre table ne l'occupe pas,
+    /// meme a une priorite du produit.
+    #[test]
+    fn une_regle_tierce_vers_la_table_du_tunnel_l_occupe() {
+        let wg = Plan::wireguard("wg0", 51820, 51820);
+        let coeur = Plan::coeur("bftun0", Some(4242));
+        for f in Famille::TOUTES {
+            let mut r = regles_du_noyau();
+            r.push(regle_lue(f, 32765, Some(51820)));
+            assert_eq!(
+                wg.occupation(&r, &routes_ordinaires()),
+                [Occupation::RegleVersLaTable {
+                    famille: f,
+                    priorite: 32765,
+                    table: 51820
+                }]
+            );
+            let mut r = regles_du_noyau();
+            r.push(regle_lue(f, 9115, Some(TABLE_COEUR)));
+            assert_eq!(coeur.occupation(&r, &routes_ordinaires()).len(), 1);
+            let mut r = regles_du_noyau();
+            for pref in [PREF_COEUR, PREF_LAN, PREF_TUNNEL] {
+                r.push(regle_lue(f, pref, Some(100)));
+            }
+            r.push(regle_lue(f, 32764, Some(51821)));
+            assert_eq!(coeur.occupation(&r, &routes_ordinaires()), []);
+            assert_eq!(wg.occupation(&r, &routes_ordinaires()), []);
+        }
+    }
+
+    /// La regle `table main suppress_prefixlength 0` d'un wg-quick sur une
+    /// autre table n'occupe rien: elle ne consulte pas la table du tunnel.
+    /// La regle sur la marque du produit, si: c'est un autre WireGuard qui la
+    /// porte. Un masque partiel n'est pas la marque du produit.
+    #[test]
+    fn la_marque_du_produit_est_occupee_mais_pas_la_regle_du_lan() {
+        let wg = Plan::wireguard("wg0", 51820, 51820);
+        let mut r = regles_du_noyau();
+        r.push(regle_lue(Famille::Ipv4, 32763, Some(TABLE_MAIN)));
+        assert_eq!(wg.occupation(&r, &routes_ordinaires()), []);
+        r.push(RegleLue {
+            marque: Some((51820, u32::MAX)),
+            ..regle_lue(Famille::Ipv6, 32762, Some(51821))
+        });
+        r.push(RegleLue {
+            marque: Some((51820, 0xffff)),
+            ..regle_lue(Famille::Ipv4, 32761, Some(51822))
+        });
+        assert_eq!(
+            wg.occupation(&r, &routes_ordinaires()),
+            [Occupation::RegleSurLaMarque {
+                famille: Famille::Ipv6,
+                priorite: 32762,
+                marque: 51820
+            }]
+        );
+        // Le chemin par coeur n'a pas de marque.
+        assert_eq!(
+            Plan::coeur("bftun0", None).occupation(&r, &routes_ordinaires()),
+            []
+        );
+    }
+
+    /// Ce qui porte l'etiquette du produit est au produit: ni ses routes ni
+    /// ses regles n'occupent la voie.
+    #[test]
+    fn ce_qui_porte_l_etiquette_du_produit_n_occupe_rien() {
+        let wg = Plan::wireguard("wg0", 51820, 51820);
+        let mut r = regles_du_noyau();
+        let mut routes = routes_ordinaires();
+        for f in Famille::TOUTES {
+            r.push(RegleLue {
+                protocole: PROTOCOLE_PRODUIT,
+                marque: Some((51820, u32::MAX)),
+                ..regle_lue(f, 32765, Some(51820))
+            });
+            routes.push(RouteLue {
+                famille: f,
+                table: 51820,
+                protocole: PROTOCOLE_PRODUIT,
+            });
+        }
+        assert_eq!(wg.occupation(&r, &routes), []);
+    }
+
+    /// Le refus nomme la table, la marque, chaque occupation, dit que rien
+    /// n'est pose et quoi faire.
+    #[test]
+    fn le_refus_nomme_ce_qui_occupe_et_quoi_faire() {
+        let wg = Plan::wireguard("wg0", 51820, 51821);
+        let o = [
+            Occupation::RoutesDansLaTable {
+                famille: Famille::Ipv6,
+                table: 51821,
+                nombre: 1,
+            },
+            Occupation::RegleVersLaTable {
+                famille: Famille::Ipv4,
+                priorite: 32765,
+                table: 51821,
+            },
+        ];
+        let m = wg.refus_d_occupation(&o);
+        for attendu in [
+            "table 51821",
+            "marque 51820",
+            "ipv6: 1 route(s) dans la table 51821",
+            "ipv4: regle de priorite 32765 vers la table 51821",
+            "Aucune regle, aucune route, aucune interface n'est posee",
+            "routing_table",
+            "fwmark",
+        ] {
+            assert!(m.contains(attendu), "{attendu} absent de: {m}");
+        }
+        let m = Plan::coeur("bftun0", None).refus_d_occupation(&o[..1]);
+        assert!(
+            m.contains("table 2847") && m.contains("fixee par le produit"),
+            "{m}"
         );
     }
 

@@ -207,6 +207,14 @@ jobs:
           cargo build --locked -p bifrost-daemon --example routage_produit
           sudo bash ./scripts/preuve-routes-linux.sh
 
+      # Le produit ne retire que ce qu'il a pose et refuse une table, une marque
+      # ou une interface qu'un tiers occupe: les deux chemins, les deux
+      # familles, le tiers avant et apres, par LinuxTunnel::up et down.
+      - name: Demontage exact du routage dans des namespaces jetables
+        run: |
+          cargo build --locked -p bifrost-daemon --example banc_demontage
+          sudo bash ./scripts/banc-demontage-routage-linux.sh
+
       # Les DEUX BRAS de `doh-bypass`, que ce vecteur n'avait pas.
       #
       # Tous les autres vecteurs de la suite mesurent un ECART: un cas sans

@@ -17,11 +17,12 @@ use bifrost_core::{Error, Result, TunnelConfig};
 /// passee par la validation: un appelant futur, un outil de banc, une
 /// validation affaiblie. Le refus est donc repete au seul endroit qui ecrit
 /// `table <T>`, pour la pose comme pour le demontage: aucune liste de
-/// commandes ne sort avec une table reservee, et en particulier aucun
-/// `ip route flush table <T>`, qui viderait `main` (254), `local` (255) ou
-/// toutes les tables (0). Refuser toute la liste plutot qu'en retirer les
-/// seules lignes fautives: une pose partielle monterait un tunnel sans sa
-/// route, et un demontage partiel laisserait croire que tout est retire.
+/// commandes ne sort avec une table reservee. Le demontage ne vide plus de
+/// table (il retire ses routes une par une, etiquetees), mais une pose dans
+/// `main` (254) ou `local` (255) y melerait les routes du tunnel a celles du
+/// systeme. Refuser toute la liste plutot qu'en retirer les seules lignes
+/// fautives: une pose partielle monterait un tunnel sans sa route, et un
+/// demontage partiel laisserait croire que tout est retire.
 fn table_libre(wg: &WireguardParams, quoi: &str) -> Result<u32> {
     match bifrost_core::routage::table_reservee(wg.routing_table) {
         None => Ok(wg.routing_table),
@@ -68,6 +69,17 @@ impl Cmd {
             program: "ip",
             args,
             tolerate_failure: false,
+        }
+    }
+
+    /// Une etape du retrait du plan: toleree en echec, comme tout demontage.
+    /// Un echec y veut dire que l'objet designe n'est pas la; le retrait ne
+    /// designe que ce que le produit a pose, il ne retire donc rien d'autre a
+    /// la place.
+    pub(crate) fn ip_plan_tolere(args: Vec<String>) -> Self {
+        Self {
+            tolerate_failure: true,
+            ..Self::ip_plan(args)
         }
     }
 
@@ -122,9 +134,11 @@ pub fn configure_link(cfg: &TunnelConfig) -> Vec<Cmd> {
 ///
 /// Depuis D1c.1, les commandes sont celles du plan pur
 /// (`bifrost_core::routage::Plan::wireguard`), que la preuve `prove routes`
-/// compare au noyau: une seule source pour la pose et pour l'attendu. Les
-/// argv sont ceux d'avant, a l'octet pres (recette
-/// `la_pose_wireguard_est_celle_de_la_base_a_l_octet_pres`).
+/// compare au noyau: une seule source pour la pose et pour l'attendu. Chaque
+/// commande porte l'etiquette du produit (`protocol`/`proto`
+/// `bifrost_core::routage::PROTOCOLE_PRODUIT`), qui ne change aucune decision
+/// de routage et laisse le retrait ne designer que ce que le produit a pose
+/// (recette `la_pose_wireguard_est_celle_de_la_base_a_l_octet_pres`).
 ///
 /// Refuse une table que le noyau se reserve, sans rendre aucune commande:
 /// voir [`table_libre`].
@@ -134,64 +148,77 @@ pub fn add_routing(cfg: &TunnelConfig) -> Result<Vec<Cmd>> {
     // par coeur a son propre aiguillage, avec sa table. Rendre une liste vide
     // plutot qu'echouer, parce que le seul appelant est le peripherique
     // WireGuard, qui sait deja dans quel cas il est.
-    let Some(wg) = cfg.portage.wireguard() else {
+    let Some(plan) = plan(cfg, "pose du routage")? else {
         return Ok(Vec::new());
     };
-    let table = table_libre(wg, "pose du routage")?;
     // Les deux familles sont traitees meme si le tunnel n'a pas d'adresse IPv6:
     // sans route par defaut IPv6 dans le tunnel, l'IPv6 sortirait par
     // l'interface physique. C'est le vecteur de fuite IPv6 classique. Le plan
     // les pose toutes les deux (`Famille::TOUTES`).
-    Ok(
-        bifrost_core::routage::Plan::wireguard(&cfg.interface, wg.fwmark, table)
-            .arguments_ip()
-            .into_iter()
-            .map(Cmd::ip_plan)
-            .collect(),
-    )
+    Ok(plan.arguments_ip().into_iter().map(Cmd::ip_plan).collect())
 }
 
-/// Retrait des regles et de l'interface.
+/// Le plan WireGuard d'une configuration, `None` pour un portage par coeur.
+/// Refuse une table que le noyau se reserve: voir [`table_libre`].
+pub fn plan(cfg: &TunnelConfig, quoi: &str) -> Result<Option<bifrost_core::routage::Plan>> {
+    let Some(wg) = cfg.portage.wireguard() else {
+        return Ok(None);
+    };
+    let table = table_libre(wg, quoi)?;
+    Ok(Some(bifrost_core::routage::Plan::wireguard(
+        &cfg.interface,
+        wg.fwmark,
+        table,
+    )))
+}
+
+/// Le retrait des seules regles et routes que la pose a posees, sans
+/// l'interface: c'est lui qui retire le reste d'une session precedente avant
+/// une pose (voir `LinuxTunnel::up`).
+///
+/// Chaque commande est une commande de la pose, `add` devenu `del`, a l'octet
+/// pres, etiquette comprise (`Plan::arguments_retrait`): une regle ou une
+/// route d'un tiers n'y repond pas, meme identique, meme dans la meme table.
+/// Plus de `ip route flush table <T>`, qui vidait toute la table, et plus de
+/// retrait d'une regle par ressemblance, qui prenait la premiere regle
+/// identique, celle d'un tiers comprise. Toutes tolerent l'echec: un objet
+/// absent n'est pas une erreur de demontage.
+pub fn retrait_routage(cfg: &TunnelConfig) -> Result<Vec<Cmd>> {
+    let Some(plan) = plan(cfg, "demontage")? else {
+        return Ok(Vec::new());
+    };
+    Ok(plan
+        .arguments_retrait()
+        .into_iter()
+        .map(Cmd::ip_plan_tolere)
+        .collect())
+}
+
+/// Retrait des regles, des routes et de l'interface.
 ///
 /// Toutes les commandes tolerent l'echec: le demontage doit aboutir a un
 /// systeme propre meme s'il est appele apres un demontage partiel ou un crash.
-/// Supprimer le lien supprime aussi les routes de la table dediee.
+/// Les regles et les routes sont celles de [`retrait_routage`], puis vient
+/// l'interface ([`retrait_lien`]); supprimer le lien retire aussi, cote noyau,
+/// les routes qui passent par lui (mesure le 30/09/2026 sur essai-linux, deux
+/// familles). L'interface est designee par son NOM: l'appelant ne lance cette
+/// liste que sur une interface qu'il sait etre celle du produit.
 ///
 /// Refuse une table que le noyau se reserve, sans rendre aucune commande:
-/// voir [`table_libre`]. C'est ici que le refus compte le plus, puisque c'est
-/// ici qu'est ecrit `ip route flush table <T>`.
+/// voir [`table_libre`].
 pub fn teardown(cfg: &TunnelConfig) -> Result<Vec<Cmd>> {
-    // Ces commandes n'existent que pour WireGuard: c'est sa marque qui echappe
-    // a la regle, et sa table dediee qui porte la route par defaut. Le chemin
-    // par coeur a son propre aiguillage, avec sa table. Rendre une liste vide
-    // plutot qu'echouer, parce que le seul appelant est le peripherique
-    // WireGuard, qui sait deja dans quel cas il est.
-    let Some(wg) = cfg.portage.wireguard() else {
+    // Ces commandes n'existent que pour WireGuard: voir `add_routing`.
+    if cfg.portage.wireguard().is_none() {
         return Ok(Vec::new());
-    };
-    let table = table_libre(wg, "demontage")?.to_string();
-    let mark = wg.fwmark.to_string();
-    let mut cmds = Vec::new();
-
-    for family in ["-4", "-6"] {
-        cmds.push(Cmd::ip_lenient(&[
-            family, "rule", "del", "not", "fwmark", &mark, "table", &table,
-        ]));
-        cmds.push(Cmd::ip_lenient(&[
-            family,
-            "rule",
-            "del",
-            "table",
-            "main",
-            "suppress_prefixlength",
-            "0",
-        ]));
-        cmds.push(Cmd::ip_lenient(&[
-            family, "route", "flush", "table", &table,
-        ]));
     }
-    cmds.push(Cmd::ip_lenient(&["link", "del", "dev", &cfg.interface]));
+    let mut cmds = retrait_routage(cfg)?;
+    cmds.push(retrait_lien(cfg));
     Ok(cmds)
+}
+
+/// La suppression de l'interface du profil, par son nom, toleree en echec.
+pub fn retrait_lien(cfg: &TunnelConfig) -> Cmd {
+    Cmd::ip_lenient(&["link", "del", "dev", &cfg.interface])
 }
 
 #[cfg(test)]
@@ -302,17 +329,20 @@ mod tests {
                 e.contains(&format!("table {table} ('{nom}')")) && e.contains("routing_table"),
                 "le refus de pose doit nommer la table et le champ: {e}"
             );
-            let e = teardown(&c)
-                .expect_err(&format!("demontage rendu pour la table {table}"))
-                .to_string();
-            assert!(
-                e.contains(&format!("table {table} ('{nom}')")) && e.contains("routing_table"),
-                "le refus de demontage doit nommer la table et le champ: {e}"
-            );
-            assert!(
-                e.contains("aucune commande n'est emise"),
-                "et dire que rien n'est parti: {e}"
-            );
+            for e in [
+                teardown(&c).expect_err(&format!("demontage rendu pour la table {table}")),
+                retrait_routage(&c).expect_err(&format!("retrait rendu pour la table {table}")),
+            ] {
+                let e = e.to_string();
+                assert!(
+                    e.contains(&format!("table {table} ('{nom}')")) && e.contains("routing_table"),
+                    "le refus de demontage doit nommer la table et le champ: {e}"
+                );
+                assert!(
+                    e.contains("aucune commande n'est emise"),
+                    "et dire que rien n'est parti: {e}"
+                );
+            }
         }
     }
 
@@ -326,34 +356,69 @@ mod tests {
             let t = table.to_string();
             let up = lignes(&pose(&c));
             assert_eq!(up.len(), 6, "table {table}: {up:?}");
-            assert!(up.iter().any(|l| l.ends_with(&format!("table {t}"))));
+            assert!(up.iter().any(|l| l.contains(&format!(" table {t} "))));
             let down = lignes(&retrait(&c));
             assert!(
-                down.contains(&format!("ip -4 route flush table {t}")),
+                down.contains(&format!(
+                    "ip -4 route del 0.0.0.0/0 dev wg0 table {t} proto 177"
+                )),
                 "table {table}: {down:?}"
             );
         }
     }
 
-    /// Le demontage, commande par commande et dans l'ordre, a l'octet pres,
-    /// tel que la base `c1fa41a` le rendait pour une table libre: le refus des
-    /// tables reservees ne change pas une seule commande executee pour les
-    /// autres. Ecrit depuis la base et releve sur elle par le banc.
+    /// Le demontage, commande par commande et dans l'ordre, a l'octet pres.
+    ///
+    /// Jusqu'a la base `91d614f` il retirait les regles par ressemblance
+    /// (`rule del not fwmark M table T`, `rule del table main
+    /// suppress_prefixlength 0`: la premiere regle qui correspond, celle d'un
+    /// tiers comprise) et vidait la table (`route flush table T`). Mesure en
+    /// namespace jetable sur essai-linux, par `LinuxTunnel::up` et `down`: un
+    /// tiers pose dans la meme table y perdait sa route et ses regles. Chaque
+    /// commande est desormais celle de la pose, `add` devenu `del`, etiquette
+    /// comprise; l'ordre (regles, route, famille par famille, puis
+    /// l'interface) est celui d'avant.
     #[test]
-    fn le_demontage_wireguard_est_celui_de_la_base_a_l_octet_pres() {
+    fn le_demontage_wireguard_ne_designe_que_ce_que_la_pose_a_pose() {
         assert_eq!(
             lignes(&retrait(&cfg())),
             [
-                "ip -4 rule del not fwmark 51820 table 51820",
-                "ip -4 rule del table main suppress_prefixlength 0",
-                "ip -4 route flush table 51820",
-                "ip -6 rule del not fwmark 51820 table 51820",
-                "ip -6 rule del table main suppress_prefixlength 0",
-                "ip -6 route flush table 51820",
+                "ip -4 rule del not fwmark 51820 table 51820 protocol 177",
+                "ip -4 rule del table main suppress_prefixlength 0 protocol 177",
+                "ip -4 route del 0.0.0.0/0 dev wg0 table 51820 proto 177",
+                "ip -6 rule del not fwmark 51820 table 51820 protocol 177",
+                "ip -6 rule del table main suppress_prefixlength 0 protocol 177",
+                "ip -6 route del ::/0 dev wg0 table 51820 proto 177",
                 "ip link del dev wg0",
             ]
         );
         assert!(retrait(&cfg()).iter().all(|c| c.program == "ip"));
+        // Le retrait sans l'interface est le meme, moins sa derniere ligne.
+        let sans_lien = lignes(&retrait_routage(&cfg()).unwrap());
+        let tout = lignes(&retrait(&cfg()));
+        assert_eq!(sans_lien, tout[..tout.len() - 1]);
+    }
+
+    /// Aucun demontage ne vide une table, et chaque regle ou route retiree
+    /// porte l'etiquette du produit: une table, une marque, une interface
+    /// quelconques.
+    #[test]
+    fn le_demontage_ne_vide_aucune_table_et_ne_retire_que_l_etiquete() {
+        for (marque, table) in [(51820u32, 51820u32), (0x1f2e3d, 30303), (7, 252)] {
+            let mut c = contournant_la_validation(table);
+            c.interface = "bf-wg_9".into();
+            wg(&mut c).fwmark = marque;
+            for cmd in retrait(&c) {
+                let l = cmd.display();
+                assert!(!l.contains("flush"), "{l}");
+                if l.contains(" rule ") || l.contains(" route ") {
+                    assert!(
+                        l.ends_with(" protocol 177") || l.ends_with(" proto 177"),
+                        "retrait sans l'etiquette du produit: {l}"
+                    );
+                }
+            }
+        }
     }
 
     /// Un portage par coeur n'a ni pose ni demontage WireGuard, et ce n'est
@@ -413,29 +478,33 @@ mod tests {
     #[test]
     fn la_regle_fwmark_et_la_suppression_de_prefixe_sont_posees() {
         let l = lignes(&pose(&cfg()));
-        assert!(l.contains(&"ip -4 rule add not fwmark 51820 table 51820".to_owned()));
-        assert!(l.contains(&"ip -4 rule add table main suppress_prefixlength 0".to_owned()));
-        assert!(l.contains(&"ip -4 route add 0.0.0.0/0 dev wg0 table 51820".to_owned()));
+        assert!(l.contains(&"ip -4 rule add not fwmark 51820 table 51820 protocol 177".to_owned()));
+        assert!(l.contains(
+            &"ip -4 rule add table main suppress_prefixlength 0 protocol 177".to_owned()
+        ));
+        assert!(l.contains(&"ip -4 route add 0.0.0.0/0 dev wg0 table 51820 proto 177".to_owned()));
     }
 
     /// La pose, commande par commande et dans l'ordre, a l'octet pres.
     ///
     /// Depuis D1c.1 ces commandes sont rendues par le plan pur de
     /// `bifrost_core::routage`, que la preuve `prove routes` lit aussi. Cette
-    /// recette fige la liste telle que la base `6e9a200` la rendait: toute
-    /// difference d'un seul argument, ou de l'ordre (qui decide des priorites
-    /// que le noyau attribue a des regles posees sans `pref`), la fait rougir.
+    /// recette fige la liste telle que la base `6e9a200` la rendait, chaque
+    /// commande suivie depuis de l'etiquette du produit (`protocol 177` sur une
+    /// regle, `proto 177` sur une route), et rien d'autre: toute difference
+    /// d'un seul argument, ou de l'ordre (qui decide des priorites que le noyau
+    /// attribue a des regles posees sans `pref`), la fait rougir.
     #[test]
     fn la_pose_wireguard_est_celle_de_la_base_a_l_octet_pres() {
         assert_eq!(
             lignes(&pose(&cfg())),
             [
-                "ip -4 route add 0.0.0.0/0 dev wg0 table 51820",
-                "ip -4 rule add not fwmark 51820 table 51820",
-                "ip -4 rule add table main suppress_prefixlength 0",
-                "ip -6 route add ::/0 dev wg0 table 51820",
-                "ip -6 rule add not fwmark 51820 table 51820",
-                "ip -6 rule add table main suppress_prefixlength 0",
+                "ip -4 route add 0.0.0.0/0 dev wg0 table 51820 proto 177",
+                "ip -4 rule add not fwmark 51820 table 51820 protocol 177",
+                "ip -4 rule add table main suppress_prefixlength 0 protocol 177",
+                "ip -6 route add ::/0 dev wg0 table 51820 proto 177",
+                "ip -6 rule add not fwmark 51820 table 51820 protocol 177",
+                "ip -6 rule add table main suppress_prefixlength 0 protocol 177",
             ]
         );
         let mut c = cfg();
@@ -445,12 +514,12 @@ mod tests {
         assert_eq!(
             lignes(&pose(&c)),
             [
-                "ip -4 route add 0.0.0.0/0 dev bf-wg_9 table 30303",
-                "ip -4 rule add not fwmark 2043453 table 30303",
-                "ip -4 rule add table main suppress_prefixlength 0",
-                "ip -6 route add ::/0 dev bf-wg_9 table 30303",
-                "ip -6 rule add not fwmark 2043453 table 30303",
-                "ip -6 rule add table main suppress_prefixlength 0",
+                "ip -4 route add 0.0.0.0/0 dev bf-wg_9 table 30303 proto 177",
+                "ip -4 rule add not fwmark 2043453 table 30303 protocol 177",
+                "ip -4 rule add table main suppress_prefixlength 0 protocol 177",
+                "ip -6 route add ::/0 dev bf-wg_9 table 30303 proto 177",
+                "ip -6 rule add not fwmark 2043453 table 30303 protocol 177",
+                "ip -6 rule add table main suppress_prefixlength 0 protocol 177",
             ]
         );
         assert!(
@@ -468,8 +537,8 @@ mod tests {
         let mut c = cfg();
         c.addresses = vec!["10.2.0.2/32".parse().unwrap()];
         let l = lignes(&pose(&c));
-        assert!(l.contains(&"ip -6 route add ::/0 dev wg0 table 51820".to_owned()));
-        assert!(l.contains(&"ip -6 rule add not fwmark 51820 table 51820".to_owned()));
+        assert!(l.contains(&"ip -6 route add ::/0 dev wg0 table 51820 proto 177".to_owned()));
+        assert!(l.contains(&"ip -6 rule add not fwmark 51820 table 51820 protocol 177".to_owned()));
     }
 
     #[test]
@@ -501,7 +570,9 @@ mod tests {
         assert_eq!(l.matches("rule del not fwmark").count(), 2);
     }
 
-    /// Le demontage doit annuler exactement ce que le montage a pose.
+    /// Le demontage doit annuler exactement ce que le montage a pose: chaque
+    /// pose a son inverse exact, et le demontage ne retire rien d'autre que
+    /// ces inverses et l'interface.
     #[test]
     fn montage_et_demontage_sont_symetriques() {
         let c = cfg();
@@ -509,11 +580,10 @@ mod tests {
         let down = lignes(&retrait(&c));
         for cmd in &up {
             let inverse = cmd.replacen(" add ", " del ", 1);
-            let couvert = down.contains(&inverse)
-                // les routes de la table dediee partent avec `route flush`
-                || (cmd.contains("route add") && down.iter().any(|d| d.contains("route flush")));
-            assert!(couvert, "aucun inverse pour: {cmd}");
+            assert!(down.contains(&inverse), "aucun inverse exact pour: {cmd}");
         }
+        assert_eq!(down.len(), up.len() + 1, "{down:?}");
+        assert_eq!(down.last().map(String::as_str), Some("ip link del dev wg0"));
     }
 
     /// Le nom d'interface vient de la config, deja validee, mais on verifie

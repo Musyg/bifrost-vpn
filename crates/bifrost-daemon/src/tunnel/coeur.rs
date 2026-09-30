@@ -165,6 +165,19 @@ impl CoeurTunnel {
     }
 }
 
+/// Avant la premiere commande du chemin par coeur: retire ce qu'une session
+/// precedente du produit a laisse (seulement ce qui porte son etiquette,
+/// par [`aiguillage::retirer`]), puis refuse une table 2847 qu'un tiers
+/// occupe, en le nommant. Rien n'est pose quand elle refuse.
+#[cfg(target_os = "linux")]
+pub fn preparer_aiguillage(a: &aiguillage::Aiguillage) -> Result<()> {
+    super::occupation::preparer(&aiguillage::plan(a), || {
+        for cmd in aiguillage::retirer(a) {
+            let _ = CoeurTunnel::run(&cmd);
+        }
+    })
+}
+
 impl CoeurTunnel {
     /// La MTU, dans la forme que le passeur attend.
     fn mtu(cfg: &TunnelConfig) -> Result<u16> {
@@ -174,6 +187,12 @@ impl CoeurTunnel {
 
     #[cfg(target_os = "linux")]
     fn monter_ici(&mut self, cfg: &TunnelConfig) -> Result<()> {
+        // Avant tout, et avant meme le TUN: retirer ce qu'une session
+        // precedente du produit a laisse, puis refuser une table 2847 qu'un
+        // tiers occupe. Refuse ici, rien n'a ete cree ni pose.
+        let aiguillage = self.aiguillage(cfg);
+        preparer_aiguillage(&aiguillage)?;
+
         // Le TUN d'abord. L'interface n'existe que tant qu'un descripteur la
         // tient, donc il faut l'ouvrir avant de pouvoir l'adresser.
         let tun = brut::ouvrir(&cfg.interface).map_err(Error::Tunnel)?;
@@ -188,7 +207,6 @@ impl CoeurTunnel {
             Self::run(&cmd)?;
         }
 
-        let aiguillage = self.aiguillage(cfg);
         for cmd in aiguillage::poser(&aiguillage) {
             if let Err(e) = Self::run(&cmd) {
                 // L'aiguillage a moitie pose enverrait du trafic vers une

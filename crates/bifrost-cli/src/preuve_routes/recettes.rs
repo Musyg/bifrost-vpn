@@ -259,6 +259,39 @@ fn le_plan_pose_correspond() {
     }
 }
 
+/// Le produit pose ses regles et ses routes avec son etiquette
+/// (`bifrost_core::routage::PROTOCOLE_PRODUIT`), pour que son demontage ne
+/// retire que ce qu'il a pose. Elle ne change aucune decision de routage, et
+/// la preuve ne la compare pas: la pose etiquetee correspond, dans les deux
+/// chemins, comme la pose d'un autre originateur.
+#[test]
+fn l_etiquette_du_produit_ne_change_pas_le_verdict() {
+    let etiqueter = |mut o: Observation, table: u32| {
+        for f in Famille::TOUTES {
+            let v = vue(&mut o, f);
+            for r in v.regles.iter_mut().filter(|r| r.protocole == 3) {
+                r.protocole = bifrost_core::routage::PROTOCOLE_PRODUIT;
+            }
+            for r in v.routes.iter_mut().filter(|r| r.table == table) {
+                r.protocole = bifrost_core::routage::PROTOCOLE_PRODUIT;
+            }
+        }
+        o
+    };
+    let o = etiqueter(wireguard_pose(), TABLE_WG);
+    assert_eq!(
+        o.ipv6
+            .regles
+            .iter()
+            .filter(|r| r.protocole == bifrost_core::routage::PROTOCOLE_PRODUIT)
+            .count(),
+        2
+    );
+    assert_eq!(ecarts(&plan_wg(), &o), AUCUN);
+    let o = etiqueter(coeur_pose(Some(COMPTE)), 2847);
+    assert_eq!(ecarts(&plan_coeur(), &o), AUCUN);
+}
+
 /// Sans rien de pose, c'est un ecart, jamais une correspondance.
 #[test]
 fn rien_de_pose_est_un_ecart() {

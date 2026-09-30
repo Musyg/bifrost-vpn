@@ -100,61 +100,48 @@ pub struct Aiguillage {
     pub coeur_uid: Option<u32>,
 }
 
-/// Les familles traitees. IPv6 est routee dans le TUN plutot que laissee de
-/// cote: une famille sans route est une famille qui sort par la porte d'a cote.
-const FAMILLES: [&str; 2] = ["-4", "-6"];
+/// Le plan de cet aiguillage: la source unique de la pose, du retrait et de
+/// la verification d'occupation.
+pub fn plan(a: &Aiguillage) -> bifrost_core::routage::Plan {
+    bifrost_core::routage::Plan::coeur(&a.interface, a.coeur_uid)
+}
 
 /// Pose l'aiguillage.
 ///
 /// Depuis D1c.1, les commandes sont celles du plan pur
 /// (`bifrost_core::routage::Plan::coeur`), que la preuve `prove routes`
-/// compare au noyau: une seule source pour la pose et pour l'attendu. Les
-/// argv sont ceux d'avant, a l'octet pres (recette
+/// compare au noyau: une seule source pour la pose et pour l'attendu. Chaque
+/// commande porte l'etiquette du produit (`protocol`/`proto 177`), sans quoi
+/// son retrait ne pourrait pas la distinguer d'une regle tierce (recette
 /// `la_pose_par_coeur_est_celle_de_la_base_a_l_octet_pres`).
 pub fn poser(a: &Aiguillage) -> Vec<Cmd> {
-    bifrost_core::routage::Plan::coeur(&a.interface, a.coeur_uid)
+    plan(a)
         .arguments_ip()
         .into_iter()
         .map(Cmd::ip_plan)
         .collect()
 }
 
-/// Retire l'aiguillage.
+/// Retire l'aiguillage, et rien d'autre.
+///
+/// Chaque commande est une commande de la pose, `add` devenu `del`, a l'octet
+/// pres: selecteur, table, priorite, interface et etiquette du produit
+/// (`Plan::arguments_retrait`). Jusqu'a la base `91d614f` il retirait
+/// `rule del pref P` (la premiere regle de cette priorite, quelle qu'elle
+/// soit) et `route flush table 2847` (toute la table): mesure en namespace
+/// jetable sur essai-linux, un tiers pose avant a la meme priorite perdait sa
+/// regle, et un tiers qui occupait la table ses routes.
 ///
 /// Tout y est tolerant: le demontage suit aussi bien un montage complet qu'un
 /// montage interrompu au milieu, et une regle deja absente n'est pas une
 /// erreur. S'arreter a la premiere laisserait les suivantes en place - c'est-a-
 /// dire une table qui aiguille vers une interface disparue.
 pub fn retirer(a: &Aiguillage) -> Vec<Cmd> {
-    let table = TABLE.to_string();
-    let mut cmds = Vec::new();
-    for f in FAMILLES {
-        cmds.push(Cmd::ip_lenient(&[
-            f,
-            "rule",
-            "del",
-            "pref",
-            &PREF_TUNNEL.to_string(),
-        ]));
-        cmds.push(Cmd::ip_lenient(&[
-            f,
-            "rule",
-            "del",
-            "pref",
-            &PREF_LAN.to_string(),
-        ]));
-        if a.coeur_uid.is_some() {
-            cmds.push(Cmd::ip_lenient(&[
-                f,
-                "rule",
-                "del",
-                "pref",
-                &PREF_COEUR.to_string(),
-            ]));
-        }
-        cmds.push(Cmd::ip_lenient(&[f, "route", "flush", "table", &table]));
-    }
-    cmds
+    plan(a)
+        .arguments_retrait()
+        .into_iter()
+        .map(Cmd::ip_plan_tolere)
+        .collect()
 }
 
 #[cfg(test)]
@@ -175,8 +162,12 @@ mod tests {
     #[test]
     fn la_table_porte_la_route_par_defaut_vers_le_tun() {
         let l = lignes(&poser(&avec_coeur()));
-        assert!(l.contains(&format!("ip -4 route add default dev bftun0 table {TABLE}")));
-        assert!(l.contains(&format!("ip -6 route add default dev bftun0 table {TABLE}")));
+        assert!(l.contains(&format!(
+            "ip -4 route add default dev bftun0 table {TABLE} proto 177"
+        )));
+        assert!(l.contains(&format!(
+            "ip -6 route add default dev bftun0 table {TABLE} proto 177"
+        )));
     }
 
     /// Le point du module: sans cette regle le coeur boucle sur lui-meme.
@@ -184,10 +175,10 @@ mod tests {
     fn le_coeur_sort_par_son_identite() {
         let l = lignes(&poser(&avec_coeur()));
         assert!(l.contains(&format!(
-            "ip -4 rule add uidrange 4242-4242 lookup main pref {PREF_COEUR}"
+            "ip -4 rule add uidrange 4242-4242 lookup main pref {PREF_COEUR} protocol 177"
         )));
         assert!(l.contains(&format!(
-            "ip -6 rule add uidrange 4242-4242 lookup main pref {PREF_COEUR}"
+            "ip -6 rule add uidrange 4242-4242 lookup main pref {PREF_COEUR} protocol 177"
         )));
     }
 
@@ -197,7 +188,7 @@ mod tests {
     fn le_lan_survit_mais_pas_la_route_par_defaut_de_main() {
         let l = lignes(&poser(&avec_coeur()));
         assert!(l.contains(&format!(
-            "ip -4 rule add lookup main suppress_prefixlength 0 pref {PREF_LAN}"
+            "ip -4 rule add lookup main suppress_prefixlength 0 pref {PREF_LAN} protocol 177"
         )));
     }
 
@@ -206,21 +197,22 @@ mod tests {
     ///
     /// Depuis D1c.1 ces commandes sont rendues par le plan pur de
     /// `bifrost_core::routage`, que la preuve `prove routes` lit aussi. Cette
-    /// recette fige la liste telle que la base `6e9a200` la rendait: toute
-    /// difference d'un seul argument, ou de l'ordre, la fait rougir.
+    /// recette fige la liste telle que la base `6e9a200` la rendait, chaque
+    /// commande suivie depuis de l'etiquette du produit, et rien d'autre:
+    /// toute difference d'un seul argument, ou de l'ordre, la fait rougir.
     #[test]
     fn la_pose_par_coeur_est_celle_de_la_base_a_l_octet_pres() {
         assert_eq!(
             lignes(&poser(&avec_coeur())),
             [
-                "ip -4 route add default dev bftun0 table 2847",
-                "ip -4 rule add uidrange 4242-4242 lookup main pref 9100",
-                "ip -4 rule add lookup main suppress_prefixlength 0 pref 9110",
-                "ip -4 rule add lookup 2847 pref 9120",
-                "ip -6 route add default dev bftun0 table 2847",
-                "ip -6 rule add uidrange 4242-4242 lookup main pref 9100",
-                "ip -6 rule add lookup main suppress_prefixlength 0 pref 9110",
-                "ip -6 rule add lookup 2847 pref 9120",
+                "ip -4 route add default dev bftun0 table 2847 proto 177",
+                "ip -4 rule add uidrange 4242-4242 lookup main pref 9100 protocol 177",
+                "ip -4 rule add lookup main suppress_prefixlength 0 pref 9110 protocol 177",
+                "ip -4 rule add lookup 2847 pref 9120 protocol 177",
+                "ip -6 route add default dev bftun0 table 2847 proto 177",
+                "ip -6 rule add uidrange 4242-4242 lookup main pref 9100 protocol 177",
+                "ip -6 rule add lookup main suppress_prefixlength 0 pref 9110 protocol 177",
+                "ip -6 rule add lookup 2847 pref 9120 protocol 177",
             ]
         );
         let sans = Aiguillage {
@@ -230,12 +222,12 @@ mod tests {
         assert_eq!(
             lignes(&poser(&sans)),
             [
-                "ip -4 route add default dev bf-t_1 table 2847",
-                "ip -4 rule add lookup main suppress_prefixlength 0 pref 9110",
-                "ip -4 rule add lookup 2847 pref 9120",
-                "ip -6 route add default dev bf-t_1 table 2847",
-                "ip -6 rule add lookup main suppress_prefixlength 0 pref 9110",
-                "ip -6 rule add lookup 2847 pref 9120",
+                "ip -4 route add default dev bf-t_1 table 2847 proto 177",
+                "ip -4 rule add lookup main suppress_prefixlength 0 pref 9110 protocol 177",
+                "ip -4 rule add lookup 2847 pref 9120 protocol 177",
+                "ip -6 route add default dev bf-t_1 table 2847 proto 177",
+                "ip -6 rule add lookup main suppress_prefixlength 0 pref 9110 protocol 177",
+                "ip -6 rule add lookup 2847 pref 9120 protocol 177",
             ]
         );
         assert!(
@@ -262,21 +254,42 @@ mod tests {
         assert!(l.iter().any(|c| c.contains("route add default")));
     }
 
-    /// Tout ce qui est pose doit pouvoir etre retire. Une regle oubliee
-    /// survivrait a la deconnexion et aiguillerait vers une interface morte.
+    /// Tout ce qui est pose doit pouvoir etre retire, et rien d'autre. Une
+    /// regle oubliee survivrait a la deconnexion et aiguillerait vers une
+    /// interface morte; une regle retiree par sa seule priorite pouvait etre
+    /// celle d'un tiers, et `route flush` vidait la table de quiconque s'y
+    /// trouvait aussi.
     #[test]
-    fn tout_ce_qui_est_pose_est_retire() {
-        let a = avec_coeur();
-        let retire = lignes(&retirer(&a));
-        for f in FAMILLES {
-            for pref in [PREF_COEUR, PREF_LAN, PREF_TUNNEL] {
-                assert!(
-                    retire.contains(&format!("ip {f} rule del pref {pref}")),
-                    "la regle {pref} en {f} n'est pas retiree: {retire:?}"
-                );
+    fn tout_ce_qui_est_pose_est_retire_et_rien_d_autre() {
+        for a in [
+            avec_coeur(),
+            Aiguillage {
+                interface: "bf-t_1".to_owned(),
+                coeur_uid: None,
+            },
+        ] {
+            let pose = lignes(&poser(&a));
+            let retire = lignes(&retirer(&a));
+            assert_eq!(pose.len(), retire.len(), "{retire:?}");
+            for cmd in &pose {
+                let inverse = cmd.replacen(" add ", " del ", 1);
+                assert!(retire.contains(&inverse), "aucun inverse exact pour: {cmd}");
             }
-            assert!(retire.contains(&format!("ip {f} route flush table {TABLE}")));
+            assert!(!retire.iter().any(|l| l.contains("flush")), "{retire:?}");
         }
+        assert_eq!(
+            lignes(&retirer(&avec_coeur())),
+            [
+                "ip -4 rule del lookup 2847 pref 9120 protocol 177",
+                "ip -4 rule del lookup main suppress_prefixlength 0 pref 9110 protocol 177",
+                "ip -4 rule del uidrange 4242-4242 lookup main pref 9100 protocol 177",
+                "ip -4 route del default dev bftun0 table 2847 proto 177",
+                "ip -6 rule del lookup 2847 pref 9120 protocol 177",
+                "ip -6 rule del lookup main suppress_prefixlength 0 pref 9110 protocol 177",
+                "ip -6 rule del uidrange 4242-4242 lookup main pref 9100 protocol 177",
+                "ip -6 route del default dev bftun0 table 2847 proto 177",
+            ]
+        );
     }
 
     /// Le demontage suit aussi bien un montage complet qu'un montage
