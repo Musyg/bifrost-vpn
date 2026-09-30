@@ -308,6 +308,44 @@ pub fn all_skipped(reason: &str) -> CheckReport {
     )
 }
 
+/// Le rapport de `check` quand le banc ne se monte pas: pas root, capacite
+/// absente, outil absent. C'est ce que rend `bifrost-cli check` par le service
+/// systemd, qui ne detient plus CAP_SYS_ADMIN.
+///
+/// # Le contrat
+///
+/// Chaque vecteur de [`CheckVector::ALL`] y figure une fois. `doh-bypass` rend
+/// le verdict de `doh_bypass`, tel quel: il ne demande ni namespace ni capture,
+/// seulement de lire des fichiers, et le sauter avec les autres le rendrait
+/// muet la ou il avait de quoi repondre. Tous les autres rendent `SKIPPED`
+/// avec `raison` mot pour mot, et aucun ne rend PASSED: aucun n'a ete mesure.
+///
+/// # Pourquoi une fonction a part
+///
+/// Ces lignes vivaient dans `linux::run_all()`, et aucune recette ne les
+/// lisait. Releve du 30/09/2026: le `skipped` de ce bras change en `passed`
+/// (mutation L4), aucune recette cargo n'a rougi, sur aucun hote; seul le banc
+/// root `e2e-linux.sh --unite`, hors CI, l'a vu. Pure, la decision se garde
+/// sans banc ni privilege, sur les deux hotes et en CI:
+/// `tests_sans_banc` (portable) et `tests_linux` (chaque raison reelle, et
+/// `linux::run_all()` lui-meme sous un compte ordinaire).
+///
+/// Porte `any(target_os = "linux", test)`, celle de `nft_argv` et pour la meme
+/// raison: son seul appelant de production est Linux, et sans lui la
+/// bibliotheque Windows hors test ferait echouer clippy sur `dead_code`.
+#[cfg(any(target_os = "linux", test))]
+fn rapport_sans_banc(raison: &str, doh_bypass: impl Fn() -> CheckOutcome) -> CheckReport {
+    CheckReport::new(
+        CheckVector::ALL
+            .iter()
+            .map(|v| match v {
+                CheckVector::DohBypass => doh_bypass(),
+                autre => CheckOutcome::skipped(*autre, raison),
+            })
+            .collect(),
+    )
+}
+
 #[cfg(target_os = "linux")]
 mod linux {
     use super::*;
@@ -1469,18 +1507,10 @@ mod linux {
 
     pub fn run_all() -> CheckReport {
         if let Some(reason) = missing_prerequisite() {
-            // `doh-bypass` conclut quand meme: il ne demande ni namespace ni
-            // capture, seulement de lire des fichiers. Le sauter avec les
-            // autres le rendrait muet la ou il avait parfaitement de quoi
-            // repondre.
-            let outcomes = CheckVector::ALL
-                .iter()
-                .map(|v| match v {
-                    CheckVector::DohBypass => doh_fichiers::vecteur(),
-                    autre => CheckOutcome::skipped(*autre, &reason),
-                })
-                .collect();
-            return CheckReport::new(outcomes);
+            // `doh-bypass` conclut quand meme, tous les autres sautent avec
+            // cette raison: le contrat et ses gardes sont dans
+            // `rapport_sans_banc`.
+            return rapport_sans_banc(&reason, doh_fichiers::vecteur);
         }
 
         let bench = match Bench::setup() {
@@ -1582,26 +1612,59 @@ mod linux {
     }
 
     /// Verifie ce dont le harnais a besoin. Renvoie la premiere raison de sauter.
+    ///
+    /// Les effets seuls: ce que la machine repond, lu dans le meme ordre et
+    /// aussi paresseusement qu'avant. La decision est [`prerequis_manquant`].
     pub(super) fn missing_prerequisite() -> Option<String> {
-        if !est_root() {
+        prerequis_manquant(est_root(), capacites_effectives, binary_exists, || {
+            std::env::current_exe().is_ok()
+        })
+    }
+
+    /// Le masque effectif de CE processus, champ `CapEff:` de
+    /// `/proc/self/status`; `None` si le statut est illisible.
+    ///
+    /// Nommee plutot qu'ecrite en fermeture dans [`missing_prerequisite`]:
+    /// mesure du 30/09/2026 sur `essai-linux`, le chemin de `/proc` fausse dans
+    /// la fermeture, toute la suite restait verte, alors que le service aurait
+    /// tente le banc sans nommer CAP_SYS_ADMIN. Nommee, elle se garde sans
+    /// privilege (`le_masque_effectif_du_processus_se_lit`), et si
+    /// `missing_prerequisite` cesse de l'appeler, clippy la voit morte.
+    pub(super) fn capacites_effectives() -> Option<u64> {
+        std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|s| masque_de_statut(&s, "CapEff:"))
+    }
+
+    /// La premiere raison de ne pas monter le banc, sans rien lire du systeme:
+    /// ce que la machine repond arrive en argument, et chaque question n'est
+    /// posee que si les precedentes n'ont rien trouve.
+    ///
+    /// Separee de [`missing_prerequisite`] pour que chaque raison, et leur
+    /// ordre, se gardent sans root ni capacite: `tests_linux`.
+    pub(super) fn prerequis_manquant(
+        root: bool,
+        capacites_effectives: impl FnOnce() -> Option<u64>,
+        binaire_present: impl Fn(&str) -> bool,
+        exe_connu: impl FnOnce() -> bool,
+    ) -> Option<String> {
+        if !root {
             return Some(motifs::exige_root());
         }
         // Root ne suffit pas: le service systemd est root et n'a plus
         // CAP_SYS_ADMIN (voir `motifs::CAPACITES`). Un statut illisible ne
         // conclut rien: le banc tente alors, et son propre echec parle.
-        if let Some(effectives) = std::fs::read_to_string("/proc/self/status")
-            .ok()
-            .and_then(|s| masque_de_statut(&s, "CapEff:"))
+        if let Some(effectives) = capacites_effectives()
             && let Some((nom, usage)) = premiere_capacite_absente(effectives)
         {
             return Some(motifs::capacite_absente(nom, usage));
         }
         for (bin, usage) in motifs::PREREQUIS {
-            if !binary_exists(bin) {
+            if !binaire_present(bin) {
                 return Some(motifs::binaire_absent(bin, usage));
             }
         }
-        if std::env::current_exe().is_err() {
+        if !exe_connu() {
             return Some(motifs::exe_introuvable());
         }
         None
@@ -5175,6 +5238,162 @@ mod linux {
     }
 }
 
+/// Le contrat de `check` sans banc, sur les deux hotes et sans privilege.
+///
+/// # Le trou qu'il ferme
+///
+/// Releve le 30/09/2026 a la verification du retrait de CAP_SYS_ADMIN, puis
+/// rejoue sur `4ab3f22`: le `skipped` du chemin sans banc de `linux::run_all()`
+/// change en `passed` (mutation L4), les suites entieres restent vertes sur
+/// dev-windows (ou ce code n'etait pas compile) comme sur `essai-linux` (ou
+/// aucune recette ne le lisait). `bifrost-cli check` par le service aurait
+/// alors annonce PASSED pour neuf vecteurs jamais mesures, et seul le banc
+/// root `e2e-linux.sh --unite`, hors CI, l'aurait vu.
+///
+/// Ce module garde [`rapport_sans_banc`] partout; `tests_linux` y ajoute
+/// chaque raison reelle de ne pas monter le banc, et `linux::run_all()`
+/// lui-meme sous un compte ordinaire.
+#[cfg(test)]
+mod tests_sans_banc {
+    use super::*;
+    use bifrost_core::checks::Verdict;
+
+    /// Ce qui s'ecarte du contrat dans `rapport`, une ligne par ecart; vide si
+    /// le contrat tient.
+    ///
+    /// Les vecteurs sont relus dans [`CheckVector::ALL`] a chaque appel: un
+    /// vecteur ajoute a la liste y est exige sans qu'on touche a cette garde.
+    pub(super) fn ecarts(
+        rapport: &CheckReport,
+        raison: &str,
+        doh_attendu: &CheckOutcome,
+    ) -> Vec<String> {
+        let mut ecarts = Vec::new();
+        if rapport.outcomes.len() != CheckVector::ALL.len() {
+            ecarts.push(format!(
+                "{} verdicts pour {} vecteurs",
+                rapport.outcomes.len(),
+                CheckVector::ALL.len()
+            ));
+        }
+        for v in CheckVector::ALL {
+            let siens: Vec<&CheckOutcome> =
+                rapport.outcomes.iter().filter(|o| o.vector == v).collect();
+            match siens.as_slice() {
+                [] => ecarts.push(format!("{}: absent du rapport", v.id())),
+                [o] if v == CheckVector::DohBypass => {
+                    if *o != doh_attendu {
+                        ecarts.push(format!(
+                            "doh-bypass ne rend pas son propre verdict: {o:?}, attendu {doh_attendu:?}"
+                        ));
+                    }
+                }
+                [o] => {
+                    if o.verdict != Verdict::Skipped {
+                        ecarts.push(format!("{}: {:?} sans avoir ete mesure", v.id(), o.verdict));
+                    }
+                    if o.detail != raison {
+                        ecarts.push(format!(
+                            "{}: raison [{}], attendue [{raison}]",
+                            v.id(),
+                            o.detail
+                        ));
+                    }
+                }
+                plusieurs => ecarts.push(format!("{}: {} verdicts", v.id(), plusieurs.len())),
+            }
+        }
+        ecarts
+    }
+
+    /// Un verdict de `doh-bypass` fabrique, preuve comprise, que le rapport
+    /// doit rendre TEL QUEL. Sa raison n'est jamais celle du saut: un
+    /// `doh-bypass` saute avec les autres ne peut pas passer pour lui.
+    pub(super) fn doh_fabrique(verdict: Verdict) -> CheckOutcome {
+        CheckOutcome {
+            vector: CheckVector::DohBypass,
+            verdict,
+            detail: format!("verdict propre de doh-bypass, {verdict:?}"),
+            evidence: vec![format!("releve de doh-bypass, {verdict:?}")],
+        }
+    }
+
+    /// Le contrat, pour deux raisons et chaque verdict de `doh-bypass`.
+    ///
+    /// Les raisons reelles sont celles de `linux::motifs`, que seul Linux
+    /// compile; `tests_linux` les eprouve une par une. Ici deux raisons
+    /// quelconques suffisent, la fonction ne lisant la sienne que pour la
+    /// recopier: ce qui compte est que la recette tourne AUSSI sur dev-windows.
+    #[test]
+    fn sans_banc_chaque_vecteur_saute_avec_sa_raison_et_doh_bypass_conclut_seul() {
+        let raisons = [
+            motifs_portables::plateforme_sans_harnais("un systeme d'essai"),
+            "une raison quelconque, rendue mot pour mot".to_owned(),
+        ];
+        for raison in &raisons {
+            for verdict in [Verdict::Passed, Verdict::Failed, Verdict::Skipped] {
+                let attendu = doh_fabrique(verdict);
+                let rapport = rapport_sans_banc(raison, || attendu.clone());
+                let vus = ecarts(&rapport, raison, &attendu);
+                assert!(
+                    vus.is_empty(),
+                    "check sans banc ne tient pas son contrat (raison [{raison}], doh-bypass \
+                     {verdict:?}):\n  {}",
+                    vus.join("\n  ")
+                );
+            }
+        }
+    }
+
+    /// La garde sait rougir: chaque violation du contrat, fabriquee sur un
+    /// rapport juste, est vue. Falsification en dur, gardee pour toujours.
+    #[test]
+    fn la_garde_du_contrat_voit_chaque_violation() {
+        let raison = motifs_portables::plateforme_sans_harnais("un systeme d'essai");
+        let doh = doh_fabrique(Verdict::Failed);
+        let juste = rapport_sans_banc(&raison, || doh.clone());
+        assert_eq!(ecarts(&juste, &raison, &doh), Vec::<String>::new());
+
+        let modifie = |f: &dyn Fn(&mut Vec<CheckOutcome>)| {
+            let mut outcomes = juste.outcomes.clone();
+            f(&mut outcomes);
+            ecarts(&CheckReport::new(outcomes), &raison, &doh)
+        };
+        let premier_autre = juste
+            .outcomes
+            .iter()
+            .position(|o| o.vector != CheckVector::DohBypass)
+            .expect("au moins un vecteur autre que doh-bypass");
+        let violations: [(&str, Vec<String>); 5] = [
+            (
+                "un vecteur non mesure rendu PASSED",
+                modifie(&|o| o[premier_autre].verdict = Verdict::Passed),
+            ),
+            (
+                "une raison perdue",
+                modifie(&|o| o[premier_autre].detail.clear()),
+            ),
+            (
+                "un vecteur absent",
+                modifie(&|o| {
+                    o.remove(premier_autre);
+                }),
+            ),
+            (
+                "un vecteur rendu deux fois",
+                modifie(&|o| o.push(o[premier_autre].clone())),
+            ),
+            (
+                "doh-bypass saute avec les autres",
+                ecarts(&all_skipped(&raison), &raison, &doh),
+            ),
+        ];
+        for (nom, vus) in violations {
+            assert!(!vus.is_empty(), "violation non vue par la garde: {nom}");
+        }
+    }
+}
+
 #[cfg(all(test, windows))]
 mod tests_windows {
     use super::*;
@@ -5369,6 +5588,12 @@ mod tests_windows {
 /// declencher le second. Voir [`linux::motifs`] pour le chemin retenu: les
 /// motifs sont rendus par les fonctions que le produit appelle lui-meme, sans
 /// monter de banc.
+///
+/// Une recette lit `linux::run_all()` quand meme, et pour autre chose que les
+/// motifs: `sans_privilege_run_all_tient_le_contrat_sans_banc` y eprouve le
+/// CONTRAT du chemin sans banc, sous un compte ordinaire seulement, la ou
+/// `run_all` rend avant de monter quoi que ce soit; sous root elle s'abstient
+/// sans l'appeler.
 ///
 /// # Ce qui n'est pas repris de Windows, et pourquoi
 ///
@@ -5583,6 +5808,141 @@ mod tests_linux {
         assert!(
             catalogue.contains(&raison),
             "motif de prerequis hors catalogue, donc garde par rien: [{raison}]"
+        );
+    }
+
+    /// Le contrat de `check` sans banc pour CHAQUE raison de ne pas le monter,
+    /// chacune rendue par l'etat de machine qui la produit.
+    ///
+    /// Les etats sont tires des tables du produit (`CAPACITES`, `PREREQUIS`):
+    /// une capacite ou un outil ajoute y est eprouve sans toucher a cette
+    /// recette. Chaque etat rend aussi fausses les questions SUIVANTES, pour que
+    /// l'ordre soit garde: pas root l'emporte sur tout, une capacite absente
+    /// sur un outil absent, un outil absent sur le chemin du binaire.
+    #[test]
+    fn chaque_raison_de_ne_pas_monter_le_banc_tient_le_contrat() {
+        use super::tests_sans_banc::{doh_fabrique, ecarts};
+        use bifrost_core::checks::Verdict;
+        use linux::motifs;
+
+        let aucun = |_: &str| false;
+        let tous = |_: &str| true;
+        let usage_de = |cherche: &str| {
+            motifs::CAPACITES
+                .iter()
+                .find(|(_, nom, _)| *nom == cherche)
+                .map(|(_, _, usage)| *usage)
+                .unwrap_or_else(|| panic!("{cherche} absente de la table"))
+        };
+        let mut cas: Vec<(String, Option<String>, String)> = vec![(
+            "pas root, rien d'autre non plus".to_owned(),
+            linux::prerequis_manquant(false, || Some(0), aucun, || false),
+            motifs::exige_root(),
+        )];
+        for (numero, nom, usage) in motifs::CAPACITES {
+            cas.push((
+                format!("root sans {nom}, sans outil"),
+                linux::prerequis_manquant(true, || Some(!(1u64 << numero)), aucun, || false),
+                motifs::capacite_absente(nom, usage),
+            ));
+        }
+        // Le service tel que l'unite livree le lance: CapEff 0x14e1, releve le
+        // 30/09/2026 sur le daemon vivant, sans CAP_SYS_ADMIN ni CAP_NET_RAW.
+        // Tout le reste est la: c'est CAP_SYS_ADMIN que `check` doit nommer.
+        cas.push((
+            "le service de l'unite livree".to_owned(),
+            linux::prerequis_manquant(true, || Some(0x14e1), tous, || true),
+            motifs::capacite_absente("CAP_SYS_ADMIN", usage_de("CAP_SYS_ADMIN")),
+        ));
+        cas.push((
+            "root, statut illisible, sans outil".to_owned(),
+            linux::prerequis_manquant(true, || None, aucun, || false),
+            motifs::binaire_absent(motifs::PREREQUIS[0].0, motifs::PREREQUIS[0].1),
+        ));
+        for (bin, usage) in motifs::PREREQUIS {
+            cas.push((
+                format!("root, toutes les capacites, sans {bin}"),
+                linux::prerequis_manquant(true, || Some(u64::MAX), |b| b != bin, || false),
+                motifs::binaire_absent(bin, usage),
+            ));
+        }
+        cas.push((
+            "root, tout sauf le chemin du binaire".to_owned(),
+            linux::prerequis_manquant(true, || Some(u64::MAX), tous, || false),
+            motifs::exe_introuvable(),
+        ));
+        assert_eq!(
+            linux::prerequis_manquant(true, || Some(u64::MAX), tous, || true),
+            None,
+            "tout est la: le banc doit se monter, ce n'est plus le chemin sans banc"
+        );
+
+        for (etat, rendue, attendue) in &cas {
+            assert_eq!(
+                rendue.as_deref(),
+                Some(attendue.as_str()),
+                "{etat}: ce n'est pas la raison de ne pas monter le banc"
+            );
+            for verdict in [Verdict::Passed, Verdict::Failed, Verdict::Skipped] {
+                let doh = doh_fabrique(verdict);
+                let rapport = rapport_sans_banc(attendue, || doh.clone());
+                let vus = ecarts(&rapport, attendue, &doh);
+                assert!(
+                    vus.is_empty(),
+                    "{etat}, doh-bypass {verdict:?}: check sans banc ne tient pas son \
+                     contrat:\n  {}",
+                    vus.join("\n  ")
+                );
+            }
+        }
+    }
+
+    /// Le masque que `missing_prerequisite` lit se lit, sans privilege.
+    ///
+    /// Un statut illisible ne conclut rien (`prerequis_manquant`): le banc est
+    /// alors tente, et dans le service il echoue pour tous les vecteurs,
+    /// `doh-bypass` compris, sans nommer CAP_SYS_ADMIN. Tout processus Linux
+    /// porte ce champ, root ou non.
+    #[test]
+    fn le_masque_effectif_du_processus_se_lit() {
+        assert!(
+            linux::capacites_effectives().is_some(),
+            "CapEff illisible dans /proc/self/status: check par le service ne nommerait \
+             plus la capacite absente"
+        );
+    }
+
+    /// Le chemin REEL: `linux::run_all()` sous un compte ordinaire.
+    ///
+    /// Les recettes voisines eprouvent `rapport_sans_banc` et
+    /// `prerequis_manquant`; celle-ci, que `run_all` passe par eux. Sans
+    /// privilege, le premier prerequis manque et `run_all` rend avant de toucher
+    /// a quoi que ce soit: ni namespace, ni capture, ni kill switch. C'est le
+    /// cas du job `controles` de la CI et de l'hote d'essai. Sous root,
+    /// `run_all` monterait le banc: la recette s'abstient alors SANS l'appeler,
+    /// et l'uid est lu par elle, pas par le code qu'elle eprouve.
+    #[test]
+    fn sans_privilege_run_all_tient_le_contrat_sans_banc() {
+        use super::tests_sans_banc::ecarts;
+        // SAFETY: geteuid ne prend aucun argument, ne dereference aucun
+        // pointeur et ne peut pas echouer; l'appel est toujours defini.
+        if unsafe { libc::geteuid() } == 0 {
+            println!(
+                "SKIPPED sans_privilege_run_all_tient_le_contrat_sans_banc: ce test tourne \
+                 sous root, ou run_all monterait le banc; il ne l'appelle pas"
+            );
+            return;
+        }
+        let rapport = linux::run_all();
+        let vus = ecarts(
+            &rapport,
+            &linux::motifs::exige_root(),
+            &doh_fichiers::vecteur(),
+        );
+        assert!(
+            vus.is_empty(),
+            "check sans privilege ne tient pas son contrat:\n  {}",
+            vus.join("\n  ")
         );
     }
 
