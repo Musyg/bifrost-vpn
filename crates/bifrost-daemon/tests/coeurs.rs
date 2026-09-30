@@ -18,56 +18,75 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use bifrost_daemon::coeurs::doublure::Configuration;
+use bifrost_daemon::coeurs::doublure::{self, Essai, Gabarit};
 use bifrost_daemon::coeurs::lancement::Lancement;
-use bifrost_daemon::coeurs::{alea, clash, port, superviseur};
+use bifrost_daemon::coeurs::{clash, port, superviseur};
 use bifrost_evasion::Coeur;
 
 fn binaire_du_daemon() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_bifrost-daemon"))
 }
 
-/// Prepare une doublure prete a lancer.
+/// La doublure que montent les recettes de ce fichier.
 ///
-/// Rend AUSSI la reservation de son port, que l'appelant doit liberer juste
-/// avant le lancement: la garder jusqu'a la fin de sa portee empecherait la
-/// doublure de lier, et la relacher trop tot rouvrirait la course que
-/// [`port`] existe pour fermer.
-fn doublure(repertoire: &std::path::Path) -> (Lancement, String, port::Reservation) {
-    let reserve = port::reserver().unwrap();
-    let port = reserve.port();
-    let secret = alea::secret().unwrap();
-    let config = repertoire.join("doublure.json");
-    std::fs::write(
-        &config,
-        serde_json::to_string(&Configuration {
-            port,
-            secret: secret.clone(),
-            // Le selecteur que `un_coeur_demarre_repond_bascule_puis_meurt`
-            // pilote, avec la sortie qu'il demande.
-            //
-            // Il a fallu l'ecrire le 20 aout 2026, et le motif vaut d'etre
-            // garde: jusque-la la doublure repondait 204 a tout `PUT
-            // /proxies/`, sans selecteur ni sortie. L'assertion "la bascule
-            // doit aboutir" de cette recette passait donc contre un serveur
-            // qui n'avait rien a basculer - elle ne mesurait que la politesse
-            // du client. Des que la doublure a commence a refuser ce qu'un
-            // vrai coeur refuse, la recette est devenue rouge, ce qui est le
-            // bon sens de la marche.
-            selecteur: "select".to_owned(),
-            sorties: vec!["reality".to_owned(), "hy2".to_owned()],
-        })
-        .unwrap(),
-    )
-    .unwrap();
-    let lancement = Lancement {
+/// Elle se monte et se lance par [`doublure::lancer_sauf_vol`] ou
+/// [`doublure::demarrer_sauf_vol`], jamais a la main: son port y est reserve,
+/// rendu a l'instant du lancement, et un nouvel essai n'a lieu que si la
+/// doublure a PROUVE que ce port lui a ete pris avant son `bind`. Toute autre
+/// panne de demarrage rougit au premier essai, avec le temoin de la doublure.
+fn gabarit() -> Gabarit {
+    Gabarit {
         programme: binaire_du_daemon(),
-        arguments: vec!["--faux-coeur".into(), config.clone().into()],
-        configuration: config,
-        api_clash: Some(port),
-        utilisateur: None,
-    };
-    (lancement, secret, reserve)
+        // Le selecteur que `un_coeur_demarre_repond_bascule_puis_meurt`
+        // pilote, avec la sortie qu'il demande.
+        //
+        // Il a fallu l'ecrire le 20 aout 2026, et le motif vaut d'etre
+        // garde: jusque-la la doublure repondait 204 a tout `PUT
+        // /proxies/`, sans selecteur ni sortie. L'assertion "la bascule
+        // doit aboutir" de cette recette passait donc contre un serveur
+        // qui n'avait rien a basculer - elle ne mesurait que la politesse
+        // du client. Des que la doublure a commence a refuser ce qu'un
+        // vrai coeur refuse, la recette est devenue rouge, ce qui est le
+        // bon sens de la marche.
+        selecteur: "select".to_owned(),
+        sorties: vec!["reality".to_owned(), "hy2".to_owned()],
+    }
+}
+
+/// Demarre une doublure par le superviseur; rend aussi la duree du SEUL
+/// demarrage qui a abouti ou echoue en dernier, pour que les recettes qui
+/// bornent un delai ne comptent pas les essais qu'un vol de port a couts.
+async fn demarrer_doublure(
+    rep: &std::path::Path,
+    coeur: Coeur,
+    secret_impose: Option<&str>,
+    sans_api: bool,
+) -> (Result<(superviseur::CoeurEnCours, Essai), String>, Duration) {
+    let mut duree = Duration::ZERO;
+    let issue = doublure::demarrer_sauf_vol(rep, &gabarit(), async |e: &Essai| {
+        let mut lancement = e.lancement.clone();
+        if sans_api {
+            lancement.api_clash = None;
+        }
+        let debut = Instant::now();
+        let r = superviseur::demarrer(coeur, &lancement, secret_impose.unwrap_or(&e.secret)).await;
+        duree = debut.elapsed();
+        r.map_err(|x| format!("{x:#}"))
+    })
+    .await;
+    (issue, duree)
+}
+
+/// Lance une doublure par l'atelier, depuis un fil sans runtime.
+fn lancer_par_l_atelier(
+    rep: &std::path::Path,
+    poignee: &bifrost_daemon::coeurs::atelier::Poignee,
+    socks: SocketAddr,
+) -> Result<bifrost_daemon::coeurs::atelier::Vivant, String> {
+    doublure::lancer_sauf_vol(rep, &gabarit(), |e| {
+        poignee.lancer(Coeur::SingBox, e.lancement.clone(), &e.secret, socks)
+    })
+    .map(|(vivant, _)| vivant)
 }
 
 /// Une adresse SOCKS plausible pour un coeur. Personne n'ecoute derriere: ce
@@ -118,14 +137,9 @@ fn vivant(pid: u32) -> bool {
 #[tokio::test]
 async fn un_coeur_demarre_repond_bascule_puis_meurt() {
     let rep = repertoire_temporaire("cycle");
-    let (lancement, secret, reserve) = doublure(&rep);
-    let port = reserve.port();
-
-    // Rendu a l'instant ou la doublure va le prendre.
-    reserve.liberer();
-    let en_cours = superviseur::demarrer(Coeur::SingBox, &lancement, &secret)
-        .await
-        .expect("la doublure doit demarrer");
+    let (issue, _) = demarrer_doublure(&rep, Coeur::SingBox, None, false).await;
+    let (en_cours, essai) = issue.expect("la doublure doit demarrer");
+    let port = essai.port;
 
     let pid = en_cours.pid().expect("le coeur doit avoir un pid");
     assert!(vivant(pid), "le coeur n'est pas la apres demarrage");
@@ -157,18 +171,16 @@ async fn un_mauvais_secret_echoue_tot_et_ne_fait_pas_attendre_l_echeance() {
     // repond deja, mais refuse notre secret, ferait passer une erreur de
     // configuration pour une lenteur de demarrage.
     let rep = repertoire_temporaire("secret");
-    let (lancement, _bon, reserve) = doublure(&rep);
-    // Rendu a l'instant ou la doublure va le prendre.
-    reserve.liberer();
-
-    let debut = Instant::now();
-    let erreur = superviseur::demarrer(Coeur::SingBox, &lancement, "mauvais-secret")
-        .await
-        .expect_err("un secret errone doit echouer");
-    let ecoule = debut.elapsed();
+    // Le refus du secret n'est pas un vol: la doublure a lie son port, et
+    // l'erreur est rendue au premier essai.
+    let (issue, ecoule) =
+        demarrer_doublure(&rep, Coeur::SingBox, Some("mauvais-secret"), false).await;
+    let Err(erreur) = issue else {
+        panic!("un secret errone doit echouer");
+    };
 
     assert!(
-        format!("{erreur}").contains("refuse le secret"),
+        erreur.contains("refuse le secret"),
         "message inattendu: {erreur}"
     );
     assert!(
@@ -246,22 +258,17 @@ fn lancer_parent(rep: &std::path::Path, avec_garde: bool) -> FauxParent {
     lancer_parent_sous(rep, avec_garde, None)
 }
 
-/// Combien de fois retenter une mise en place ratee par une course
-/// d'environnement.
+/// Le petit-enfant peut perdre son port entre sa liberation par la recette et
+/// son propre `bind`, et sortir a la naissance: ce n'est pas la propriete
+/// d'anti-orphelin que la recette mesure, c'est un echec de MISE EN PLACE.
 ///
-/// Le port reserve est LIBERE juste avant que le petit-enfant ne le relie, et
-/// `coeurs/port.rs` documente cette fenetre comme non fermable sans passer le
-/// descripteur deja lie, ce qu'aucun coeur tiers n'accepte. Sous une forte
-/// pression sur la plage ephemere, le bind du petit-enfant peut perdre son port
-/// et il sort a la naissance: ce n'est pas la propriete d'anti-orphelin que la
-/// recette mesure, c'est un echec de MISE EN PLACE. On la retente donc, avec
-/// une reservation fraiche, un nombre borne de fois. Un echec PERSISTANT (un
-/// vrai defaut, ou une falsification de la borne) epuise les essais et rougit
-/// en nommant la cause. Une tempete artificielle sur la plage ephemere,
-/// mesuree sur essai-linux le 05/09/2026, reproduisait cet echec 1 fois sur
-/// 60 sans cette reprise, 0 avec.
-const ESSAIS_DEMARRAGE: u32 = 5;
-
+/// Jusqu'au 30/09/2026 on retentait TOUT echec de demarrage, cinq fois, sans
+/// savoir s'il venait d'un vol de port ou d'un vrai defaut: un defaut qui ne
+/// se montre qu'une fois sur deux passait au deuxieme essai. Depuis, le nouvel
+/// essai n'a lieu que si la doublure a ecrit que son port lui a ete pris
+/// ([`doublure::Liaison::PortPris`]), par [`doublure::lancer_sauf_vol`];
+/// toute autre panne rougit au premier essai, avec la plainte du parent et le
+/// temoin de la doublure.
 fn lancer_parent_sous(
     rep: &std::path::Path,
     avec_garde: bool,
@@ -269,20 +276,14 @@ fn lancer_parent_sous(
 ) -> FauxParent {
     use std::io::{BufRead, BufReader, Read};
 
-    let mut derniere_plainte = String::from("aucun essai");
-    for essai in 1..=ESSAIS_DEMARRAGE {
-        // Une reservation FRAICHE a chaque essai: si le port precedent a ete
-        // vole, celui-ci en obtient un autre.
-        let (lancement, secret, reserve) = doublure(rep);
-        let api = SocketAddr::from(([127, 0, 0, 1], reserve.port()));
-        let config = lancement.configuration;
-        // Rendu a l'instant ou la doublure va le prendre.
-        reserve.liberer();
+    let issue = doublure::lancer_sauf_vol(rep, &gabarit(), |essai| {
+        let api = SocketAddr::from(([127, 0, 0, 1], essai.port));
+        let config = &essai.lancement.configuration;
 
         let mut commande = std::process::Command::new(binaire_du_daemon());
         commande
             .arg("--faux-parent")
-            .arg(&config)
+            .arg(config)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
         if !avec_garde {
@@ -300,16 +301,16 @@ fn lancer_parent_sous(
             .read_line(&mut ligne)
             .unwrap();
         if let Ok(petit_enfant) = ligne.trim().parse::<u32>() {
-            return FauxParent {
+            return Ok(FauxParent {
                 processus: parent,
                 petit_enfant,
                 api,
-                secret,
-            };
+                secret: essai.secret.clone(),
+            });
         }
         // Pas de pid: le parent a echoue AVANT d'annoncer, et a deja tue son
-        // petit-enfant rate (voir `doublure::parent`). On note pourquoi et on
-        // retente.
+        // petit-enfant rate (voir `doublure::parent`). Sa plainte est rendue
+        // au juge, qui ne retente que sur vol prouve.
         let statut = parent
             .wait()
             .map(|s| s.to_string())
@@ -318,15 +319,15 @@ fn lancer_parent_sous(
         if let Some(mut flux) = parent.stderr.take() {
             let _ = flux.read_to_string(&mut plainte);
         }
-        derniere_plainte = format!(
-            "essai {essai}/{ESSAIS_DEMARRAGE}, statut {statut}: {}",
-            plainte.trim()
-        );
+        Err(format!("statut {statut}: {}", plainte.trim()))
+    });
+    match issue {
+        Ok((faux_parent, _)) => faux_parent,
+        Err(raison) => panic!(
+            "le parent n'a annonce aucun pid: echec de demarrage du petit-enfant, la garde \
+             n'est pas en cause. {raison}"
+        ),
     }
-    panic!(
-        "le parent n'a annonce aucun pid en {ESSAIS_DEMARRAGE} essais: echec de demarrage du \
-         petit-enfant, la garde n'est pas en cause. Derniere plainte: {derniere_plainte}"
-    );
 }
 
 fn tuer_brutalement(parent: &mut std::process::Child) {
@@ -563,15 +564,8 @@ async fn un_coeur_sans_api_clash_demarre_sans_rien_attendre() {
     // AmneziaWG n'expose pas d'API Clash. Attendre une reponse de sa part
     // bloquerait jusqu'a l'echeance sur un coeur pourtant sain.
     let rep = repertoire_temporaire("sans-api");
-    let (mut lancement, secret, reserve) = doublure(&rep);
-    lancement.api_clash = None;
-    // Rendu a l'instant ou la doublure va le prendre.
-    reserve.liberer();
-
-    let debut = Instant::now();
-    let en_cours = superviseur::demarrer(Coeur::AmneziaWg, &lancement, &secret)
-        .await
-        .expect("un coeur sans API doit demarrer");
+    let (issue, ecoule) = demarrer_doublure(&rep, Coeur::AmneziaWg, None, true).await;
+    let (en_cours, _) = issue.expect("un coeur sans API doit demarrer");
     // Comparer a l'echeance que l'on refuse d'attendre, comme les deux autres
     // recettes de ce fichier, et NON a une constante en dur.
     //
@@ -583,7 +577,6 @@ async fn un_coeur_sans_api_clash_demarre_sans_rien_attendre() {
     // regression existe. Mesure du 17 aout 2026: echec a plus de deux
     // secondes, dans une cible entiere bouclee en 5,3 s, donc tres loin des
     // dix secondes qu'une vraie attente de l'API aurait coutees.
-    let ecoule = debut.elapsed();
     assert!(
         ecoule < superviseur::BUDGET_DEMARRAGE,
         "le demarrage a pris {ecoule:?}, soit l'echeance entiere: le coeur \
@@ -614,11 +607,8 @@ async fn un_coeur_sans_api_clash_demarre_sans_rien_attendre() {
 #[test]
 fn l_atelier_lance_un_vrai_coeur_depuis_un_fil_synchrone() {
     let rep = repertoire_temporaire("atelier-cycle");
-    let (lancement, secret, reserve) = doublure(&rep);
     let socks_tenu = socks_fictif();
     let adresse_socks = socks_tenu.adresse();
-    // Rendu a l'instant ou la doublure va le prendre.
-    reserve.liberer();
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -628,9 +618,9 @@ fn l_atelier_lance_un_vrai_coeur_depuis_un_fil_synchrone() {
     runtime.spawn(tache);
 
     // Le fil du superviseur de tunnel: pas de runtime, il bloque.
+    let rep_du_fil = rep.clone();
     let fil = std::thread::spawn(move || {
-        let lance = poignee
-            .lancer(Coeur::SingBox, lancement, &secret, adresse_socks)
+        let lance = lancer_par_l_atelier(&rep_du_fil, &poignee, adresse_socks)
             .expect("la doublure doit se lancer par l'atelier");
         let pid = lance.pid.expect("un coeur lance a un pid");
         assert!(vivant(pid), "le processus doit tourner");
@@ -678,11 +668,8 @@ fn tuer(pid: u32) {
 #[test]
 fn un_coeur_qui_meurt_tout_seul_est_depublie() {
     let rep = repertoire_temporaire("mort-solitaire");
-    let (lancement, secret, reserve) = doublure(&rep);
     let socks_tenu = socks_fictif();
     let socks = socks_tenu.adresse();
-    // Rendu a l'instant ou la doublure va le prendre.
-    reserve.liberer();
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -695,9 +682,9 @@ fn un_coeur_qui_meurt_tout_seul_est_depublie() {
     // fermerait le canal de l'atelier, qui arreterait le coeur en partant. La
     // recette mesurerait alors sa propre sortie plutot qu'une mort subie.
     let pour_le_fil = poignee.clone();
+    let rep_du_fil = rep.clone();
     let fil = std::thread::spawn(move || {
-        pour_le_fil
-            .lancer(Coeur::SingBox, lancement, &secret, socks)
+        lancer_par_l_atelier(&rep_du_fil, &pour_le_fil, socks)
             .expect("la doublure doit se lancer")
             .pid
             .expect("un coeur lance a un pid")
@@ -746,12 +733,7 @@ fn un_coeur_qui_meurt_tout_seul_est_depublie() {
 #[test]
 fn un_second_lancement_arrete_le_premier() {
     let rep = repertoire_temporaire("atelier-un-seul");
-    let (premier, secret_a, reserve_a) = doublure(&rep);
     let rep_b = repertoire_temporaire("atelier-un-seul-b");
-    let (second, secret_b, reserve_b) = doublure(&rep_b);
-    // Rendus a l'instant ou les doublures vont les prendre.
-    reserve_a.liberer();
-    reserve_b.liberer();
     let (tenu_a, tenu_b) = (socks_fictif(), socks_fictif());
     let (socks_a, socks_b) = (tenu_a.adresse(), tenu_b.adresse());
     assert_ne!(socks_a, socks_b, "deux coeurs, deux adresses");
@@ -763,12 +745,11 @@ fn un_second_lancement_arrete_le_premier() {
     let (poignee, _coeur_actif, tache) = bifrost_daemon::coeurs::atelier::ouvrir();
     runtime.spawn(tache);
 
+    let (rep_a_du_fil, rep_b_du_fil) = (rep.clone(), rep_b.clone());
     let fil = std::thread::spawn(move || {
-        let a = poignee
-            .lancer(Coeur::SingBox, premier, &secret_a, socks_a)
+        let a = lancer_par_l_atelier(&rep_a_du_fil, &poignee, socks_a)
             .expect("le premier coeur doit se lancer");
-        let b = poignee
-            .lancer(Coeur::SingBox, second, &secret_b, socks_b)
+        let b = lancer_par_l_atelier(&rep_b_du_fil, &poignee, socks_b)
             .expect("le second coeur doit se lancer");
         poignee.arreter().expect("l'arret doit aboutir");
         (a.pid.unwrap(), b.pid.unwrap())
@@ -813,11 +794,8 @@ fn arreter_sans_coeur_en_cours_reussit() {
 #[test]
 fn l_atelier_publie_le_coeur_actif_et_le_retire_a_l_arret() {
     let rep = repertoire_temporaire("atelier-publication");
-    let (lancement, secret, reserve) = doublure(&rep);
     let socks_tenu = socks_fictif();
     let socks = socks_tenu.adresse();
-    // Rendu a l'instant ou la doublure va le prendre.
-    reserve.liberer();
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -832,10 +810,10 @@ fn l_atelier_publie_le_coeur_actif_et_le_retire_a_l_arret() {
         "rien ne doit etre publie avant qu'un coeur tourne"
     );
 
+    let rep_du_fil = rep.clone();
     let apres = std::thread::spawn(move || {
-        let vivant = poignee
-            .lancer(Coeur::SingBox, lancement, &secret, socks)
-            .expect("la doublure doit se lancer");
+        let vivant =
+            lancer_par_l_atelier(&rep_du_fil, &poignee, socks).expect("la doublure doit se lancer");
         let pendant = *coeur_actif.borrow();
         poignee.arreter().expect("l'arret doit aboutir");
         (pendant, *coeur_actif.borrow(), vivant.pid)
