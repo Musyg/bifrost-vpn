@@ -23,6 +23,11 @@ pub use ffi::identite_courante;
 /// aucun appel qui ecrive. Voir l'en-tete du module.
 pub mod lecture;
 
+/// Lecture seule des tables IP Helper (routes, lignes d'interface, adresses),
+/// pour `prove routes` sous Windows: sans privilege, sans aucun appel qui
+/// ecrive. Voir l'en-tete du module.
+pub mod lecture_routes;
+
 use std::cell::RefCell;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;

@@ -347,6 +347,42 @@ Ce qui n'est pas prouve:
 MATCH n'est pas une preuve d'etancheite du VPN. Voir
 [D1c.1 dans les specifications](docs/09-souverainete-verifiable.md#d1c1---regles-de-routage-et-routes-linux-par-intention-livrees).
 
+## Comparer les routes et les lignes d'interface, Windows
+
+```powershell
+bifrost-cli --json prove routes --intention intention.json --actif
+```
+
+L'intention Windows dit quel plan le produit a pose. Les sept champs sont
+obligatoires:
+
+```json
+{"schema_version": 1, "plateforme": "windows", "chemin": "wireguard", "interface": "wg0", "mtu": 1420, "familles": ["ipv4", "ipv6"], "destinations": ["10.0.0.0/8", "fd00::/8"]}
+```
+
+`familles` liste les familles adressees par le profil, IPv4 puis IPv6.
+`destinations` porte les prefixes autorises, masques et sous leur forme
+canonique. Pour le chemin par coeur, `chemin` vaut `coeur` et `destinations`
+vaut `null`: le produit pose la route par defaut de chaque famille.
+
+La commande lit deux fois, sans elevation et sans rien changer, les routes,
+les lignes d'interface et les adresses de la table IP Helper, puis compare
+les deux familles:
+- les routes du plan sur l'interface du tunnel, et leur metrique;
+- la metrique de cette interface quand le plan capture la famille;
+- les routes en trop sur le tunnel;
+- les routes d'une autre interface qui gagneraient pour une destination du
+  plan.
+
+Une egalite de metrique effective rend UNMEASURED: Windows la departage par
+l'ordre de liaison en IPv4, par un choix de la pile en IPv6, que la commande
+ne lit pas. `--politique-daemon` prend pour attendu le plan que le daemon
+declare avoir pose.
+
+Le rapport ne porte que des categories et des comptes. MATCH n'est pas une
+preuve d'etancheite du VPN. Voir
+[D1c.3 dans les specifications](docs/09-souverainete-verifiable.md#d1c3---routes-et-lignes-dinterface-windows-ip-helper-livrees).
+
 ## Tester
 
 ### Quota de CI et validation Windows

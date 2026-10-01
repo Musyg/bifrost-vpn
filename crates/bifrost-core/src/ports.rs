@@ -288,16 +288,17 @@ pub trait TunnelDevice: Send {
     /// qu'il le declare a `prove routes --politique-daemon` par la voie du
     /// superviseur.
     ///
-    /// Le peripherique retient, apres la derniere commande reussie de sa pose,
-    /// une seconde evaluation de la fonction pure dont il a tire ses commandes
-    /// (`netcfg::plan`, `aiguillage::plan`), sur la meme configuration: un
-    /// [`Plan`](crate::routage::Plan) egal par construction a celui des
-    /// commandes, pas une capture des commandes elles-memes, ni un plan
-    /// recalcule au moment de la lecture. C'est ce que la preuve compare au
-    /// noyau. Le defaut est
-    /// [`RoutagePose::NonApplicable`]: un peripherique dont la plateforme ne
-    /// pose pas de plan de ce genre (Windows, table IP Helper hors perimetre)
-    /// ou un double de test qui n'en pose pas ne pretend rien avoir pose.
+    /// Sous Linux, le peripherique retient, apres la derniere commande reussie
+    /// de sa pose, une seconde evaluation de la fonction pure dont il a tire
+    /// ses commandes (`netcfg::plan`, `aiguillage::plan`), sur la meme
+    /// configuration: un [`Plan`](crate::routage::Plan) egal par construction a
+    /// celui des commandes, pas une capture des commandes elles-memes, ni un
+    /// plan recalcule au moment de la lecture. Sous Windows, il retient le
+    /// [`PlanWindows`](crate::routage_windows::PlanWindows) dont la pose IP
+    /// Helper vient d'executer chaque appel, apres le dernier appel reussi.
+    /// C'est ce que la preuve compare a la table du systeme. Le defaut est
+    /// [`RoutagePose::NonApplicable`]: un peripherique qui ne pose pas de plan
+    /// de routage, comme un double de test, ne pretend rien avoir pose.
     fn routage_pose(&self) -> RoutagePose {
         RoutagePose::NonApplicable
     }

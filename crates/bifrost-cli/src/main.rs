@@ -18,6 +18,9 @@ mod preuve_nft_linux;
 mod preuve_routes;
 #[cfg(target_os = "linux")]
 mod preuve_routes_linux;
+/// Routes et lignes d'interface: le plan du produit confronte a la table IP
+/// Helper. Pur et compile partout, sauf la collecte, qui est Windows.
+mod preuve_routes_windows;
 mod preuve_wfp;
 mod profile;
 mod render;
@@ -215,29 +218,31 @@ enum CmdPreuve {
         #[arg(long, required = true)]
         actif: bool,
     },
-    /// Linux: compare les regles de routage et les routes du namespace courant
-    /// au plan de routage, soit celui qu'une intention decrit (--intention),
-    /// soit celui que le daemon declare avoir pose (--politique-daemon).
-    /// Lecture seule du noyau, deux fois, sans elevation ni changement; le
-    /// rapport ne porte que des categories et des comptes.
+    /// Compare le routage du systeme au plan de routage, soit celui qu'une
+    /// intention decrit (--intention), soit celui que le daemon declare avoir
+    /// pose (--politique-daemon). Linux: regles et routes du namespace courant.
+    /// Windows: routes et lignes d'interface de la table IP Helper. Lecture
+    /// seule, deux fois, sans elevation ni changement; le rapport ne porte que
+    /// des categories et des comptes.
     Routes {
-        /// Intention de routage v1: schema_version, chemin, interface, fwmark,
-        /// table, coeur_uid. Absente en mode --politique-daemon.
+        /// Linux, intention de routage v1: schema_version, chemin, interface,
+        /// fwmark, table, coeur_uid. Windows, intention Windows v1:
+        /// schema_version, plateforme, chemin, interface, mtu, familles,
+        /// destinations. Absente en mode --politique-daemon.
         #[arg(
             long,
             required_unless_present = "politique_daemon",
             conflicts_with = "politique_daemon"
         )]
         intention: Option<std::path::PathBuf>,
-        /// Linux: l'attendu est le plan de routage que le daemon (--socket)
-        /// declare avoir pose (commande IPC distincte de la declaration du
-        /// pare-feu), relu avant et apres la collecte du noyau, par le lecteur
-        /// commun des declarations. Sous Windows, non applicable sans lecture:
-        /// le jumeau IP Helper est hors de cette tranche.
+        /// L'attendu est le plan de routage que le daemon (--socket) declare
+        /// avoir pose (commande IPC distincte de la declaration du pare-feu),
+        /// relu avant et apres la collecte, par le lecteur commun des
+        /// declarations.
         #[arg(long = "politique-daemon", conflicts_with = "intention")]
         politique_daemon: bool,
-        /// Lecture seule du noyau courant. Exigee pour que la ligne dise que le
-        /// noyau est lu.
+        /// Lecture seule du systeme courant. Exigee pour que la ligne dise que
+        /// le systeme est lu.
         #[arg(long, required = true)]
         actif: bool,
     },
@@ -947,6 +952,15 @@ async fn run(args: Args) -> anyhow::Result<i32> {
                     ..
                 },
         } => {
+            // Sous Windows, le jumeau IP Helper; ailleurs, la preuve Linux, qui
+            // rend un non mesure nomme hors de Linux.
+            #[cfg(windows)]
+            let rapport = if *politique_daemon {
+                preuve_routes_windows::verifier_declaration(&args.socket).await
+            } else {
+                preuve_routes_windows::verifier(intention.as_ref().expect("valide par clap"))
+            };
+            #[cfg(not(windows))]
             let rapport = if *politique_daemon {
                 preuve_routes::verifier_declaration(&args.socket).await
             } else {
@@ -1052,7 +1066,9 @@ async fn run(args: Args) -> anyhow::Result<i32> {
         // sont lues que par `prove nft/wfp/routes --politique-daemon`, avec leur
         // lecteur strict. Les recevoir ici est un daemon qui repond a cote, pas
         // un resultat.
-        Response::DeclarationPareFeu(_) | Response::DeclarationRoutage(_) => {
+        Response::DeclarationPareFeu(_)
+        | Response::DeclarationRoutage(_)
+        | Response::DeclarationRoutageWindows(_) => {
             bail!("reponse inattendue du daemon")
         }
     }

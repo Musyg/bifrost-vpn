@@ -9,7 +9,7 @@
 //!
 //! Tout ce que les deux preuves ont en commun vit ici, et nulle part ailleurs:
 //! - la lecture ([`lire`]): l'identite du serveur exigee AVANT le premier
-//!   octet ([`ServerRequirement::Privileged`]), la requete, un echange borne
+//!   octet ([`EXIGENCE_PREUVE`]), la requete, un echange borne
 //!   dans le temps, l'analyse stricte;
 //! - le protocole ([`encadrer`]): la declaration lue (N1), la mesure propre a
 //!   chaque preuve, la declaration relue (N2), et ce que le rapport en dit
@@ -71,11 +71,17 @@ impl Refus {
 /// La declaration du pare-feu, et le nom de la regle qui a admis son serveur.
 pub(crate) type Lue = (DeclarationPareFeu, &'static str);
 
-/// La declaration du routage, et le nom de la regle qui a admis son serveur.
-/// La mesure du routage est Linux (voir `preuve_routes`); sous Windows la
-/// preuve rend un non applicable sans jamais lire, donc rien ici ne sert.
+/// La declaration du routage Linux, et le nom de la regle qui a admis son
+/// serveur (voir `preuve_routes`).
 #[cfg(target_os = "linux")]
 pub(crate) type LueRoutage = (bifrost_ipc::protocol::DeclarationRoutage, &'static str);
+
+/// La declaration du routage Windows, et le nom de la regle qui a admis son
+/// serveur (voir `preuve_routes_windows`).
+pub(crate) type LueRoutageWindows = (
+    bifrost_ipc::protocol::DeclarationRoutageWindows,
+    &'static str,
+);
 
 pub(crate) const CLES: [&str; 7] = [
     "result",
@@ -89,6 +95,13 @@ pub(crate) const CLES: [&str; 7] = [
 
 pub(crate) const HORS_SCHEMA: &str = "declaration du daemon hors schema";
 
+/// L'exigence d'identite des lectures de preuve, une seule pour les trois
+/// lecteurs (pare-feu, routage Linux, routage Windows): sous Windows, le pipe
+/// de LocalSystem et lui seul, jamais celui des Administrateurs, que la regle
+/// des commandes admet. Gardee par deux recettes: la decision de `bifrost_ipc`
+/// appliquee a cette constante, et une regle de forme sur ce source.
+pub(crate) const EXIGENCE_PREUVE: ServerRequirement = ServerRequirement::Privileged;
+
 /// La lecture des preuves: le serveur doit etre PRIVILEGIE, toujours.
 ///
 /// `--socket` est choisi par l'utilisateur, et n'importe quel processus peut
@@ -100,7 +113,7 @@ pub(crate) const HORS_SCHEMA: &str = "declaration du daemon hors schema";
 /// du service. La regle vit dans `bifrost_ipc`; les deux preuves la reprennent
 /// ici, sans la changer.
 pub(crate) async fn lire(socket: &str) -> Result<Lue, Refus> {
-    lire_avec(socket, DELAI, ServerRequirement::Privileged).await
+    lire_avec(socket, DELAI, EXIGENCE_PREUVE).await
 }
 
 pub(crate) async fn lire_avec(
@@ -118,7 +131,7 @@ pub(crate) async fn lire_avec(
 /// commande et la forme de la reponse sont celles du routage.
 #[cfg(target_os = "linux")]
 pub(crate) async fn lire_routage(socket: &str) -> Result<LueRoutage, Refus> {
-    lire_routage_avec(socket, DELAI, ServerRequirement::Privileged).await
+    lire_routage_avec(socket, DELAI, EXIGENCE_PREUVE).await
 }
 
 #[cfg(target_os = "linux")]
@@ -131,6 +144,28 @@ pub(crate) async fn lire_routage_avec(
         connecter_et_demander(socket, delai, attendu, Command::DeclarationRoutage).await?;
     Ok((
         analyser_routage(&octets).map_err(Refus::Declaration)?,
+        regle,
+    ))
+}
+
+/// La lecture de production de `prove routes --politique-daemon` sous Windows:
+/// la meme commande, le meme tronc commun (identite du serveur exigee avant le
+/// premier octet, echange borne), et l'analyse stricte de la forme Windows.
+#[cfg(windows)]
+pub(crate) async fn lire_routage_windows(socket: &str) -> Result<LueRoutageWindows, Refus> {
+    lire_routage_windows_avec(socket, DELAI, EXIGENCE_PREUVE).await
+}
+
+#[cfg(windows)]
+pub(crate) async fn lire_routage_windows_avec(
+    socket: &str,
+    delai: Duration,
+    attendu: ServerRequirement,
+) -> Result<LueRoutageWindows, Refus> {
+    let (octets, regle) =
+        connecter_et_demander(socket, delai, attendu, Command::DeclarationRoutage).await?;
+    Ok((
+        analyser_routage_windows(&octets).map_err(Refus::Declaration)?,
         regle,
     ))
 }
@@ -239,8 +274,8 @@ fn erreur_declaree(objet: &serde_json::Map<String, Value>) -> Result<(), &'stati
     Ok(())
 }
 
-/// Les cles de la reponse `declaration-routage`, tag `result` compris.
-#[cfg(target_os = "linux")]
+/// Les cles de la reponse `declaration-routage`, tag `result` compris; ce sont
+/// aussi celles de `declaration-routage-windows`.
 pub(crate) const CLES_ROUTAGE: [&str; 6] = [
     "result",
     "schema_version",
@@ -305,6 +340,82 @@ pub(crate) fn analyser_routage(
         },
     };
     if d.schema_version != DECLARATION_ROUTAGE_VERSION
+        || !instance_valide
+        || !coherente
+        || !plan_coherent
+    {
+        return Err(HORS_SCHEMA);
+    }
+    Ok(d)
+}
+
+/// Les cles du sous-objet `plan` de la forme Windows, quand il est present.
+pub(crate) const PLAN_WINDOWS_CLES: [&str; 5] =
+    ["chemin", "interface", "mtu", "familles", "destinations"];
+
+/// Analyse une trame de reponse `declaration-routage-windows`, aussi
+/// strictement que [`analyser_routage`]: cles exactes au niveau superieur ET
+/// dans `plan`, doublons refuses en profondeur, entiers, version, coherence
+/// entre l'etat, le numero et le plan, et entre le chemin et les destinations
+/// (WireGuard en a au moins une, le coeur aucune). Chaque destination est
+/// ecrite sous sa forme canonique, celle que le daemon rend: une autre
+/// graphie du meme prefixe vient d'un autre producteur. Le contenu du plan
+/// (interface, MTU, familles, masquage) est juge ensuite, par le meme lecteur
+/// que l'intention. Rien de ce que la trame contient n'entre dans une raison.
+///
+/// Compilee partout, pour que ses recettes comptent sur les deux hotes; seule
+/// la preuve Windows l'appelle.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn analyser_routage_windows(
+    octets: &[u8],
+) -> Result<bifrost_ipc::protocol::DeclarationRoutageWindows, &'static str> {
+    use bifrost_ipc::protocol::{CheminRoutage, DECLARATION_ROUTAGE_WINDOWS_VERSION, EtatRoutage};
+    let Unique(v) =
+        serde_json::from_slice(octets).map_err(|_| "reponse du daemon tronquee ou illisible")?;
+    let objet = v.as_object().ok_or(HORS_SCHEMA)?;
+    erreur_declaree(objet)?;
+    if objet.len() != CLES_ROUTAGE.len() || CLES_ROUTAGE.iter().any(|c| !objet.contains_key(*c)) {
+        return Err(HORS_SCHEMA);
+    }
+    if let Some(plan) = objet.get("plan").filter(|p| !p.is_null()) {
+        let po = plan.as_object().ok_or(HORS_SCHEMA)?;
+        if po.len() != PLAN_WINDOWS_CLES.len()
+            || PLAN_WINDOWS_CLES.iter().any(|c| !po.contains_key(*c))
+        {
+            return Err(HORS_SCHEMA);
+        }
+        // La graphie de chaque destination, sur la valeur BRUTE: serde lit
+        // `10.1.2.3/8` ou `2001:0db8::/32` sans rien dire.
+        if let Some(liste) = po.get("destinations").and_then(Value::as_array) {
+            for d in liste {
+                let texte = d.as_str().ok_or(HORS_SCHEMA)?;
+                let lu: bifrost_core::config::IpNet = texte.parse().map_err(|_| HORS_SCHEMA)?;
+                if lu.to_string() != texte {
+                    return Err(HORS_SCHEMA);
+                }
+            }
+        }
+    }
+    let d = match serde_json::from_value::<Response>(v) {
+        Ok(Response::DeclarationRoutageWindows(d)) => *d,
+        _ => return Err(HORS_SCHEMA),
+    };
+    let instance_valide = (32..=128).contains(&d.instance.len())
+        && d.instance
+            .bytes()
+            .all(|o| o.is_ascii_digit() || (b'a'..=b'f').contains(&o));
+    let coherente = match d.issue {
+        EtatRoutage::NonApplicable | EtatRoutage::Aucun => d.plan.is_none(),
+        EtatRoutage::Pose => d.application > 0 && d.plan.is_some(),
+    };
+    let plan_coherent = match &d.plan {
+        None => true,
+        Some(p) => match p.chemin {
+            CheminRoutage::Wireguard => p.destinations.as_ref().is_some_and(|l| !l.is_empty()),
+            CheminRoutage::Coeur => p.destinations.is_none(),
+        },
+    };
+    if d.schema_version != DECLARATION_ROUTAGE_WINDOWS_VERSION
         || !instance_valide
         || !coherente
         || !plan_coherent
@@ -610,6 +721,263 @@ mod tests {
         assert_eq!(
             IdentiteDaemon::NonVerifiee.ligne(),
             "identite du daemon: non verifiee\n"
+        );
+    }
+
+    /// L'exigence des preuves, jugee par la decision de `bifrost_ipc` elle-meme,
+    /// celle que le client applique au proprietaire du pipe: LocalSystem admis,
+    /// les Administrateurs refuses (la regle des commandes les admet), tout
+    /// autre proprietaire refuse. Sans privilege: la decision est pure.
+    #[cfg(windows)]
+    #[test]
+    fn l_exigence_des_preuves_n_admet_que_le_pipe_de_localsystem() {
+        use bifrost_ipc::ServerRule;
+        use bifrost_ipc::transport::{PipeOwner, decide_pipe_owner};
+        assert_eq!(
+            decide_pipe_owner(PipeOwner::LocalSystem, EXIGENCE_PREUVE),
+            Ok(ServerRule::WindowsSystemPipeOwner)
+        );
+        assert_eq!(
+            decide_pipe_owner(PipeOwner::Administrators, EXIGENCE_PREUVE),
+            Err(ServerIdentityError::Refused)
+        );
+        assert_eq!(
+            decide_pipe_owner(PipeOwner::Other, EXIGENCE_PREUVE),
+            Err(ServerIdentityError::Refused)
+        );
+    }
+
+    /// La fin d'un litteral qui commence en `i` (chaine, chaine brute, octet,
+    /// caractere), ou `None`. Une duree de vie n'est pas un litteral.
+    fn fin_de_litteral(c: &[char], i: usize) -> Option<usize> {
+        let a = |k: usize| c.get(k).copied();
+        let chaine = |debut: usize| {
+            let mut k = debut + 1;
+            while k < c.len() {
+                match c[k] {
+                    '\\' => k += 2,
+                    '"' => return Some(k + 1),
+                    _ => k += 1,
+                }
+            }
+            Some(c.len())
+        };
+        let caractere = |debut: usize| {
+            if a(debut + 1) == Some('\\') {
+                let mut k = debut + 3;
+                while k < c.len() && c[k] != '\'' {
+                    k += 1;
+                }
+                Some(k + 1)
+            } else if a(debut + 2) == Some('\'') {
+                Some(debut + 3)
+            } else {
+                None
+            }
+        };
+        match (c[i], a(i + 1)) {
+            ('"', _) => chaine(i),
+            ('b', Some('"')) => chaine(i + 1),
+            ('\'', _) => caractere(i),
+            ('b', Some('\'')) => caractere(i + 1),
+            ('r', _) | ('b', Some('r')) => {
+                let mut k = if c[i] == 'r' { i + 1 } else { i + 2 };
+                let mut dieses = 0;
+                while a(k) == Some('#') {
+                    dieses += 1;
+                    k += 1;
+                }
+                if a(k) != Some('"') {
+                    return None;
+                }
+                k += 1;
+                while k < c.len() {
+                    if c[k] == '"' && (1..=dieses).all(|d| a(k + d) == Some('#')) {
+                        return Some(k + 1 + dieses);
+                    }
+                    k += 1;
+                }
+                Some(c.len())
+            }
+            _ => None,
+        }
+    }
+
+    /// Les jetons d'un source Rust, sans commentaires ni litteraux: ce qu'un
+    /// commentaire ou une chaine nomme ne compte pas, ce que le code nomme, si.
+    /// `::` est un jeton; chaque autre ponctuation en est un.
+    fn jetons(source: &str) -> Vec<String> {
+        let c: Vec<char> = source.chars().collect();
+        let mot = |x: char| x.is_ascii_alphanumeric() || x == '_';
+        let mut j = Vec::new();
+        let mut i = 0;
+        while i < c.len() {
+            let suivant = c.get(i + 1).copied();
+            if c[i].is_whitespace() {
+                i += 1;
+            } else if c[i] == '/' && suivant == Some('/') {
+                while i < c.len() && c[i] != '\n' {
+                    i += 1;
+                }
+            } else if c[i] == '/' && suivant == Some('*') {
+                let mut profondeur = 0;
+                while i < c.len() {
+                    if c[i] == '/' && c.get(i + 1) == Some(&'*') {
+                        profondeur += 1;
+                        i += 2;
+                    } else if c[i] == '*' && c.get(i + 1) == Some(&'/') {
+                        profondeur -= 1;
+                        i += 2;
+                        if profondeur == 0 {
+                            break;
+                        }
+                    } else {
+                        i += 1;
+                    }
+                }
+            } else if let Some(fin) = fin_de_litteral(&c, i) {
+                i = fin;
+            } else if mot(c[i]) {
+                let debut = i;
+                while i < c.len() && mot(c[i]) {
+                    i += 1;
+                }
+                j.push(c[debut..i].iter().collect());
+            } else if c[i] == ':' && suivant == Some(':') {
+                j.push("::".to_owned());
+                i += 2;
+            } else {
+                j.push(c[i].to_string());
+                i += 1;
+            }
+        }
+        j
+    }
+
+    /// Les jetons de production: ce qui precede l'unique module de recettes,
+    /// qui doit fermer le fichier.
+    fn production(source: &str) -> Vec<String> {
+        let j = jetons(source);
+        let marque = jetons("#[cfg(test)] mod tests {");
+        let debuts: Vec<usize> = (0..j.len())
+            .filter(|&k| j[k..].starts_with(&marque))
+            .collect();
+        assert_eq!(debuts.len(), 1, "un seul module de recettes");
+        let ouvre = debuts[0] + marque.len() - 1;
+        assert_eq!(
+            fermeture(&j, ouvre),
+            j.len() - 1,
+            "du code suit le module de recettes"
+        );
+        j[..debuts[0]].to_vec()
+    }
+
+    /// L'indice de l'accolade qui ferme celle ouverte en `ouvre`.
+    fn fermeture(j: &[String], ouvre: usize) -> usize {
+        let mut profondeur = 0;
+        for (k, t) in j.iter().enumerate().skip(ouvre) {
+            match t.as_str() {
+                "{" => profondeur += 1,
+                "}" => {
+                    profondeur -= 1;
+                    if profondeur == 0 {
+                        return k;
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("accolade ouverte en {ouvre} jamais fermee")
+    }
+
+    /// Le corps de l'unique `fn nom(`, entre ses accolades.
+    fn corps_de(p: &[String], nom: &str) -> Vec<String> {
+        let debuts: Vec<usize> = (0..p.len().saturating_sub(2))
+            .filter(|&k| p[k] == "fn" && p[k + 1] == nom && p[k + 2] == "(")
+            .collect();
+        assert_eq!(debuts.len(), 1, "fn {nom}");
+        let ouvre = (debuts[0]..p.len())
+            .find(|&k| p[k] == "{")
+            .expect("un corps");
+        p[ouvre + 1..fermeture(p, ouvre)].to_vec()
+    }
+
+    /// Les trois lecteurs de preuve passent l'exigence nommee, et le code ne
+    /// nomme l'exigence d'identite qu'a sa definition: une regle de forme sur
+    /// les jetons de production, commentaires et litteraux retires. Une autre
+    /// exigence passee par un lecteur, ecrite en chemin complet, sous un alias
+    /// ou par une autre constante, un etage qui remplace l'exigence recue, ou
+    /// un client ouvert avec autre chose qu'elle, rougit.
+    #[test]
+    fn les_trois_lecteurs_passent_l_exigence_nommee() {
+        let p = production(include_str!("declaration.rs"));
+        let compte = |texte: &str| {
+            let motif = jetons(texte);
+            (0..p.len()).filter(|&k| p[k..].starts_with(&motif)).count()
+        };
+        assert_eq!(
+            compte("const EXIGENCE_PREUVE: ServerRequirement = ServerRequirement::Privileged;"),
+            1,
+            "la definition de l'exigence"
+        );
+        for (lecteur, appel) in [
+            ("lire", "lire_avec"),
+            ("lire_routage", "lire_routage_avec"),
+            ("lire_routage_windows", "lire_routage_windows_avec"),
+        ] {
+            assert_eq!(
+                corps_de(&p, lecteur),
+                jetons(&format!("{appel}(socket, DELAI, EXIGENCE_PREUVE).await")),
+                "{lecteur}"
+            );
+        }
+        assert_eq!(
+            p.iter().filter(|t| *t == "EXIGENCE_PREUVE").count(),
+            4,
+            "la definition et les trois lecteurs"
+        );
+        // Le type ne se nomme que dans l'import groupe, la definition et les
+        // parametres; sa seule valeur nommee est celle de la definition.
+        for k in (1..p.len()).filter(|&k| p[k] == "ServerRequirement") {
+            let apres = |d: usize| p.get(k + d).map(String::as_str);
+            let admis = match (p[k - 1].as_str(), apres(1)) {
+                ("{" | ",", Some("," | "}")) | (":", Some("=" | "," | ")")) => true,
+                ("=", Some("::")) => apres(2) == Some("Privileged") && apres(3) == Some(";"),
+                _ => false,
+            };
+            assert!(
+                admis,
+                "exigence nommee hors de sa place: {:?}",
+                &p[k.saturating_sub(4)..(k + 4).min(p.len())]
+            );
+        }
+        // L'exigence recue descend telle quelle jusqu'au client: chaque etage la
+        // nomme une fois, pour la transmettre, et aucun ne la remplace.
+        for etage in [
+            "lire_avec",
+            "lire_routage_avec",
+            "lire_routage_windows_avec",
+            "connecter_et_demander",
+        ] {
+            assert_eq!(
+                corps_de(&p, etage)
+                    .iter()
+                    .filter(|t| *t == "attendu")
+                    .count(),
+                1,
+                "{etage} transmet l'exigence recue sans la remplacer"
+            );
+        }
+        assert_eq!(
+            compte("connecter_et_demander(socket, delai, attendu,"),
+            3,
+            "les trois lectures transmettent l'exigence recue"
+        );
+        assert_eq!(compte("connect_verified("), 1, "un seul client");
+        assert_eq!(
+            compte("connect_verified(socket, attendu)"),
+            1,
+            "le client recoit l'exigence passee"
         );
     }
 }

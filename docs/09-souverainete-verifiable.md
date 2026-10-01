@@ -632,16 +632,156 @@ produit. En mode daemon, l'etiquette du produit (`protocol`/`proto 177`) est
 EXIGEE sur les regles et la route du plan: un daemon reel pose avec elle, donc
 une regle ou une route identique a un autre originateur n'est pas la sienne; le
 mode `--intention` l'ignore. Rien pose: le rapport le dit (issue `aucun`), sans
-comparer. Sous Windows, la commande et la preuve rendent un non applicable nomme
-sans lecture (le jumeau IP Helper est hors de cette tranche); hors Linux, ou
-rien du noyau n'est lu, le rapport des deux modes porte `source: null`. Banc
+comparer. Sous Windows, la commande et la preuve passent par le jumeau IP Helper
+(D1c.3, ci-dessous); sur un autre systeme, ou rien n'est lu, le rapport des
+deux modes porte `source: null`. Banc
 jetable a cote d'un daemon reel (`e2e-linux.sh`): correspondance des deux
 familles tunnel monte, encore apres reprise, et aucun plan a comparer apres
 deconnexion, l'hote inchange.
 
+#### D1c.3 - Routes et lignes d'interface Windows (IP Helper), livrees
+
+`bifrost-cli --json prove routes --intention intention.json --actif` et
+`bifrost-cli --json prove routes --politique-daemon --actif`, sous Windows.
+
+Ce que le produit pose. Les deux chemins posent par les memes appels IP
+Helper, sur le LUID de l'interface du tunnel, dans cet ordre: les adresses du
+profil (`CreateUnicastIpAddressEntry`); une ligne d'interface par famille
+adressee (`GetIpInterfaceEntry` puis `SetIpInterfaceEntry`: MTU du profil,
+`DadTransmits` a zero et, seulement quand le plan prend la route par defaut de
+la famille, metrique automatique coupee et metrique a zero); puis les routes
+(`CreateIpForwardEntry2`, prochain saut non specifie, metrique zero).
+WireGuard pose une route par prefixe autorise, masquee et dedoublonnee; le
+chemin par coeur pose la route par defaut de chaque famille adressee sur son
+TUN. C'est le produit qui pose ces routes, pas le coeur, dont l'echappement
+passe par sa socket liee a l'interface physique. Le plan vit dans
+`bifrost_core::routage_windows::PlanWindows`: `wgnt::ipcfg::apply` et `remove`
+en tirent chacun de leurs appels, les memes qu'avant, dans le meme ordre et
+avec les memes champs (recette du plan, appel pour appel), et la preuve le
+reconstruit au meme constructeur. Il n'y a pas de seconde implementation.
+
+L'intention Windows v1 est distincte de celle de Linux, dont `fwmark`,
+`table` et `coeur_uid` n'ont pas de sens ici. Elle porte exactement
+`schema_version` (1), `plateforme` (`windows`), `chemin` (`wireguard` ou
+`coeur`), `interface` (la regle de nom du produit), `mtu` (de 576 a 9000),
+`familles` (`ipv4`, `ipv6`, dans cet ordre, sans doublon, au moins une) et
+`destinations` (WireGuard: au moins un prefixe, masque, sous sa forme
+canonique, sans doublon; coeur: `null`). Champs inconnus ou manquants, cles
+dupliquees, nombres non entiers, version inconnue et forme Linux sont refuses
+avant toute lecture du systeme, avec les plafonds de lecture de D1b.1.
+
+Collecte: l'alias de l'interface du tunnel resolu en LUID
+(`ConvertInterfaceAliasToLuid`), puis les tables des routes
+(`GetIpForwardTable2`), des lignes d'interface (`GetIpInterfaceTable`) et des
+adresses (`GetUnicastIpAddressTable`), toutes interfaces, deux familles. Un
+compte ordinaire les lit: mesure sous un jeton d'integrite moyenne. Aucun appel
+qui cree, retire ou change un objet de la pile IP, ni qui emette sur le
+reseau: le collecteur ne nomme de l'espace IP Helper que ces quatre fonctions
+et la liberation des tables, ce qu'une recette verifie sur son source par des
+listes fermees. Les valeurs d'etat qui
+changent seules (age d'une route, durees de vie) sont laissees. IP Helper n'a
+ni transaction ni generation lisible: la collecte entiere est faite deux fois,
+et deux collectes differentes rendent UNMEASURED.
+
+Comment Windows choisit (Microsoft Learn, "Chapter 10 - TCP/IP End-to-End
+Delivery" et "MIB_IPFORWARD_ROW2", lus le 01/10/2026): le prefixe le plus
+long; a longueur egale, la metrique la plus faible, qui est la somme de la
+metrique de la route et de celle de son interface; a metrique egale,
+l'interface la premiere dans l'ordre de liaison en IPv4, une route choisie
+par la pile en IPv6.
+
+Comparaison, famille par famille, ecarts dans cet ordre:
+- `tunnel-interface-missing`: l'alias ne designe aucune interface; rien
+  d'autre n'est compare;
+- `<famille>-plan-route-missing`: une route du plan n'est pas sur l'interface
+  du tunnel, a sa destination exacte, sur le lien;
+- `<famille>-route-metric`: elle y est, avec une autre metrique;
+- `<famille>-interface-metric`: la famille est capturee, et la ligne du tunnel
+  est absente, en metrique automatique, ou d'une autre metrique que zero;
+- `<famille>-tunnel-extra-route`: une route du tunnel hors du plan et hors
+  des classes admises;
+- `<famille>-competing-route`: une route d'une autre interface qui gagne,
+  pour une destination du plan, contre la route du plan la plus specifique qui
+  la contient: prefixe plus long, ou meme prefixe et metrique effective plus
+  faible, ou metrique effective illisible.
+
+A meme prefixe et metrique effective egale, ni l'une ni l'autre ne gagne sur
+ce que la preuve lit: l'ordre de liaison ne se lit pas. Une telle route, hors
+des classes admises, rend UNMEASURED quand rien d'autre n'est un ecart; un
+ecart prime.
+
+La legitimite se decide par une regle de forme, comme sous Linux. Une route
+est admise quand elle est:
+- une route de l'interface de bouclage, ou la route hote d'une adresse portee
+  par son interface;
+- une route sur le lien vers le reseau exact (longueur non nulle) d'une
+  adresse portee par son interface;
+- une route hote sur le lien vers une adresse de ce reseau;
+- une route sur le lien vers une destination de multidiffusion, limite
+  nommee;
+- `255.255.255.255/32` sur le lien, limite nommee;
+- sur l'interface du tunnel seulement, la diffusion dirigee d'une route IPv4
+  du plan de 1 a 30 bits: la route hote de sa derniere adresse. Que Windows
+  la cree avec la route du plan et la retire avec elle est mesure pour un
+  `/24`; pour les autres longueurs, la classe suit la definition de la
+  diffusion dirigee, sans mesure.
+Tout le reste est un ecart, et une route par une passerelle n'est jamais
+admise.
+
+Le perimetre est `windows-routing-comparison`, la source
+`iphelper-tables-read-twice`, et `expected_source` vaut
+`bifrost-windows-routing-plan-v1-user-declared` (intention) ou
+`daemon-declared-active-routing-plan` (daemon). Le rapport ne porte que des
+categories et des comptes: ni interface, ni adresse, ni prefixe, ni LUID.
+
+Mode face au daemon. Le peripherique du tunnel (WireGuardNT, et le coeur sous
+Windows) retient le plan que `ipcfg::apply` vient d'executer, apres son
+dernier appel reussi (le coeur, une fois le passage ouvert), et l'oublie des
+le debut du demontage. Le superviseur le declare dans une forme distincte,
+`declaration-routage-windows` (sa propre version; un plan de cinq cles:
+chemin, interface, MTU, familles, destinations), lue par le meme lecteur que
+les autres preuves: identite du serveur exigee avant le premier octet
+(proprietaire du pipe LocalSystem, jamais les Administrateurs; une seule
+exigence pour les trois lectures de preuve, jugee par sa recette avec la
+decision meme de `bifrost-ipc`), N1, mesure encadree, N2. L'analyse est
+stricte (cles exactes, doublons, entiers, version, instance, coherence de
+l'etat, du numero et du plan, graphie canonique; la forme Linux est refusee),
+et le plan est reconstruit au meme constructeur. Rien de pose: dit sans
+comparer.
+
+Limites:
+- l'intention est declaree, ce n'est pas le profil actif du daemon;
+- un changement qui s'annule entre les deux collectes, ou ce qui est pose
+  apres la collecte, n'est pas vu;
+- Windows ne porte aucune etiquette de proprietaire sur une route: une route
+  identique a celle du plan, posee par un tiers, passe pour celle du produit;
+- une route connectee est admise quelle que soit la largeur du reseau de son
+  adresse, et la multidiffusion et la diffusion limitee partent sur le lien;
+- l'ordre de liaison n'est pas lu: une egalite rend UNMEASURED;
+- ne sont pas compares: la MTU et `DadTransmits` des lignes, l'etat de
+  connexion de l'interface, la duree de vie des routes, les adresses du
+  tunnel;
+- ne sont pas prouves: les routes en cache, les connexions ouvertes, une
+  source liee a une interface, le pare-feu et le DNS.
+
+MATCH n'est pas une preuve d'etancheite du VPN.
+
+Acceptation, banc jetable Windows a cote d'un daemon reel sous LocalSystem,
+LAN ouvert, plan WireGuard sans route par defaut puis capture des deux
+familles. Correspondance des deux familles dans les deux modes. Chaque
+categorie de route provoquee donne son ecart dans les deux modes, et pour
+chacune `Find-NetRoute` dit l'interface que Windows choisit: route du plan
+retiree, route en trop sur le tunnel, route plus longue ou moins chere d'une
+autre interface, metrique de route ou d'interface qui fait perdre le tunnel
+face a une concurrente. Une metrique de route ou d'interface differente sans
+concurrente est un ecart au plan sans changement de choix. Une egalite rend
+UNMEASURED, et Windows y a choisi le tunnel. Deux declarations differentes
+autour de la collecte rendent UNMEASURED; un daemon qui n'est pas sous
+LocalSystem est refuse (`daemon-identity`); rien de pose est dit; une
+interface absente est un ecart. L'hote est inchange apres chaque serie.
+
 D1c reste incomplet. Ne sont pas livres: les resolveurs effectifs, les
-exceptions DNS, la provenance, et le jumeau Windows (table de routage IP
-Helper).
+exceptions DNS et la provenance.
 
 ## D2 - Distribution reproductible et mises a jour verifiables
 
@@ -769,3 +909,17 @@ pas effacee par ce plan. Chaque tranche met a jour ETAT.md et ses limites.
 - [iproute2 6.1.0, `lib/libnetlink.c`](https://raw.githubusercontent.com/iproute2/iproute2/v6.1.0/lib/libnetlink.c):
   un dump interrompu ou tronque est signale sur la sortie d'erreur, avec un
   code de sortie 0.
+
+## Sources primaires relues le 1er octobre 2026, pour D1c.3
+
+- [Microsoft Learn, Chapter 10 - TCP/IP End-to-End Delivery](https://learn.microsoft.com/en-us/previous-versions/tn-archive/bb727011(v=technet.10)):
+  choix de la route par l'hote source, IPv4 et IPv6: prefixe le plus long,
+  metrique la plus faible, puis ordre de liaison en IPv4 et choix de la pile
+  en IPv6.
+- [Microsoft Learn, MIB_IPFORWARD_ROW2](https://learn.microsoft.com/en-us/windows/win32/api/netioapi/ns-netioapi-mib_ipforward_row2):
+  la metrique d'une route est un decalage, ajoute a la metrique de son
+  interface.
+- [Microsoft Learn, MIB_IPINTERFACE_ROW](https://learn.microsoft.com/en-us/windows/win32/api/netioapi/ns-netioapi-mib_ipinterface_row):
+  `Metric`, `UseAutomaticMetric`, `NlMtu`, `DadTransmits`.
+- [Microsoft Learn, CreateIpForwardEntry2](https://learn.microsoft.com/en-us/windows/win32/api/netioapi/nf-netioapi-createipforwardentry2):
+  la pose d'une route que le produit emploie.
