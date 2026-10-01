@@ -2,26 +2,9 @@
 
 #![forbid(unsafe_code)]
 
-/// Le lecteur de la declaration du daemon, commun a `prove nft` et a
-/// `prove wfp`: identite du serveur, N1, mesure, N2.
-mod declaration;
 mod inspection;
 mod pilote;
 mod preuve;
-mod preuve_nft;
-#[cfg(target_os = "linux")]
-mod preuve_nft_daemon;
-#[cfg(target_os = "linux")]
-mod preuve_nft_linux;
-/// Regles de routage et routes: le plan du produit confronte au noyau. Pur,
-/// sauf la collecte, qui est Linux.
-mod preuve_routes;
-#[cfg(target_os = "linux")]
-mod preuve_routes_linux;
-/// Routes et lignes d'interface: le plan du produit confronte a la table IP
-/// Helper. Pur et compile partout, sauf la collecte, qui est Windows.
-mod preuve_routes_windows;
-mod preuve_wfp;
 mod profile;
 mod render;
 /// La source des reprises sous Linux. Ici et pas dans le daemon: le producteur
@@ -34,6 +17,14 @@ mod serveur;
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
 
+// Les preuves et leurs lecteurs vivent dans la bibliotheque du paquet
+// (`src/lib.rs`), pour que le harnais de fuzzing les atteigne. Une preuve de
+// routage par systeme: Linux ailleurs que sous Windows.
+#[cfg(not(windows))]
+use bifrost_cli::preuve_routes;
+#[cfg(windows)]
+use bifrost_cli::preuve_routes_windows;
+use bifrost_cli::{preuve_nft, preuve_wfp};
 use bifrost_ipc::protocol::{Command as IpcCommand, Request, Response};
 
 #[derive(Parser, Debug)]

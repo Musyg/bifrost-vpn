@@ -266,7 +266,7 @@ fn entier(v: &Value) -> Result<Option<u32>, &'static str> {
 /// coeur; le coeur n'a ni marque ni table (la sienne est fixee par le
 /// produit), et un compte non nul ou null. Le nom d'interface suit la regle
 /// du produit (1 a 15 caracteres, alphanumeriques, `-` et `_`), sans `lo`.
-pub(crate) fn plan_de_l_intention(v: Value) -> Result<Plan, &'static str> {
+pub fn plan_de_l_intention(v: Value) -> Result<Plan, &'static str> {
     let objet = v.as_object().ok_or("intention de routage invalide")?;
     if objet.len() != CLES.len() || CLES.iter().any(|c| !objet.contains_key(*c)) {
         return Err("champs d'intention de routage manquants ou inconnus");
@@ -884,7 +884,7 @@ const LIMITE_DAEMON: &str = "Plan declare par le peripherique du tunnel, relu av
 /// nulle, table reservee au noyau, compte root ou partage), comme le fait le
 /// lecteur d'intention.
 #[cfg(target_os = "linux")]
-fn plan_de_la_declaration(
+pub fn plan_de_la_declaration(
     d: &bifrost_ipc::protocol::DeclarationRoutage,
 ) -> Result<Plan, &'static str> {
     use bifrost_ipc::protocol::{CheminRoutage, EtatRoutage};

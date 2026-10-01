@@ -99,10 +99,20 @@ sanitizer d'adresses). C'est un espace de travail cargo SEPARE: son
 `Cargo.lock` et sa politique de dependances (`fuzz/deny.toml`, celle de la
 racine plus une exception nominative pour `libfuzzer-sys`, sous licence NCSA)
 ne touchent ni le verrou ni les binaires du produit. Chaque cible appelle la
-fonction de PRODUCTION du parseur par son chemin public; aucune n'a demande
-d'exposer un symbole. Au-dela de l'absence de panique, chacune verifie une
-propriete: lecture deterministe, aller-retour par l'encodeur de production,
-ou issue exacte du cadrage.
+fonction de PRODUCTION du parseur par son chemin public. Les douze premieres
+n'ont demande d'exposer aucun symbole. Les cinq cibles des lecteurs de la CLI
+passent par la bibliotheque du paquet `bifrost-cli` (`src/lib.rs`): elle porte
+les modules des preuves. Le binaire y appelle leurs points d'entree comme
+avant, publics dans la bibliotheque pour lui; les cibles y appellent leurs
+lecteurs, rendus publics pour elles (le lecteur JSON strict, le comparateur
+nft hors ligne sans ses lectures de fichier, les lecteurs d'intention de
+routage et ceux de la declaration du daemon). Le paquet n'est pas publie sur
+crates.io: la bibliotheque n'a pour consommateurs que le binaire et le
+harnais. Au-dela de l'absence de
+panique, chacune verifie une propriete: lecture deterministe, aller-retour
+par l'encodeur de production, issue exacte du cadrage, ou, pour les lecteurs
+de la CLI, coherence du rapport et accord de deux chemins qui lisent les
+memes valeurs.
 
 | Cible | Parseur | Qui fournit l'octet, et qui le lit |
 |---|---|---|
@@ -118,6 +128,11 @@ ou issue exacte du cadrage.
 | `politique_nft` | `politique_nft::Politique::lire`, `reference` | intention de `prove nft --politique`, declaration du daemon; la CLI |
 | `politique_wfp` | `politique_wfp::PolitiqueWfp::lire`, `reference` | declaration du daemon; la CLI |
 | `instantane_wfp` | `instantane_wfp::{Sid::lire_texte, Sid::lire_octets, lire_dacl}` | moteur WFP; la CLI |
+| `capture_nft` | `bifrost_cli::preuve_nft::verifier_avec`: lecteur JSON strict, analyseur de capture et objets nommes, comparaison | deux captures `nft -j` designees a `prove nft --attendu --observe`, l'observe pouvant venir d'un autre poste; la CLI. Le meme analyseur lit la sortie de `nft` sous `--actif` |
+| `politique_nft_cli` | `preuve_nft::Unique`, `Politique::lire`, `reference`, puis le comparateur de la CLI | intention de `prove nft --politique`; la CLI |
+| `intention_routes` | `Unique` et `preuve_routes::plan_de_l_intention`; pour les memes valeurs, `declaration::analyser_routage` et `plan_de_la_declaration` | intention de `prove routes --intention` sous Linux; la CLI |
+| `intention_routes_windows` | `Unique` et `preuve_routes_windows::plan_de_l_intention`; pour les memes valeurs, `analyser_routage_windows` et `plan_de_la_declaration` | intention de `prove routes --intention` sous Windows (lecteur pur, compile partout); la CLI |
+| `declaration_daemon` | `declaration::{analyser, analyser_routage, analyser_routage_windows}` | reponse du daemon (root, LocalSystem) que `prove nft`, `prove wfp` et `prove routes` prennent pour attendu; la CLI, une fois l'identite du serveur admise |
 
 Les graines (`fuzz/graines/<cible>`) viennent des recettes et des exemples du
 depot: litteraux recopies, ou produits par les encodeurs de production a
@@ -133,6 +148,9 @@ mettrait (`CARGO_TARGET_DIR`, sinon `fuzz/target/`) et lus au meme endroit; le
 corpus de travail et les entrees qui font tomber une cible restent sous
 `fuzz/target/`. La CI fait de meme a chaque PR (job `fuzz`, nightly datee) et
 passe `cargo deny` sur le verrou du harnais.
+Le script donne aux cibles un repertoire temporaire a lui et le retire a sa
+sortie, quelle qu'elle soit: `ipc_trame` y ecoute sur un socket Unix,
+`signature_profil` y ecrit une cle publique, et rien n'en reste.
 
 **Campagne initiale**, le 01/10/2026 sur essai-linux (canal `nightly` de
 l'hote, rustc 1.95.0-nightly c78a29473 du 22/02/2026, une cible a la fois,
@@ -157,6 +175,11 @@ des graines; une campagne de 15 minutes apres la correction de l'hote, puis
 de 10 minutes apres celle de la classe, n'ont plus rien trouve. En tout,
 2 h 09 de calcul pour les campagnes.
 
+**Cibles des lecteurs de la CLI**, le 01/10/2026 sur essai-linux (meme
+chaine, une cible a la fois, 2 Gio par processus): 10 minutes par cible, de
+6,7 millions d'executions (`capture_nft`, qui analyse et compare deux
+captures) a 31,8 millions (`intention_routes_windows`). Aucune n'est tombee.
+
 **Ce que prouvent les plantages semes.** Chaque cible a ete eprouvee par une
 ligne `panic!` semee dans le parseur qu'elle vise, puis retiree. Les douze
 cibles sont tombees en moins d'une minute, chaque fois sur une entree mutee:
@@ -171,15 +194,21 @@ egalite sur `wg7` dans `profil_toml` n'a pas ete trouvee en 300 s (6,9
 millions d'executions), pas plus, en 300 s chacun, qu'un entier ecrit en
 decimal (`mtu == 1337`, une marque ou un LUID `4242`) ni deux longueurs a la
 fois. Une condition que l'on veut voir eprouvee demande une graine qui
-l'approche.
+l'approche. Les cinq cibles des lecteurs de la CLI ont ete eprouvees de meme, par sept
+plantages (un par lecteur que `declaration_daemon` donne a lire): elles sont
+tombees en moins de deux secondes (1,2 s au plus a la premiere mesure, 1,6 s
+a la contre-verification), chaque fois sur une entree a une valeur d'une
+graine (une priorite de chaine, une marque, une table, une MTU, un numero
+d'application).
 
 **Ce qui manque.**
-- Les lecteurs de fichiers de la CLI (`prove nft --politique` par son lecteur
-  JSON strict, `prove routes --intention`, le comparateur nft hors ligne, le
-  lecteur de la declaration du daemon) vivent dans le binaire `bifrost-cli`,
-  sans bibliotheque: aucune cible ne les atteint sans exposer un module.
-  Leurs coeurs de bibliotheque (`Politique::lire`, `PolitiqueWfp::lire`,
-  `lire_dacl`) le sont.
+- Dans la CLI, ce qui entoure ses lecteurs: la lecture bornee du fichier, la
+  reception de la declaration du daemon (identite du serveur, socket Unix ou
+  pipe nomme) et le protocole qui l'encadre. Les cibles donnent leurs octets
+  aux lecteurs, ni un fichier ni un serveur.
+- Les trames rtnetlink que `prove routes` lit sous Linux
+  (`preuve_routes::trames`): un decodeur pur, sans cible; sa source est le
+  noyau.
 - Le pipe nomme de Windows, lu par LocalSystem, et tout ce qui ne compile que
   sous Windows (DPAPI): le harnais ne tourne que sous Linux.
 - Le cadrage HTTP du canal web (ureq): une cible n'a pas acces au reseau.
@@ -357,7 +386,7 @@ Consequence operationnelle : au lancement, pour un produit classe I, la voie Mod
 
 ### PARTIE 7 - PROGRAMME DE MISE EN OEUVRE
 
-**Indispensable au lancement :** modele de menace Threagile en CI ; CI securite (clippy/audit/deny/vet, gosec/govulncheck) ; fuzzing cargo-fuzz des parseurs (pose: douze cibles, section 2.3; restent les lecteurs de fichiers de la CLI) ; security.txt + politique CVD ; SBOM CycloneDX a chaque build ; durcissement compilation + verification winchecksec/checksec ; process interne Article 14.
+**Indispensable au lancement :** modele de menace Threagile en CI ; CI securite (clippy/audit/deny/vet, gosec/govulncheck) ; fuzzing cargo-fuzz des parseurs (pose: dix-sept cibles, lecteurs de fichiers de la CLI compris, section 2.3) ; security.txt + politique CVD ; SBOM CycloneDX a chaque build ; durcissement compilation + verification winchecksec/checksec ; process interne Article 14.
 **Ensuite :** audit externe (viser OTF/NLnet gratuit) ; VDP puis bug bounty prive ; ClusterFuzzLite continu ; audit crypto dedie ; ISO 27001/SOC 2 a envisager.
 
 **Calendrier :**

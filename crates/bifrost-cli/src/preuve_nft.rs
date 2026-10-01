@@ -115,8 +115,9 @@ pub(crate) fn heure() -> Option<u128> {
 // Value accepte normalement deux cles identiques en gardant la derniere.
 // Une capture ambigue n'est jamais une observation acceptable, meme si les
 // doublons ont la meme valeur. Le refus vaut aussi au fond d'une expression.
-// Partage avec le lecteur de la declaration du daemon, pour la meme raison.
-pub(crate) struct Unique(pub(crate) Value);
+// Partage avec le lecteur de la declaration du daemon, pour la meme raison, et
+// public pour le harnais de fuzzing, qui lit chaque entree par lui.
+pub struct Unique(pub Value);
 
 impl<'de> Deserialize<'de> for Unique {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
@@ -360,8 +361,8 @@ fn commencer() -> Rapport {
     }
 }
 
-fn reference(r: &mut Rapport, attendu: &Path) -> Result<Capture, &'static str> {
-    let a = analyser(&lire(attendu)?)?;
+fn reference(r: &mut Rapport, octets: &[u8]) -> Result<Capture, &'static str> {
+    let a = analyser(octets)?;
     if !a.chaines.values().any(|v| v.get("hook").is_some()) {
         return Err("reference sans chaine de base");
     }
@@ -412,11 +413,23 @@ fn terminer(mut r: Rapport, debut: Instant, resultat: Result<(), &'static str>) 
 }
 
 pub fn verifier(attendu: &Path, observe: &Path) -> Rapport {
+    verifier_avec(|| lire(attendu), || lire(observe))
+}
+
+/// Le comparateur hors ligne, separe de ses deux lectures de fichier pour que
+/// le harnais de fuzzing (`fuzz/`) lui donne ses octets par le chemin de
+/// `verifier`. Meme ordre: l'observe n'est lu qu'une fois la reference lue et
+/// acceptee.
+pub fn verifier_avec<A, O>(attendu: A, observe: O) -> Rapport
+where
+    A: FnOnce() -> Result<Vec<u8>, &'static str>,
+    O: FnOnce() -> Result<Vec<u8>, &'static str>,
+{
     let debut = Instant::now();
     let mut r = commencer();
     let resultat = (|| {
-        let a = reference(&mut r, attendu)?;
-        confronter(&mut r, a, &lire(observe)?)
+        let a = reference(&mut r, &attendu()?)?;
+        confronter(&mut r, a, &observe()?)
     })();
     terminer(r, debut, resultat)
 }
@@ -428,7 +441,7 @@ pub async fn verifier_actif(attendu: &Path) -> Rapport {
     r.source = "kernel-netlink-and-system-nft";
     r.limitation = "Reference utilisateur non authentifiee; nftables du namespace courant uniquement, pas une preuve d'etancheite du VPN.";
     let resultat = async {
-        let a = reference(&mut r, attendu)?;
+        let a = reference(&mut r, &lire(attendu)?)?;
         #[cfg(target_os = "linux")]
         {
             let octets = crate::preuve_nft_linux::collecter().await?;

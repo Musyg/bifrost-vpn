@@ -219,7 +219,7 @@ async fn connecter_et_demander(
 /// Analyse une trame de reponse, sans jamais recopier ce qu'elle contient
 /// dans une raison: un message d'erreur du daemon nomme l'appelant (uid, gid,
 /// pid, SID), et une declaration porte des parametres de politique.
-pub(crate) fn analyser(octets: &[u8]) -> Result<DeclarationPareFeu, &'static str> {
+pub fn analyser(octets: &[u8]) -> Result<DeclarationPareFeu, &'static str> {
     let Unique(v) =
         serde_json::from_slice(octets).map_err(|_| "reponse du daemon tronquee ou illisible")?;
     let objet = v.as_object().ok_or(HORS_SCHEMA)?;
@@ -295,7 +295,7 @@ pub(crate) const PLAN_CLES: [&str; 5] = ["chemin", "interface", "fwmark", "table
 /// coherence entre l'etat, le numero et le plan. Rien de ce qu'elle contient
 /// n'entre dans une raison.
 #[cfg(target_os = "linux")]
-pub(crate) fn analyser_routage(
+pub fn analyser_routage(
     octets: &[u8],
 ) -> Result<bifrost_ipc::protocol::DeclarationRoutage, &'static str> {
     use bifrost_ipc::protocol::{CheminRoutage, DECLARATION_ROUTAGE_VERSION, EtatRoutage};
@@ -366,7 +366,7 @@ pub(crate) const PLAN_WINDOWS_CLES: [&str; 5] =
 /// Compilee partout, pour que ses recettes comptent sur les deux hotes; seule
 /// la preuve Windows l'appelle.
 #[cfg_attr(not(windows), allow(dead_code))]
-pub(crate) fn analyser_routage_windows(
+pub fn analyser_routage_windows(
     octets: &[u8],
 ) -> Result<bifrost_ipc::protocol::DeclarationRoutageWindows, &'static str> {
     use bifrost_ipc::protocol::{CheminRoutage, DECLARATION_ROUTAGE_WINDOWS_VERSION, EtatRoutage};

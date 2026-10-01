@@ -1,0 +1,1 @@
+{"destinations":["198.51.100.0/24"],"familles":["ipv4"],"mtu":576,"interface":"bf-wg_0","chemin":"wireguard","plateforme":"windows","schema_version":1}

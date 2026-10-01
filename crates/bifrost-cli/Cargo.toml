@@ -7,6 +7,13 @@ license.workspace = true
 repository.workspace = true
 description = "Client non privilegie Bifrost"
 
+# Les preuves et leurs lecteurs de fichiers et de declarations, pour que le
+# harnais de fuzzing (`fuzz/`) atteigne ces lecteurs par leur chemin de
+# production: voir l'en-tete de `src/lib.rs`. Le binaire est son seul autre
+# appelant.
+[lib]
+path = "src/lib.rs"
+
 [[bin]]
 name = "bifrost-cli"
 path = "src/main.rs"

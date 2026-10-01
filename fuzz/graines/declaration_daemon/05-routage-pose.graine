@@ -1,0 +1,1 @@
+{"result":"declaration-routage","schema_version":1,"instance":"000000000000000000000000000000000000000000000000","application":1,"issue":"pose","plan":{"chemin":"wireguard","interface":"wg0","fwmark":51820,"table":51820,"coeur_uid":null}}
