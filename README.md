@@ -87,6 +87,8 @@ bifrost-cli disconnect
 
 Avant d'ecrire quoi que ce soit, le client verifie qui sert le socket : sous Linux un processus root, sous Windows un pipe possede par LocalSystem ou par les Administrateurs. Sinon il refuse, dit que le serveur du socket n'a pas l'identite attendue du daemon, n'envoie rien et sort en code **4**. Cela vaut pour chaque commande qui parle au daemon, `connect --config` compris, qui transmet la cle privee du profil, et il n'existe pas d'option pour s'en passer. Sans cette verification, sous Windows, n'importe quel compte pouvait prendre le nom du pipe du daemon pendant que le service etait arrete et recevoir le profil du prochain `connect --config`.
 
+Sous Windows, quand toutes les instances du pipe du daemon sont prises par d'autres clients, le client attend qu'une se libere, deux secondes au plus, au lieu de conclure que le daemon est injoignable, et exige de l'instance obtenue la meme identite que de toute autre. Le daemon, sous Linux comme sous Windows, rend en erreur une connexion qui ne lui a pas transmis de requete complete dans les dix secondes; le temps de traiter une commande n'y entre pas.
+
 Si le daemon meurt alors que le kill switch est arme, le trafic reste bloque : c'est voulu. Pour rouvrir :
 
 ```bash
