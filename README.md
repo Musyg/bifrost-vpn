@@ -89,6 +89,8 @@ Avant d'ecrire quoi que ce soit, le client verifie qui sert le socket : sous Lin
 
 Sous Windows, quand toutes les instances du pipe du daemon sont prises par d'autres clients, le client attend qu'une se libere, deux secondes au plus, au lieu de conclure que le daemon est injoignable, et exige de l'instance obtenue la meme identite que de toute autre. Le daemon, sous Linux comme sous Windows, rend en erreur une connexion qui ne lui a pas transmis de requete complete dans les dix secondes; le temps de traiter une commande n'y entre pas.
 
+Le daemon continue de servir quand une connexion echoue avant d'etre lue, ou quand une ressource du systeme manque pour en accepter une (descripteurs de fichiers, memoire) : il ferme la connexion en cause sans la lire, ou attend que la ressource revienne en reessayant dix fois par seconde au plus, et le note au journal une fois par minute au plus. Seule une erreur de l'ecoute elle-meme met fin a son service IPC.
+
 Si le daemon meurt alors que le kill switch est arme, le trafic reste bloque : c'est voulu. Pour rouvrir :
 
 ```bash

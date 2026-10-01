@@ -9,7 +9,9 @@ use bifrost_ipc::{AuthPolicy, Connection};
 
 use crate::supervisor::{Cmd, RoutageDeclare};
 
-/// Boucle d'acceptation. Ne rend la main qu'en cas d'erreur fatale d'ecoute.
+/// Boucle d'acceptation. Ne rend la main qu'en cas d'erreur fatale d'ecoute:
+/// `IpcServer::accept` garde pour lui l'erreur qui ne touche qu'une connexion
+/// et l'epuisement d'une ressource, qu'il attend.
 pub async fn serve(
     mut server: IpcServer,
     tx: Sender<Cmd>,
@@ -473,5 +475,340 @@ upstream = ["10.2.0.1"]
             .expect("le daemon doit savoir desceller");
         assert_eq!(cfg.interface, "wg0");
         let _ = std::fs::remove_dir_all(&rep);
+    }
+
+    /// L'epuisement des descripteurs du daemon n'arrete pas son serveur IPC,
+    /// et le serveur sert de nouveau des qu'ils se liberent.
+    ///
+    /// Par le chemin de production: `IpcServer::bind`, puis `serve` tel que
+    /// le daemon l'appelle, et un client `connect_verified`. L'epuisement est
+    /// provoque dans un PROCESSUS ENFANT, cette meme recette relancee: la
+    /// limite basse de descripteurs n'est posee que la, jamais dans le
+    /// processus de test que d'autres recettes partagent. Le parent tient plus
+    /// de connexions que l'enfant n'a de descripteurs libres, mesure ce que le
+    /// serveur en fait (rend-il? combien de temps processeur brule-t-il
+    /// pendant l'episode? combien de lignes de journal ecrit-il?), puis les
+    /// lache et mesure le temps qu'il met a servir de nouveau.
+    #[cfg(target_os = "linux")]
+    mod epuisement {
+        use super::*;
+        use std::io::{BufRead, BufReader, Write};
+        use std::process::Stdio;
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        /// Le nom complet de la recette, pour que l'enfant ne lance qu'elle.
+        const RECETTE: &str =
+            "server::tests::epuisement::l_epuisement_des_descripteurs_n_arrete_pas_le_serveur";
+        /// Present dans l'environnement de l'enfant, et la seulement: le
+        /// repertoire de son socket, nomme et retire par le parent.
+        const ROLE_ENFANT: &str = "BIFROST_RECETTE_EPUISEMENT_ENFANT";
+        /// Descripteurs laisses a l'enfant au-dela de ceux qu'il tient deja:
+        /// son serveur en acceptera autant, pas davantage.
+        const MARGE: u64 = 8;
+        /// Connexions tenues par le parent, bien au-dela de `MARGE`.
+        const TENUES: usize = 40;
+        /// Fenetre de mesure du temps processeur, pendant l'episode.
+        const FENETRE: Duration = Duration::from_secs(1);
+        /// Une boucle active brulerait la fenetre entiere.
+        const PLAFOND_CPU: Duration = Duration::from_millis(250);
+        /// Du lacher des connexions a la reponse d'un client complet.
+        const PLAFOND_REPRISE: Duration = Duration::from_secs(2);
+        /// La ligne de journal d'un episode d'epuisement.
+        const MARQUE: &str = "acceptation suspendue";
+
+        fn euid() -> u32 {
+            // SAFETY: geteuid ne prend pas d'argument et ne touche aucune memoire.
+            unsafe { libc::geteuid() }
+        }
+
+        /// Le plus grand descripteur ouvert de ce processus.
+        fn plus_grand_descripteur() -> u64 {
+            std::fs::read_dir("/proc/self/fd")
+                .expect("/proc/self/fd")
+                .filter_map(|e| e.ok()?.file_name().to_str()?.parse::<u64>().ok())
+                .max()
+                .expect("au moins un descripteur ouvert")
+        }
+
+        /// Le role de l'enfant: ecouter comme le daemon, sous une limite basse
+        /// de descripteurs posee dans ce processus seul, et dire si `serve` a
+        /// rendu.
+        fn enfant() {
+            // Un enfant que personne ne tuerait s'arrete seul.
+            std::thread::spawn(|| {
+                std::thread::sleep(Duration::from_secs(60));
+                std::process::exit(4);
+            });
+            let _ = tracing_subscriber::fmt()
+                .with_writer(std::io::stderr)
+                .with_ansi(false)
+                .with_env_filter(tracing_subscriber::EnvFilter::new(
+                    "bifrost_ipc=debug,bifrost_daemon=debug",
+                ))
+                .try_init();
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .expect("runtime");
+            let dossier = std::path::PathBuf::from(
+                std::env::var_os(ROLE_ENFANT).expect("repertoire de la recette"),
+            );
+            let _ = std::fs::remove_dir_all(&dossier);
+            std::fs::create_dir_all(&dossier).expect("repertoire de la recette");
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&dossier, std::fs::Permissions::from_mode(0o755))
+                    .expect("repertoire de la recette en 0755");
+            }
+            let chemin = dossier.join("d.sock");
+            let policy = AuthPolicy {
+                allowed_uids: vec![0, euid()],
+                allowed_gid: None,
+            };
+            let serveur = rt
+                .block_on(IpcServer::bind(&chemin, policy, None))
+                .expect("bind");
+            let (tx, rx) = std::sync::mpsc::channel();
+
+            let mut actuelle = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            // SAFETY: getrlimit ecrit dans une structure locale, vivante
+            // pendant l'appel.
+            let rc = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut actuelle) };
+            assert_eq!(rc, 0, "getrlimit");
+            let basse = libc::rlimit {
+                rlim_cur: (plus_grand_descripteur() + 1 + MARGE) as libc::rlim_t,
+                rlim_max: actuelle.rlim_max,
+            };
+            // SAFETY: setrlimit lit une structure locale, vivante pendant
+            // l'appel; seule la limite souple de CE processus baisse.
+            let rc = unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &basse) };
+            assert_eq!(rc, 0, "setrlimit");
+
+            println!("PRET {}", chemin.display());
+            let _ = std::io::stdout().flush();
+            let issue = rt.block_on(serve(serveur, tx, std::path::PathBuf::from("/inexistant")));
+            drop(rx);
+            println!("SERVE RENDU: {issue:?}");
+            let _ = std::io::stdout().flush();
+            std::process::exit(3);
+        }
+
+        /// Temps processeur consomme par le processus `pid`, tous fils
+        /// compris (`utime` et `stime` de `/proc/<pid>/stat`).
+        fn temps_processeur(pid: u32) -> Option<Duration> {
+            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+            let apres = &stat[stat.rfind(')')? + 1..];
+            let champs: Vec<&str> = apres.split_whitespace().collect();
+            // Apres la commande: l'etat (3e champ), puis utime (14e) et
+            // stime (15e).
+            let utime: u64 = champs.get(11)?.parse().ok()?;
+            let stime: u64 = champs.get(12)?.parse().ok()?;
+            // SAFETY: sysconf ne lit qu'une constante du systeme.
+            let tics = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+            (tics > 0).then(|| Duration::from_secs_f64((utime + stime) as f64 / tics as f64))
+        }
+
+        /// Un client complet, par `connect_verified`, dans un fil a lui: son
+        /// issue dans un temps borne.
+        fn client_complet(chemin: &str) -> Result<(), String> {
+            let chemin = chemin.to_owned();
+            let (tx, rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("runtime du client");
+                let issue = rt.block_on(async {
+                    let (mut client, _) = bifrost_ipc::IpcClient::connect_verified(
+                        &chemin,
+                        bifrost_ipc::ServerRequirement::Uid(euid()),
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?;
+                    client
+                        .request(&bifrost_ipc::Request::new(Command::VerdictInspectionTls {
+                            intercepte: false,
+                        }))
+                        .await
+                        .map_err(|e| e.to_string())
+                });
+                let _ = tx.send(issue);
+            });
+            match rx.recv_timeout(Duration::from_secs(5)) {
+                Ok(Ok(Response::Ok)) => Ok(()),
+                Ok(Ok(autre)) => Err(format!("reponse inattendue: {autre:?}")),
+                Ok(Err(e)) => Err(e),
+                Err(_) => Err("aucune reponse en 5 s".to_owned()),
+            }
+        }
+
+        /// Ce que le serveur de l'enfant a fait de l'episode.
+        #[derive(Debug)]
+        struct Mesure {
+            /// Ce que `serve` a rendu, s'il a rendu.
+            serve_rendu: Option<String>,
+            /// Delai entre l'ouverture des connexions et la premiere ligne
+            /// d'epuisement, si elle est venue.
+            episode: Option<Duration>,
+            /// Lignes d'epuisement ecrites, du debut a la fin de la mesure.
+            lignes: usize,
+            /// Temps processeur brule par l'enfant pendant `FENETRE`.
+            cpu: Option<Duration>,
+            /// Du lacher des connexions a la reponse d'un client complet.
+            reprise: Result<Duration, String>,
+        }
+
+        /// Ce qui suit `marque` dans `ligne`. Pas en tete de ligne: le banc
+        /// de test de l'enfant imprime `test <nom> ... ` sans fin de ligne
+        /// avant que la recette n'ecrive.
+        fn apres<'a>(ligne: &'a str, marque: &str) -> Option<&'a str> {
+            ligne.split_once(marque).map(|(_, reste)| reste)
+        }
+
+        fn rendu(sortie: &mpsc::Receiver<String>) -> Option<String> {
+            sortie
+                .try_iter()
+                .find_map(|l| apres(&l, "SERVE RENDU: ").map(str::to_owned))
+        }
+
+        fn mesurer(
+            pid: u32,
+            sortie: &mpsc::Receiver<String>,
+            journal: &mpsc::Receiver<String>,
+        ) -> Mesure {
+            let chemin = loop {
+                match sortie.recv_timeout(Duration::from_secs(10)) {
+                    Ok(l) => {
+                        if let Some(c) = apres(&l, "PRET ") {
+                            break c.to_owned();
+                        }
+                    }
+                    Err(_) => panic!("l'enfant n'a pas ouvert son ecoute en 10 s"),
+                }
+            };
+            let tenues: Vec<std::os::unix::net::UnixStream> = (0..TENUES)
+                .filter_map(|_| std::os::unix::net::UnixStream::connect(&chemin).ok())
+                .collect();
+            let ouverture = Instant::now();
+
+            let mut serve_rendu = None;
+            let mut episode = None;
+            let mut lignes = 0;
+            while episode.is_none()
+                && serve_rendu.is_none()
+                && ouverture.elapsed() < Duration::from_secs(5)
+            {
+                if let Ok(l) = journal.recv_timeout(Duration::from_millis(20))
+                    && l.contains(MARQUE)
+                {
+                    lignes += 1;
+                    episode = Some(ouverture.elapsed());
+                }
+                serve_rendu = rendu(sortie);
+            }
+
+            let mut cpu = None;
+            if episode.is_some() {
+                let avant = temps_processeur(pid);
+                std::thread::sleep(FENETRE);
+                if let (Some(a), Some(b)) = (avant, temps_processeur(pid)) {
+                    cpu = Some(b.saturating_sub(a));
+                }
+            }
+
+            drop(tenues);
+            let lacher = Instant::now();
+            let reprise = client_complet(&chemin).map(|()| lacher.elapsed());
+            lignes += journal.try_iter().filter(|l| l.contains(MARQUE)).count();
+            if serve_rendu.is_none() {
+                serve_rendu = rendu(sortie);
+            }
+            Mesure {
+                serve_rendu,
+                episode,
+                lignes,
+                cpu,
+                reprise,
+            }
+        }
+
+        /// L'enfant: tue par le pid releve a son lancement, jamais par un
+        /// motif, et son repertoire retire, a la sortie de la recette, sur
+        /// une panique comprise.
+        struct Enfant(std::process::Child, std::path::PathBuf);
+
+        impl Drop for Enfant {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+                let _ = std::fs::remove_dir_all(&self.1);
+            }
+        }
+
+        #[test]
+        fn l_epuisement_des_descripteurs_n_arrete_pas_le_serveur() {
+            if std::env::var_os(ROLE_ENFANT).is_some() {
+                return enfant();
+            }
+            let dossier = std::env::temp_dir()
+                .join(format!("bifrost-serveur-epuisement-{}", std::process::id()));
+            let mut fils = Enfant(
+                std::process::Command::new(std::env::current_exe().expect("binaire de la recette"))
+                    .args(["--exact", RECETTE, "--nocapture", "--test-threads=1"])
+                    .env(ROLE_ENFANT, &dossier)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .expect("lancement de l'enfant"),
+                dossier,
+            );
+            let pid = fils.0.id();
+            let (tx_sortie, sortie) = mpsc::channel::<String>();
+            let flux = fils.0.stdout.take().expect("sortie de l'enfant");
+            std::thread::spawn(move || {
+                for l in BufReader::new(flux).lines().map_while(Result::ok) {
+                    if tx_sortie.send(l).is_err() {
+                        break;
+                    }
+                }
+            });
+            let (tx_journal, journal) = mpsc::channel::<String>();
+            let flux = fils.0.stderr.take().expect("journal de l'enfant");
+            std::thread::spawn(move || {
+                for l in BufReader::new(flux).lines().map_while(Result::ok) {
+                    if tx_journal.send(l).is_err() {
+                        break;
+                    }
+                }
+            });
+
+            let mesure = mesurer(pid, &sortie, &journal);
+            drop(fils);
+
+            println!("mesure epuisement des descripteurs: {mesure:?}");
+            assert!(
+                mesure.serve_rendu.is_none(),
+                "le serveur s'est arrete sur l'epuisement: {mesure:?}"
+            );
+            assert!(
+                mesure.episode.is_some(),
+                "aucun episode observe: {mesure:?}"
+            );
+            assert!(
+                matches!(mesure.cpu, Some(c) if c < PLAFOND_CPU),
+                "attente active pendant l'episode: {mesure:?}"
+            );
+            assert_eq!(mesure.lignes, 1, "une ligne par episode: {mesure:?}");
+            assert!(
+                matches!(mesure.reprise, Ok(d) if d < PLAFOND_REPRISE),
+                "le serveur ne sert pas de nouveau: {mesure:?}"
+            );
+        }
     }
 }

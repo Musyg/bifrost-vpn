@@ -200,6 +200,78 @@ where
 }
 
 // --------------------------------------------------------------------------
+// Acceptation: ce qui arrete le serveur, et ce qui ne l'arrete pas
+// --------------------------------------------------------------------------
+//
+// Une erreur rencontree en acceptant n'est pas forcement une erreur de
+// l'ecoute. Chaque plateforme la range, dans son `accept`, dans l'un de trois
+// cas:
+//
+// - Elle ne touche qu'UNE connexion: celle-la est fermee sans que rien n'en
+//   soit lu, et l'acceptation reprend aussitot.
+// - Une ressource du systeme manque (descripteurs ou memoire sous Linux,
+//   memoire ou quota du noyau sous Windows): l'acceptation attend
+//   `PAUSE_EPUISEMENT`, puis reessaie, aussi longtemps qu'il le faut. Un
+//   serveur a court de descripteurs en retrouve des que ses connexions se
+//   ferment, et chacune est bornee dans le temps (`DELAI_REQUETE`).
+// - Le reste touche l'ecoute elle-meme, et `accept` le rend.
+//
+// Les boucles d'acceptation de reference tranchent les deux premiers cas de la
+// meme facon, lues le 01/10/2026: axum 0.8.9 (`serve/listener.rs`) reprend
+// aussitot sur ConnectionRefused, ConnectionAborted et ConnectionReset, et
+// attend une seconde sur toute autre erreur, comme le faisait hyper 0.14.27
+// (`server/tcp.rs`), dont la documentation nomme le cas d'un processus arrive
+// au maximum de ses fichiers ouverts (EMFILE). Elles n'ont pas le troisieme:
+// ici, une ecoute perdue reste fatale.
+
+/// Attente avant de reessayer une acceptation qui a echoue faute de ressource:
+/// dix essais par seconde au plus, et rien entre deux.
+const PAUSE_EPUISEMENT: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Une ligne de journal au plus par intervalle pour les incidents
+/// d'acceptation: un epuisement qui dure, ou des connexions qui echouent en
+/// rafale, ne remplissent pas le journal.
+const INTERVALLE_JOURNAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Le message d'un epuisement de ressource pendant l'acceptation.
+const ACCEPTATION_SUSPENDUE: &str =
+    "acceptation suspendue: ressource epuisee, nouvel essai apres une pause";
+
+/// Le debit du journal des incidents d'acceptation: la premiere ligne tout de
+/// suite, puis une au plus par `INTERVALLE_JOURNAL`, qui dit combien
+/// d'incidents ont ete tus depuis la precedente.
+#[derive(Debug, Default)]
+struct Journal {
+    derniere: Option<std::time::Instant>,
+    tus: u64,
+    /// Lignes ecrites, que les recettes comptent.
+    #[cfg(test)]
+    lignes: u64,
+}
+
+impl Journal {
+    /// Ecrit la ligne de l'incident `quoi` si le debit le permet; sinon le
+    /// compte, pour la ligne suivante.
+    fn incident(&mut self, quoi: &'static str, erreur: &dyn std::fmt::Display) {
+        let maintenant = std::time::Instant::now();
+        if self
+            .derniere
+            .is_some_and(|t| maintenant.duration_since(t) < INTERVALLE_JOURNAL)
+        {
+            self.tus += 1;
+            return;
+        }
+        self.derniere = Some(maintenant);
+        let tus = std::mem::take(&mut self.tus);
+        tracing::warn!(error = %erreur, incidents_tus = tus, "{quoi}");
+        #[cfg(test)]
+        {
+            self.lignes += 1;
+        }
+    }
+}
+
+// --------------------------------------------------------------------------
 // Linux: socket Unix + SO_PEERCRED
 // --------------------------------------------------------------------------
 
@@ -217,6 +289,74 @@ mod imp {
         path: PathBuf,
         /// [`DELAI_REQUETE`]; les recettes le raccourcissent.
         pub(super) delai_requete: std::time::Duration,
+        /// Le debit du journal des incidents d'acceptation.
+        pub(super) journal: Journal,
+        /// Recettes: une erreur substituee a celle d'une etape de `accept`.
+        #[cfg(test)]
+        pub(super) panne: Option<Panne>,
+    }
+
+    /// Les etapes de `accept` ou une recette substitue une erreur a l'issue
+    /// du systeme. Le reste du chemin est celui du daemon.
+    #[cfg(test)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(super) enum Etape {
+        /// A la place de `accept(2)`: la connexion en attente reste dans la
+        /// file d'ecoute.
+        Acceptation,
+        /// A la place de la lecture de l'identite d'un pair deja accepte.
+        Identite,
+    }
+
+    /// Ce qu'une recette rend a chaque etape: `Some` substitue l'erreur.
+    #[cfg(test)]
+    pub(super) type Panne = Box<dyn FnMut(Etape) -> Option<std::io::Error> + Send>;
+
+    /// Le message d'une connexion abandonnee sur une erreur qui ne touche
+    /// qu'elle.
+    const CONNEXION_ABANDONNEE: &str = "connexion abandonnee sans rien en lire, l'ecoute continue";
+
+    /// Ce qu'une erreur de `UnixListener::accept` dit de l'ecoute.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(super) enum Nature {
+        /// Une seule connexion est perdue: on accepte aussitot la suivante.
+        Connexion,
+        /// Une ressource manque: on attend `PAUSE_EPUISEMENT`, puis on
+        /// reessaie.
+        Epuisement,
+        /// L'ecoute elle-meme: rendue a l'appelant.
+        Fatale,
+    }
+
+    /// tokio reunit sous `accept` l'appel `accept4(2)` et l'enregistrement
+    /// aupres d'epoll de la connexion qu'il rend (`epoll_ctl(2)`). Sources lues
+    /// le 01/10/2026: accept(2) et epoll_ctl(2) des man-pages 6.19, et
+    /// `net/socket.c` de Linux 7.0 (`__sys_accept4_file`, `do_accept`).
+    pub(super) fn nature(e: &std::io::Error) -> Nature {
+        match e.raw_os_error() {
+            // Plus de descripteur pour ce processus (EMFILE) ou pour le
+            // systeme (ENFILE), plus de memoire (ENOMEM): Linux les rend avant
+            // de retirer la connexion de la file d'ecoute
+            // (`get_unused_fd_flags`, `sock_alloc`, `sock_alloc_file`), ou
+            // elle attend l'essai suivant. ENOBUFS, qu'accept(2) range avec
+            // ENOMEM, est traite comme lui. ENOMEM et ENOSPC (la limite
+            // `max_user_watches`) viennent aussi d'epoll_ctl, apres
+            // l'acceptation: cette connexion-la est alors fermee, et son
+            // client lit une fin de flux.
+            Some(libc::EMFILE | libc::ENFILE | libc::ENOMEM | libc::ENOBUFS | libc::ENOSPC) => {
+                Nature::Epuisement
+            }
+            // Une connexion avortee (ECONNABORTED, que `do_accept` rend apres
+            // l'avoir retiree de la file), une erreur de protocole propre a la
+            // nouvelle connexion (EPROTO), un signal (EINTR): l'ecoute est
+            // intacte.
+            Some(libc::ECONNABORTED | libc::EPROTO | libc::EINTR) => Nature::Connexion,
+            // L'ecoute elle-meme (EBADF, EINVAL, ENOTSOCK, EOPNOTSUPP), le
+            // refus d'un module de securite (EPERM, EACCES: `do_accept` le rend
+            // avant de retirer la connexion, il reviendrait a chaque essai), et
+            // tout ce qui n'est pas nomme ci-dessus.
+            _ => Nature::Fatale,
+        }
     }
 
     impl IpcServer {
@@ -268,17 +408,49 @@ mod imp {
                 policy,
                 path,
                 delai_requete: DELAI_REQUETE,
+                journal: Journal::default(),
+                #[cfg(test)]
+                panne: None,
             })
         }
 
         /// Accepte une connexion et refuse immediatement un pair non autorise.
         ///
+        /// Ne rend que les erreurs de l'ecoute elle-meme (voir [`nature`]):
+        /// une erreur propre a une connexion la ferme sans rien en lire et
+        /// passe a la suivante, un epuisement de ressource attend
+        /// `PAUSE_EPUISEMENT` puis reessaie. Les deux s'inscrivent au journal,
+        /// a debit borne.
+        ///
         /// `&mut self` par symetrie avec la version Windows, qui doit preparer
         /// l'instance suivante du named pipe a chaque acceptation.
         pub async fn accept(&mut self) -> Result<Connection> {
             loop {
-                let (stream, _) = self.listener.accept().await?;
-                let peer = peer_identity(&stream)?;
+                let stream = match self.accepter_une().await {
+                    Ok(stream) => stream,
+                    Err(e) => match nature(&e) {
+                        Nature::Connexion => {
+                            self.journal.incident(CONNEXION_ABANDONNEE, &e);
+                            continue;
+                        }
+                        Nature::Epuisement => {
+                            self.journal.incident(ACCEPTATION_SUSPENDUE, &e);
+                            tokio::time::sleep(PAUSE_EPUISEMENT).await;
+                            continue;
+                        }
+                        Nature::Fatale => return Err(e.into()),
+                    },
+                };
+                // L'identite d'un pair deja accepte ne touche que lui:
+                // illisible, sa connexion est fermee sans que rien n'en soit
+                // lu ni ecrit.
+                let peer = match self.identite(&stream) {
+                    Ok(peer) => peer,
+                    Err(e) => {
+                        self.journal.incident(CONNEXION_ABANDONNEE, &e);
+                        continue;
+                    }
+                };
                 match authorize(&peer, &self.policy) {
                     Ok(()) => {
                         tracing::debug!(%peer, "client accepte");
@@ -293,6 +465,31 @@ mod imp {
                     }
                 }
             }
+        }
+
+        /// Une connexion de la file d'ecoute.
+        async fn accepter_une(&mut self) -> std::io::Result<UnixStream> {
+            #[cfg(test)]
+            if let Some(e) = self.panne(Etape::Acceptation) {
+                return Err(e);
+            }
+            self.listener.accept().await.map(|(stream, _)| stream)
+        }
+
+        /// L'identite du pair d'une connexion acceptee.
+        fn identite(&mut self, stream: &UnixStream) -> Result<PeerIdentity> {
+            #[cfg(test)]
+            if let Some(e) = self.panne(Etape::Identite) {
+                return Err(e.into());
+            }
+            peer_identity(stream)
+        }
+
+        /// L'erreur qu'une recette substitue a l'etape `etape`, s'il y en a
+        /// une.
+        #[cfg(test)]
+        fn panne(&mut self, etape: Etape) -> Option<std::io::Error> {
+            self.panne.as_mut().and_then(|p| p(etape))
         }
 
         pub fn path(&self) -> &Path {
@@ -559,7 +756,10 @@ mod imp {
     use tokio::net::windows::named_pipe::{
         ClientOptions, NamedPipeClient, NamedPipeServer, ServerOptions,
     };
-    use windows_sys::Win32::Foundation::{ERROR_PIPE_BUSY, LocalFree};
+    use windows_sys::Win32::Foundation::{
+        ERROR_COMMITMENT_LIMIT, ERROR_NO_SYSTEM_RESOURCES, ERROR_NOT_ENOUGH_MEMORY,
+        ERROR_NOT_ENOUGH_QUOTA, ERROR_OUTOFMEMORY, ERROR_PIPE_BUSY, LocalFree,
+    };
     use windows_sys::Win32::Security::Authorization::{
         ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1,
         SE_KERNEL_OBJECT,
@@ -601,7 +801,51 @@ mod imp {
         sddl: &'static str,
         /// [`DELAI_REQUETE`]; les recettes le raccourcissent.
         pub(super) delai_requete: std::time::Duration,
-        next: Option<NamedPipeServer>,
+        /// L'instance qui attend le client suivant. Toujours presente: c'est
+        /// elle qui tient le nom du pipe entre deux clients, et celle qui la
+        /// remplace est creee AVANT qu'elle ne parte avec sa connexion.
+        next: NamedPipeServer,
+        /// Le debit du journal des incidents d'acceptation.
+        pub(super) journal: Journal,
+        /// Recettes: une erreur substituee a celle d'une etape de `accept`.
+        #[cfg(test)]
+        pub(super) panne: Option<Panne>,
+    }
+
+    /// Les etapes de `accept` ou une recette substitue une erreur a l'issue
+    /// du systeme. Le reste du chemin est celui du daemon.
+    #[cfg(test)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(super) enum Etape {
+        /// A la place de la creation de l'instance suivante, un client etant
+        /// connecte a l'instance en attente.
+        InstanceSuivante,
+    }
+
+    /// Ce qu'une recette rend a chaque etape: `Some` substitue l'erreur.
+    #[cfg(test)]
+    pub(super) type Panne = Box<dyn FnMut(Etape) -> Option<std::io::Error> + Send>;
+
+    /// La creation d'une instance a-t-elle echoue faute de ressource du noyau?
+    ///
+    /// Chaque instance prend ses tampons dans la reserve non paginee du noyau,
+    /// et un pipe a instances illimitees, comme celui du daemon, n'a pas
+    /// d'autre limite (CreateNamedPipeW, "nMaxInstances" et "Remarks", lu le
+    /// 01/10/2026). Les codes Win32 de STATUS_NO_MEMORY (8),
+    /// STATUS_INSUFFICIENT_RESOURCES (1450), STATUS_COMMITMENT_LIMIT (1455) et
+    /// STATUS_QUOTA_EXCEEDED (1816), tels que `RtlNtStatusToDosError` les rend
+    /// (releve le 01/10/2026), et ERROR_OUTOFMEMORY (14).
+    pub(super) fn est_un_epuisement(e: &std::io::Error) -> bool {
+        matches!(
+            e.raw_os_error().map(|code| code as u32),
+            Some(
+                ERROR_NOT_ENOUGH_MEMORY
+                    | ERROR_OUTOFMEMORY
+                    | ERROR_NO_SYSTEM_RESOURCES
+                    | ERROR_COMMITMENT_LIMIT
+                    | ERROR_NOT_ENOUGH_QUOTA
+            )
+        )
     }
 
     impl IpcServer {
@@ -622,38 +866,74 @@ mod imp {
             policy: AuthPolicy,
             sddl: &'static str,
         ) -> Result<Self> {
-            let mut server = Self {
-                path: path.to_string_lossy().into_owned(),
+            let path = path.to_string_lossy().into_owned();
+            // La premiere instance est creee avec first_pipe_instance pour
+            // garantir qu'aucun autre processus n'a deja squatte le nom.
+            let next = create_pipe(&path, sddl, true)?;
+            tracing::info!(path = %path, "IPC en ecoute");
+            Ok(Self {
+                path,
                 policy,
                 sddl,
                 delai_requete: DELAI_REQUETE,
-                next: None,
-            };
-            // La premiere instance est creee avec first_pipe_instance pour
-            // garantir qu'aucun autre processus n'a deja squatte le nom.
-            server.next = Some(server.create_instance(true)?);
-            tracing::info!(path = %server.path, "IPC en ecoute");
-            Ok(server)
+                next,
+                journal: Journal::default(),
+                #[cfg(test)]
+                panne: None,
+            })
         }
 
-        fn create_instance(&self, first: bool) -> Result<NamedPipeServer> {
-            create_pipe(&self.path, self.sddl, first)
-        }
-
+        /// Attend un client sur l'instance en attente, et la rend avec sa
+        /// connexion une fois l'instance suivante creee.
+        ///
+        /// Le nom du pipe ne cesse jamais d'exister: sans cela un processus
+        /// tiers pourrait le creer a notre place, et le serveur rejoindrait
+        /// son pipe en creant l'instance suivante (`first_pipe_instance` est
+        /// faux pour elle). `connect` se fait donc sur l'instance que le
+        /// serveur tient, sans la lui retirer, et la suivante est creee
+        /// pendant qu'elle le tient encore.
+        ///
+        /// Si cette creation echoue faute de ressource du noyau (voir
+        /// [`est_un_epuisement`]), le client deja connecte patiente:
+        /// `PAUSE_EPUISEMENT`, puis un nouvel essai, aussi longtemps qu'il le
+        /// faut, et son instance tient le nom pendant tout ce temps. Toute
+        /// autre erreur est rendue, celles de `connect` comprises. Un client
+        /// qui ferme avant ou pendant l'acceptation n'en produit pas: mio
+        /// 1.2, sous tokio, prend `ERROR_NO_DATA` de `ConnectNamedPipe` pour
+        /// une connexion etablie (`connect_overlapped`), que `accept` rend et
+        /// dont la lecture rend `Closed`, mesure par
+        /// `un_client_qui_ferme_tot_n_arrete_pas_le_serveur`.
         pub async fn accept(&mut self) -> Result<Connection> {
-            let server = match self.next.take() {
-                Some(s) => s,
-                None => self.create_instance(false)?,
-            };
-            server.connect().await?;
-            // On prepare tout de suite l'instance suivante: sans cela, entre
-            // deux clients, le nom du pipe n'existe plus et un processus tiers
-            // pourrait le creer a notre place.
-            self.next = Some(self.create_instance(false)?);
-
-            let peer = peer_identity(&server);
+            self.next.connect().await?;
+            let suivante = self.instance_suivante().await?;
+            let connectee = std::mem::replace(&mut self.next, suivante);
+            let peer = peer_identity(&connectee);
             tracing::debug!(%peer, "client accepte");
-            Ok(Connection::new(server, peer, self.delai_requete))
+            Ok(Connection::new(connectee, peer, self.delai_requete))
+        }
+
+        /// L'instance qui attendra le client suivant, creee pendant que
+        /// `next` tient le nom.
+        async fn instance_suivante(&mut self) -> Result<NamedPipeServer> {
+            loop {
+                match self.creer_une_instance() {
+                    Err(IpcError::Io(e)) if est_un_epuisement(&e) => {
+                        self.journal.incident(ACCEPTATION_SUSPENDUE, &e);
+                        tokio::time::sleep(PAUSE_EPUISEMENT).await;
+                    }
+                    issue => return issue,
+                }
+            }
+        }
+
+        /// Une instance de plus du pipe, jamais la premiere: appelee
+        /// seulement pendant que `next` tient le nom.
+        fn creer_une_instance(&mut self) -> Result<NamedPipeServer> {
+            #[cfg(test)]
+            if let Some(e) = self.panne.as_mut().and_then(|p| p(Etape::InstanceSuivante)) {
+                return Err(e.into());
+            }
+            create_pipe(&self.path, self.sddl, false)
         }
 
         pub fn path(&self) -> &Path {
@@ -1146,14 +1426,7 @@ mod imp {
                 let serveur = IpcServer::bind(&nom, AuthPolicy::default(), None)
                     .await
                     .expect("bind");
-                let proprietaire = pipe_owner(
-                    serveur
-                        .next
-                        .as_ref()
-                        .expect("instance prete")
-                        .as_raw_handle(),
-                )
-                .expect("proprietaire");
+                let proprietaire = pipe_owner(serveur.next.as_raw_handle()).expect("proprietaire");
                 let issue = IpcClient::connect_verified(&nom, attendu)
                     .await
                     .map(|(_, regle)| regle);
@@ -1396,14 +1669,7 @@ mod imp {
             let rt = runtime_serveur();
             let nom = nom("identite");
             let (mut serveur, _premier) = serveur_occupe(&nom, &rt);
-            let proprietaire = pipe_owner(
-                serveur
-                    .next
-                    .as_ref()
-                    .expect("instance prete")
-                    .as_raw_handle(),
-            )
-            .expect("proprietaire");
+            let proprietaire = pipe_owner(serveur.next.as_raw_handle()).expect("proprietaire");
             let issue = client(nom, ServerRequirement::Privileged);
             std::thread::sleep(Duration::from_millis(300));
             assert!(
@@ -1573,13 +1839,13 @@ mod imp {
         ///
         /// Une coquille dans le SDDL ne se voit aujourd'hui qu'au demarrage du
         /// daemon, sur une machine Windows, au moment ou le pipe se cree. La
-        /// meme conversion que `create_instance` la reduit a une recette.
+        /// meme conversion que `create_pipe` la reduit a une recette.
         #[test]
         fn windows_accepte_le_sddl_du_pipe() {
             let mut large: Vec<u16> = PIPE_SDDL.encode_utf16().collect();
             large.push(0);
             let mut psd: *mut c_void = std::ptr::null_mut();
-            // SAFETY: meme appel que create_instance, sur une chaine UTF-16
+            // SAFETY: meme appel que create_pipe, sur une chaine UTF-16
             // terminee par un zero; le descripteur rendu est libere aussitot.
             let ok = unsafe {
                 ConvertStringSecurityDescriptorToSecurityDescriptorW(
@@ -1955,6 +2221,451 @@ mod tests_clients_concurrents {
         drop(serveur);
         nettoyer(&chemin);
         rendue_dans_le_delai(issue, duree);
+    }
+}
+
+/// Ce que `accept` fait d'une erreur qui ne touche qu'une connexion, ou d'une
+/// ressource qui manque: le serveur continue, ou il rend. Par `bind` (Linux)
+/// ou `bind_avec_descripteur` (Windows, descripteur de recette), puis
+/// `accept`, tels quels.
+///
+/// Ce que le systeme ne laisse pas provoquer sans abimer la machine (l'identite
+/// illisible d'un pair, une acceptation avortee, la reserve du noyau epuisee)
+/// passe par la couture `panne`: une erreur substituee a l'issue d'UNE etape
+/// de `accept`, tout le reste du chemin etant celui du daemon. L'epuisement
+/// reel des descripteurs, lui, est mesure par le daemon (`serve`), dans un
+/// processus enfant.
+#[cfg(test)]
+mod tests_acceptation {
+    use super::*;
+    use crate::protocol::Command;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{Duration, Instant};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+    /// Au-dela, une acceptation ou une reponse attendue est une recette qui
+    /// pend: elle rougit au lieu d'attendre.
+    const AU_PLUS: Duration = Duration::from_secs(5);
+
+    /// Duree d'un epuisement simule.
+    const EPUISEMENT: Duration = Duration::from_secs(1);
+
+    /// Essais au plus pendant `EPUISEMENT`: un par `PAUSE_EPUISEMENT`, plus
+    /// le premier et une marge d'ordonnancement. Une boucle active en fait
+    /// des milliers.
+    const ESSAIS_AU_PLUS: u64 = 13;
+
+    #[cfg(unix)]
+    async fn serveur(nom: &str) -> (IpcServer, String) {
+        use std::os::unix::fs::PermissionsExt;
+        let dossier = std::env::temp_dir().join(format!(
+            "bifrost-ipc-acceptation-{}-{nom}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dossier);
+        std::fs::create_dir_all(&dossier).expect("repertoire de la recette");
+        // Mode pose explicitement: le `umask` que `bind` pose le temps de se
+        // lier vaut pour tout le processus (voir tests_clients_concurrents).
+        std::fs::set_permissions(&dossier, std::fs::Permissions::from_mode(0o755))
+            .expect("repertoire de la recette en 0755");
+        let chemin = dossier.join("d.sock");
+        // SAFETY: geteuid ne prend aucun argument et ne touche aucune memoire.
+        let euid = unsafe { libc::geteuid() };
+        let policy = AuthPolicy {
+            allowed_uids: vec![0, euid],
+            allowed_gid: None,
+        };
+        let serveur = IpcServer::bind(&chemin, policy, None).await.expect("bind");
+        (serveur, chemin.to_string_lossy().into_owned())
+    }
+
+    #[cfg(windows)]
+    async fn serveur(nom: &str) -> (IpcServer, String) {
+        let chemin = format!(
+            r"\\.\pipe\bifrost-ipc-acceptation-{}-{nom}",
+            std::process::id()
+        );
+        let serveur = IpcServer::bind_avec_descripteur(
+            std::path::Path::new(&chemin),
+            AuthPolicy::default(),
+            imp::SDDL_RECETTE,
+        )
+        .expect("serveur de recette");
+        (serveur, chemin)
+    }
+
+    /// Retire le repertoire de la recette (Linux); sous Windows le pipe
+    /// disparait avec sa derniere poignee.
+    fn nettoyer(chemin: &str) {
+        #[cfg(unix)]
+        if let Some(dossier) = std::path::Path::new(chemin).parent() {
+            let _ = std::fs::remove_dir_all(dossier);
+        }
+        #[cfg(windows)]
+        let _ = chemin;
+    }
+
+    /// Un client brut: il ouvre le canal et n'ecrit que ce que la recette lui
+    /// fait ecrire.
+    #[cfg(unix)]
+    async fn ouvrir(chemin: &str) -> std::io::Result<tokio::net::UnixStream> {
+        tokio::net::UnixStream::connect(chemin).await
+    }
+
+    #[cfg(windows)]
+    async fn ouvrir(
+        chemin: &str,
+    ) -> std::io::Result<tokio::net::windows::named_pipe::NamedPipeClient> {
+        tokio::net::windows::named_pipe::ClientOptions::new().open(chemin)
+    }
+
+    /// Le client ecrit une requete complete.
+    async fn demander<C: tokio::io::AsyncWrite + Unpin>(client: &mut C) {
+        let mut requete = serde_json::to_vec(&Request::new(Command::Status)).expect("requete");
+        requete.push(b'\n');
+        client
+            .write_all(&requete)
+            .await
+            .expect("ecriture de la requete");
+    }
+
+    /// Le client a-t-il recu une reponse dans `AU_PLUS`?
+    async fn repondu<C: tokio::io::AsyncRead + Unpin>(client: &mut C) -> bool {
+        let mut ligne = String::new();
+        tokio::time::timeout(
+            AU_PLUS,
+            tokio::io::BufReader::new(client).read_line(&mut ligne),
+        )
+        .await
+        .is_ok_and(|n| n.is_ok_and(|n| n > 0))
+    }
+
+    /// Le serveur lit la requete d'une connexion acceptee et y repond.
+    async fn servir(issue: std::result::Result<Result<Connection>, tokio::time::error::Elapsed>) {
+        if let Ok(Ok(mut connexion)) = issue
+            && connexion.recv().await.is_ok()
+        {
+            let _ = connexion.send(&Response::Ok).await;
+        }
+    }
+
+    /// L'issue d'une acceptation, reduite a ce qui s'imprime.
+    fn decrire(
+        issue: &std::result::Result<Result<Connection>, tokio::time::error::Elapsed>,
+    ) -> String {
+        match issue {
+            Err(_) => "aucune acceptation dans le delai de la recette".to_owned(),
+            Ok(Ok(_)) => "acceptee".to_owned(),
+            Ok(Err(IpcError::Io(e))) => format!("erreur {:?}: {e}", e.raw_os_error()),
+            Ok(Err(e)) => format!("erreur: {e}"),
+        }
+    }
+
+    /// Un client qui ouvre le pipe puis le ferme, avant que le serveur ne
+    /// l'accepte ou pendant qu'il l'attend (`ConnectNamedPipe` en cours):
+    /// ce que `accept` en rend, ce que la lecture de cette connexion rend,
+    /// et le client suivant est servi par le meme serveur.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn un_client_qui_ferme_tot_n_arrete_pas_le_serveur() {
+        let (mut serveur, chemin) = serveur("ferme-tot").await;
+
+        // Avant: ouvert puis ferme, `accept` pas encore appele.
+        drop(ouvrir(&chemin).await.expect("ouverture"));
+        let avant = tokio::time::timeout(AU_PLUS, serveur.accept()).await;
+        let mesure_avant = decrire(&avant);
+        let lecture_avant = match avant {
+            Ok(Ok(mut c)) => format!("{:?}", c.recv().await.map(|_| ())),
+            _ => "-".to_owned(),
+        };
+
+        // Pendant: `accept` attend deja quand le client ouvre puis ferme.
+        let attente = tokio::spawn(async move {
+            let issue = tokio::time::timeout(AU_PLUS, serveur.accept()).await;
+            (serveur, issue)
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(ouvrir(&chemin).await.expect("ouverture"));
+        let (mut serveur, pendant) = attente.await.expect("tache d'acceptation");
+        let mesure_pendant = decrire(&pendant);
+        let lecture_pendant = match pendant {
+            Ok(Ok(mut c)) => format!("{:?}", c.recv().await.map(|_| ())),
+            _ => "-".to_owned(),
+        };
+
+        // Le suivant: une requete, une reponse.
+        let mut client = ouvrir(&chemin).await.expect("ouverture");
+        demander(&mut client).await;
+        let suivant = tokio::time::timeout(AU_PLUS, serveur.accept()).await;
+        let mesure_suivant = decrire(&suivant);
+        servir(suivant).await;
+        let servi = repondu(&mut client).await;
+        println!(
+            "mesure client ferme tot: avant={mesure_avant} lecture={lecture_avant}; pendant={mesure_pendant} lecture={lecture_pendant}; suivant={mesure_suivant} servi={servi}"
+        );
+        assert_eq!(mesure_avant, "acceptee", "avant");
+        assert_eq!(mesure_pendant, "acceptee", "pendant");
+        assert!(
+            servi,
+            "le client suivant n'a pas ete servi: {mesure_suivant}"
+        );
+    }
+
+    /// Unix: une erreur qui ne touche qu'une connexion ne fait pas rendre
+    /// `accept`. Trois acceptations en erreur (avortee, erreur de protocole,
+    /// interrompue), puis l'identite illisible d'un pair deja accepte: ce
+    /// pair-la est ferme sans reponse, et le pair suivant est servi.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn une_erreur_propre_a_une_connexion_n_arrete_pas_l_acceptation() {
+        let (mut serveur, chemin) = serveur("connexion").await;
+        let acceptations = Arc::new(AtomicU64::new(0));
+        let identites = Arc::new(AtomicU64::new(0));
+        let (a, i) = (acceptations.clone(), identites.clone());
+        serveur.panne = Some(Box::new(move |etape| {
+            let code = match etape {
+                imp::Etape::Acceptation => match a.fetch_add(1, Ordering::SeqCst) {
+                    0 => libc::ECONNABORTED,
+                    1 => libc::EPROTO,
+                    2 => libc::EINTR,
+                    _ => return None,
+                },
+                imp::Etape::Identite => match i.fetch_add(1, Ordering::SeqCst) {
+                    0 => libc::ENOTCONN,
+                    _ => return None,
+                },
+            };
+            Some(std::io::Error::from_raw_os_error(code))
+        }));
+        // Le premier pair, dont l'identite sera illisible, ecrit une requete
+        // que personne ne doit lire; le second est servi.
+        let mut abandonne = ouvrir(&chemin).await.expect("premier pair");
+        demander(&mut abandonne).await;
+        let mut suivant = ouvrir(&chemin).await.expect("second pair");
+        demander(&mut suivant).await;
+
+        let issue = tokio::time::timeout(AU_PLUS, serveur.accept()).await;
+        let mesure = decrire(&issue);
+        servir(issue).await;
+        let servi = repondu(&mut suivant).await;
+        // Une fin de flux, ou ECONNRESET: Linux le pose sur le pair d'un
+        // socket ferme avec des donnees non lues (`unix_release_sock`).
+        let mut lu = Vec::new();
+        let ferme_sans_reponse = tokio::time::timeout(
+            AU_PLUS,
+            tokio::io::AsyncReadExt::read_to_end(&mut abandonne, &mut lu),
+        )
+        .await;
+        let acceptations = acceptations.load(Ordering::SeqCst);
+        let identites = identites.load(Ordering::SeqCst);
+        let lignes = serveur.journal.lignes;
+        drop(serveur);
+        nettoyer(&chemin);
+        println!(
+            "mesure erreur propre a une connexion: accept={mesure} essais d'acceptation={acceptations} identites lues={identites} servi={servi} abandonne={ferme_sans_reponse:?} octets recus={} lignes={lignes}",
+            lu.len()
+        );
+        assert_eq!(mesure, "acceptee");
+        assert_eq!((acceptations, identites), (5, 2));
+        assert!(servi, "le pair suivant n'a pas ete servi");
+        assert!(
+            ferme_sans_reponse.is_ok() && lu.is_empty(),
+            "le pair abandonne doit etre ferme sans reponse: {ferme_sans_reponse:?}, {} octets",
+            lu.len()
+        );
+        assert_eq!(lignes, 1, "quatre incidents, une ligne");
+    }
+
+    /// Un epuisement de ressource ne fait pas rendre `accept`: il attend,
+    /// sans boucle active, puis reprend, et le client qui patientait est
+    /// servi. Unix: `accept(2)` rend `EMFILE` pendant `EPUISEMENT`, la
+    /// connexion restant dans la file d'ecoute comme sous Linux. Windows: la
+    /// creation de l'instance suivante rend `ERROR_NO_SYSTEM_RESOURCES`,
+    /// le client etant deja connecte; a chaque essai un tiers tente de creer
+    /// le nom du pipe, ce qu'il ne doit jamais pouvoir faire.
+    #[tokio::test]
+    async fn un_epuisement_attend_sans_boucle_active_puis_reprend() {
+        let (mut serveur, chemin) = serveur("epuisement").await;
+        let essais = Arc::new(AtomicU64::new(0));
+        let tiers = Arc::new(AtomicU64::new(0));
+        let (e, t) = (essais.clone(), tiers.clone());
+        #[cfg(windows)]
+        let nom = chemin.clone();
+        let mut fin: Option<Instant> = None;
+        serveur.panne = Some(Box::new(move |etape| {
+            #[cfg(unix)]
+            let (pertinente, code) = (etape == imp::Etape::Acceptation, libc::EMFILE);
+            #[cfg(windows)]
+            let (pertinente, code) = {
+                // Un tiers qui voudrait le nom: il y parvient s'il est libre.
+                if tokio::net::windows::named_pipe::ServerOptions::new()
+                    .first_pipe_instance(true)
+                    .create(&nom)
+                    .is_ok()
+                {
+                    t.fetch_add(1, Ordering::SeqCst);
+                }
+                (
+                    etape == imp::Etape::InstanceSuivante,
+                    windows_sys::Win32::Foundation::ERROR_NO_SYSTEM_RESOURCES as i32,
+                )
+            };
+            let fin = *fin.get_or_insert_with(|| Instant::now() + EPUISEMENT);
+            if !pertinente || Instant::now() >= fin {
+                return None;
+            }
+            e.fetch_add(1, Ordering::SeqCst);
+            Some(std::io::Error::from_raw_os_error(code))
+        }));
+        #[cfg(unix)]
+        let _ = &t;
+
+        let mut client = ouvrir(&chemin).await.expect("client");
+        demander(&mut client).await;
+        let debut = Instant::now();
+        let issue = tokio::time::timeout(AU_PLUS, serveur.accept()).await;
+        let duree = debut.elapsed();
+        let mesure = decrire(&issue);
+        servir(issue).await;
+        let servi = repondu(&mut client).await;
+        drop(client);
+
+        // Le premier client parti, le serveur attend le suivant, qui vient
+        // ensuite. Windows: le tiers n'a pas davantage le nom a cet instant,
+        // ou plus aucune connexion ne le tient.
+        let attente = tokio::spawn(async move {
+            let issue = tokio::time::timeout(AU_PLUS, serveur.accept()).await;
+            servir(issue).await;
+            serveur
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let second = match ouvrir(&chemin).await {
+            Ok(mut second) => {
+                demander(&mut second).await;
+                repondu(&mut second).await
+            }
+            Err(e) => {
+                println!("second client: {e}");
+                false
+            }
+        };
+        let serveur = attente.await.expect("tache d'acceptation");
+
+        let essais = essais.load(Ordering::SeqCst);
+        let tiers = tiers.load(Ordering::SeqCst);
+        let lignes = serveur.journal.lignes;
+        drop(serveur);
+        nettoyer(&chemin);
+        println!(
+            "mesure epuisement simule: accept={mesure} apres {duree:?}, essais={essais}, lignes={lignes}, nom pris par un tiers={tiers}, servi={servi}, second servi={second}"
+        );
+        assert_eq!(mesure, "acceptee");
+        assert_eq!(tiers, 0, "un tiers a pu creer le nom du pipe");
+        assert!(
+            (2..=ESSAIS_AU_PLUS).contains(&essais),
+            "{essais} essais en {EPUISEMENT:?}: attente active, ou aucune attente"
+        );
+        assert!(
+            duree >= EPUISEMENT * 9 / 10 && duree < EPUISEMENT + PAUSE_EPUISEMENT * 5,
+            "reprise hors de sa borne: {duree:?}"
+        );
+        assert_eq!(lignes, 1, "un episode, une ligne");
+        assert!(servi && second, "client servi: {servi}, second: {second}");
+    }
+
+    /// Une erreur de l'ecoute elle-meme reste fatale: `accept` la rend
+    /// aussitot, sans pause ni nouvel essai.
+    #[tokio::test]
+    async fn une_erreur_de_l_ecoute_reste_fatale() {
+        #[cfg(unix)]
+        let codes = [libc::EBADF, libc::EINVAL, libc::EPERM];
+        #[cfg(windows)]
+        let codes = [
+            windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED as i32,
+            windows_sys::Win32::Foundation::ERROR_INVALID_PARAMETER as i32,
+        ];
+        for code in codes {
+            let (mut serveur, chemin) = serveur(&format!("fatale-{code}")).await;
+            serveur.panne = Some(Box::new(move |_| {
+                Some(std::io::Error::from_raw_os_error(code))
+            }));
+            // Windows: l'erreur vient a la creation de l'instance suivante,
+            // donc apres la connexion d'un client.
+            let _client = ouvrir(&chemin).await.expect("client");
+            let issue = tokio::time::timeout(Duration::from_secs(1), serveur.accept()).await;
+            let mesure = decrire(&issue);
+            drop(serveur);
+            nettoyer(&chemin);
+            assert_eq!(
+                mesure,
+                decrire(&Ok(Err(IpcError::Io(std::io::Error::from_raw_os_error(
+                    code
+                ))))),
+                "{code}"
+            );
+        }
+    }
+
+    /// Unix: la nature de chaque erreur d'acceptation, nommee.
+    #[cfg(unix)]
+    #[test]
+    fn chaque_erreur_d_acceptation_a_sa_nature() {
+        use imp::Nature::{Connexion, Epuisement, Fatale};
+        for (code, attendue) in [
+            (libc::EMFILE, Epuisement),
+            (libc::ENFILE, Epuisement),
+            (libc::ENOMEM, Epuisement),
+            (libc::ENOBUFS, Epuisement),
+            (libc::ENOSPC, Epuisement),
+            (libc::ECONNABORTED, Connexion),
+            (libc::EPROTO, Connexion),
+            (libc::EINTR, Connexion),
+            (libc::EBADF, Fatale),
+            (libc::EINVAL, Fatale),
+            (libc::ENOTSOCK, Fatale),
+            (libc::EOPNOTSUPP, Fatale),
+            (libc::EPERM, Fatale),
+            (libc::EACCES, Fatale),
+        ] {
+            assert_eq!(
+                imp::nature(&std::io::Error::from_raw_os_error(code)),
+                attendue,
+                "errno {code}"
+            );
+        }
+        assert_eq!(imp::nature(&std::io::Error::other("sans code")), Fatale);
+    }
+
+    /// Windows: les erreurs de creation d'instance qui disent un epuisement,
+    /// nommees, et des voisines qui n'en sont pas.
+    #[cfg(windows)]
+    #[test]
+    fn chaque_erreur_de_creation_a_sa_nature() {
+        use windows_sys::Win32::Foundation::{
+            ERROR_ACCESS_DENIED, ERROR_BROKEN_PIPE, ERROR_COMMITMENT_LIMIT, ERROR_FILE_NOT_FOUND,
+            ERROR_NO_DATA, ERROR_NO_SYSTEM_RESOURCES, ERROR_NOT_ENOUGH_MEMORY,
+            ERROR_NOT_ENOUGH_QUOTA, ERROR_OUTOFMEMORY, ERROR_PIPE_BUSY,
+        };
+        for (code, attendue) in [
+            (ERROR_NOT_ENOUGH_MEMORY, true),
+            (ERROR_OUTOFMEMORY, true),
+            (ERROR_NO_SYSTEM_RESOURCES, true),
+            (ERROR_COMMITMENT_LIMIT, true),
+            (ERROR_NOT_ENOUGH_QUOTA, true),
+            (ERROR_ACCESS_DENIED, false),
+            (ERROR_PIPE_BUSY, false),
+            (ERROR_NO_DATA, false),
+            (ERROR_BROKEN_PIPE, false),
+            (ERROR_FILE_NOT_FOUND, false),
+        ] {
+            assert_eq!(
+                imp::est_un_epuisement(&std::io::Error::from_raw_os_error(code as i32)),
+                attendue,
+                "{code}"
+            );
+        }
+        assert!(!imp::est_un_epuisement(&std::io::Error::other("sans code")));
     }
 }
 
