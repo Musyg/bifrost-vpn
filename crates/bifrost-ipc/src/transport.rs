@@ -28,6 +28,8 @@ pub enum IpcError {
     VersionMismatch { got: u32 },
     #[error(transparent)]
     ServerIdentity(#[from] ServerIdentityError),
+    #[error("aucune requete complete dans le delai imparti")]
+    RequestTimeout,
 }
 
 pub type Result<T> = std::result::Result<T, IpcError>;
@@ -160,6 +162,33 @@ where
     Ok(buf)
 }
 
+/// Borne de la lecture d'une requete par le serveur, a compter du moment ou il
+/// l'attend: apres l'acceptation pour la premiere, apres sa reponse pour
+/// chacune des suivantes.
+///
+/// Le protocole n'a ni abonnement ni message que le serveur enverrait sans
+/// qu'on le lui demande: chaque echange part d'une requete, et chaque client
+/// du depot ecrit la sienne des que l'identite du serveur est etablie. Une
+/// connexion qui ne transmet aucune requete complete dans ce delai n'a donc
+/// rien a attendre du daemon; sans cette borne, elle lui tiendrait une tache,
+/// et sous Windows une instance du pipe, aussi longtemps que le client le
+/// voudrait. Le temps de traiter une requete n'y entre pas: une commande
+/// longue (`connect`, `check`) n'est jamais coupee par cette borne.
+const DELAI_REQUETE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Lit la trame d'une requete, dans le delai imparti au client pour l'ecrire.
+async fn read_request_frame<R>(
+    reader: &mut BufReader<R>,
+    delai: std::time::Duration,
+) -> Result<Vec<u8>>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    tokio::time::timeout(delai, read_frame(reader))
+        .await
+        .map_err(|_| IpcError::RequestTimeout)?
+}
+
 async fn write_frame<W>(writer: &mut W, bytes: &[u8]) -> Result<()>
 where
     W: tokio::io::AsyncWrite + Unpin,
@@ -186,6 +215,8 @@ mod imp {
         listener: UnixListener,
         policy: AuthPolicy,
         path: PathBuf,
+        /// [`DELAI_REQUETE`]; les recettes le raccourcissent.
+        pub(super) delai_requete: std::time::Duration,
     }
 
     impl IpcServer {
@@ -236,6 +267,7 @@ mod imp {
                 listener,
                 policy,
                 path,
+                delai_requete: DELAI_REQUETE,
             })
         }
 
@@ -250,13 +282,13 @@ mod imp {
                 match authorize(&peer, &self.policy) {
                     Ok(()) => {
                         tracing::debug!(%peer, "client accepte");
-                        return Ok(Connection::new(stream, peer));
+                        return Ok(Connection::new(stream, peer, self.delai_requete));
                     }
                     Err(e) => {
                         // On refuse sans rien lire du client, et on continue a
                         // servir: un refus ne doit pas arreter le daemon.
                         tracing::warn!(%peer, "connexion refusee");
-                        let mut conn = Connection::new(stream, peer);
+                        let mut conn = Connection::new(stream, peer, self.delai_requete);
                         let _ = conn.send(&Response::error(e.to_string())).await;
                     }
                 }
@@ -306,15 +338,17 @@ mod imp {
         reader: BufReader<tokio::io::ReadHalf<UnixStream>>,
         writer: tokio::io::WriteHalf<UnixStream>,
         peer: PeerIdentity,
+        delai: std::time::Duration,
     }
 
     impl Connection {
-        fn new(stream: UnixStream, peer: PeerIdentity) -> Self {
+        fn new(stream: UnixStream, peer: PeerIdentity, delai: std::time::Duration) -> Self {
             let (r, w) = tokio::io::split(stream);
             Self {
                 reader: BufReader::new(r),
                 writer: w,
                 peer,
+                delai,
             }
         }
 
@@ -322,8 +356,17 @@ mod imp {
             &self.peer
         }
 
+        /// La requete suivante, lue dans `DELAI_REQUETE`. Au-dela, `recv`
+        /// rend [`IpcError::RequestTimeout`] et la connexion est a abandonner:
+        /// une trame entamee a pu y etre lue en partie.
+        ///
+        /// # Pilote de temps requis
+        ///
+        /// Le delai est un minuteur tokio: `recv` doit tourner dans un runtime
+        /// dont le pilote de temps est actif (`enable_time`, ou `enable_all`
+        /// comme le daemon). Sans lui, tokio panique des le premier appel.
         pub async fn recv(&mut self) -> Result<Request> {
-            let bytes = read_frame(&mut self.reader).await?;
+            let bytes = read_request_frame(&mut self.reader, self.delai).await?;
             let req: Request = serde_json::from_slice(&bytes)?;
             if req.version != PROTOCOL_VERSION {
                 return Err(IpcError::VersionMismatch { got: req.version });
@@ -512,10 +555,11 @@ mod imp {
     use std::ffi::c_void;
     use std::os::windows::io::{AsRawHandle, RawHandle};
     use std::path::Path;
+    use std::time::{Duration, Instant};
     use tokio::net::windows::named_pipe::{
         ClientOptions, NamedPipeClient, NamedPipeServer, ServerOptions,
     };
-    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Foundation::{ERROR_PIPE_BUSY, LocalFree};
     use windows_sys::Win32::Security::Authorization::{
         ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1,
         SE_KERNEL_OBJECT,
@@ -533,9 +577,30 @@ mod imp {
     /// pipe, l'autorisation applicative n'a donc jamais a le refuser.
     const PIPE_SDDL: &str = "D:P(A;;GA;;;SY)(A;;GA;;;BA)";
 
+    /// Le descripteur des serveurs de recette: celui du daemon, plus une ACE
+    /// pour le proprietaire du pipe (`OW`), c'est-a-dire le compte qui le
+    /// cree. Un compte non eleve joint ainsi le serveur qu'il mesure, par le
+    /// meme `bind_avec_descripteur` et le meme `accept` que le daemon.
+    #[cfg(test)]
+    pub(super) const SDDL_RECETTE: &str = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;OW)";
+
+    /// `ERROR_PIPE_BUSY`, tel que `std::io::Error::raw_os_error` le rend: le
+    /// pipe existe, et aucune de ses instances n'attend de client.
+    const PIPE_OCCUPE: i32 = ERROR_PIPE_BUSY as i32;
+
+    /// Borne de l'attente d'une instance libre, par le client.
+    const ATTENTE_PIPE_OCCUPE: Duration = Duration::from_secs(2);
+
+    /// Intervalle entre deux ouvertures pendant cette attente.
+    const PAS_PIPE_OCCUPE: Duration = Duration::from_millis(50);
+
     pub struct IpcServer {
         path: String,
         policy: AuthPolicy,
+        /// Le descripteur de CHAQUE instance: [`PIPE_SDDL`], pose par `bind`.
+        sddl: &'static str,
+        /// [`DELAI_REQUETE`]; les recettes le raccourcissent.
+        pub(super) delai_requete: std::time::Duration,
         next: Option<NamedPipeServer>,
     }
 
@@ -545,10 +610,23 @@ mod imp {
             policy: AuthPolicy,
             _group: Option<u32>,
         ) -> Result<Self> {
-            let path = path.as_ref().to_string_lossy().into_owned();
+            Self::bind_avec_descripteur(path.as_ref(), policy, PIPE_SDDL)
+        }
+
+        /// Le corps de `bind`, le descripteur en parametre. Le daemon n'en
+        /// passe jamais d'autre que [`PIPE_SDDL`]; les recettes, si: un
+        /// compte non eleve n'ouvre pas le pipe du daemon, et c'est pourtant
+        /// sous ce compte qu'elles mesurent l'acceptation et le client.
+        pub(super) fn bind_avec_descripteur(
+            path: &Path,
+            policy: AuthPolicy,
+            sddl: &'static str,
+        ) -> Result<Self> {
             let mut server = Self {
-                path,
+                path: path.to_string_lossy().into_owned(),
                 policy,
+                sddl,
+                delai_requete: DELAI_REQUETE,
                 next: None,
             };
             // La premiere instance est creee avec first_pipe_instance pour
@@ -559,7 +637,7 @@ mod imp {
         }
 
         fn create_instance(&self, first: bool) -> Result<NamedPipeServer> {
-            create_pipe(&self.path, PIPE_SDDL, first)
+            create_pipe(&self.path, self.sddl, first)
         }
 
         pub async fn accept(&mut self) -> Result<Connection> {
@@ -575,7 +653,7 @@ mod imp {
 
             let peer = peer_identity(&server);
             tracing::debug!(%peer, "client accepte");
-            Ok(Connection::new(server, peer))
+            Ok(Connection::new(server, peer, self.delai_requete))
         }
 
         pub fn path(&self) -> &Path {
@@ -651,15 +729,17 @@ mod imp {
         reader: BufReader<tokio::io::ReadHalf<NamedPipeServer>>,
         writer: tokio::io::WriteHalf<NamedPipeServer>,
         peer: PeerIdentity,
+        delai: std::time::Duration,
     }
 
     impl Connection {
-        fn new(pipe: NamedPipeServer, peer: PeerIdentity) -> Self {
+        fn new(pipe: NamedPipeServer, peer: PeerIdentity, delai: std::time::Duration) -> Self {
             let (r, w) = tokio::io::split(pipe);
             Self {
                 reader: BufReader::new(r),
                 writer: w,
                 peer,
+                delai,
             }
         }
 
@@ -667,8 +747,11 @@ mod imp {
             &self.peer
         }
 
+        /// Meme contrat que la version Unix: la requete suivante, lue dans
+        /// `DELAI_REQUETE`, dans un runtime dont le pilote de temps est actif
+        /// (`enable_time`, ou `enable_all` comme le daemon).
         pub async fn recv(&mut self) -> Result<Request> {
-            let bytes = read_frame(&mut self.reader).await?;
+            let bytes = read_request_frame(&mut self.reader, self.delai).await?;
             let req: Request = serde_json::from_slice(&bytes)?;
             if req.version != PROTOCOL_VERSION {
                 return Err(IpcError::VersionMismatch { got: req.version });
@@ -753,6 +836,34 @@ mod imp {
         }
     }
 
+    /// Ouvre le pipe `path` cote client, en attendant au plus `borne` qu'une
+    /// de ses instances soit libre.
+    ///
+    /// `ERROR_PIPE_BUSY` dit que le pipe EXISTE et qu'aucune instance
+    /// n'attend de client: le serveur prepare la suivante des qu'un client a
+    /// pris la precedente, et deux clients simultanes se croisent dans cet
+    /// intervalle. On rouvre donc toutes les `PAS_PIPE_OCCUPE`, la boucle que
+    /// la documentation de tokio donne pour `NamedPipeClient`, jusqu'a la
+    /// borne; passe la borne, l'erreur du systeme est rendue telle quelle.
+    /// Toute autre erreur (pipe absent, acces refuse) est rendue a la
+    /// premiere ouverture.
+    ///
+    /// Pas `WaitNamedPipeW`: il bloque le fil qui l'appelle (le runtime, ou
+    /// un fil de `spawn_blocking` qu'une borne exterieure ne sait pas
+    /// interrompre), et sa documentation ne promet qu'une instance "disponible"
+    /// que le `CreateFile` suivant peut encore trouver prise par un autre
+    /// client: il faudrait la meme boucle autour.
+    async fn ouvrir_le_pipe(path: &str, borne: Duration) -> std::io::Result<NamedPipeClient> {
+        let debut = Instant::now();
+        loop {
+            match ClientOptions::new().open(path) {
+                Err(e) if e.raw_os_error() == Some(PIPE_OCCUPE) && debut.elapsed() < borne => {}
+                issue => return issue,
+            }
+            tokio::time::sleep(PAS_PIPE_OCCUPE).await;
+        }
+    }
+
     /// La decision, fonction pure du proprietaire lu et de l'exigence: celle
     /// que `IpcClient::connect_verified` applique au proprietaire du pipe.
     pub fn decide_pipe_owner(
@@ -804,12 +915,21 @@ mod imp {
         /// (`PIPE_SDDL`: SYSTEM et Administrateurs seulement), mais le permet
         /// a un processus eleve: la regle stricte de la preuve n'ecarte donc
         /// pas les Administrateurs pendant que le daemon tourne.
+        ///
+        /// # Un pipe occupe n'est pas un pipe absent
+        ///
+        /// Quand toutes les instances du pipe sont prises (`ERROR_PIPE_BUSY`),
+        /// le client rouvre jusqu'a `ATTENTE_PIPE_OCCUPE` (2 s) au lieu de
+        /// conclure a l'absence du daemon; toute autre erreur d'ouverture est
+        /// rendue aussitot (voir `ouvrir_le_pipe`). L'identite est exigee de
+        /// l'instance OBTENUE, quelle que soit l'ouverture qui l'a donnee: la
+        /// decision suit l'ouverture, et n'a qu'un chemin.
         pub async fn connect_verified(
             path: impl AsRef<Path>,
             attendu: ServerRequirement,
         ) -> Result<(Self, ServerRule)> {
             let path = path.as_ref().to_string_lossy().into_owned();
-            let pipe = ClientOptions::new().open(&path)?;
+            let pipe = ouvrir_le_pipe(&path, ATTENTE_PIPE_OCCUPE).await?;
             let regle = decide_pipe_owner(pipe_owner(pipe.as_raw_handle())?, attendu)?;
             Ok((Self::from_pipe(pipe), regle))
         }
@@ -957,7 +1077,7 @@ mod imp {
         /// l'exigence. Ecrit en clair plutot que recalcule par
         /// `decide_pipe_owner`: une recette qui demanderait a la decision ce
         /// qu'elle doit attendre de la decision ne mesurerait rien.
-        fn attendu_du_client(
+        pub(super) fn attendu_du_client(
             proprietaire: PipeOwner,
             attendu: ServerRequirement,
         ) -> Option<ServerRule> {
@@ -1167,6 +1287,172 @@ mod imp {
         }
     }
 
+    /// Un pipe OCCUPE n'est pas un pipe absent.
+    ///
+    /// Le serveur ne tient qu'une instance en attente a la fois, et prepare la
+    /// suivante des qu'un client a pris la precedente: entre les deux, un
+    /// autre client trouve le pipe sans instance libre (`ERROR_PIPE_BUSY`).
+    /// Ces recettes mesurent ce que le client en fait, par `connect_verified`
+    /// et contre un serveur qui passe par `bind_avec_descripteur` et `accept`
+    /// comme le daemon. Chaque client est un fil a lui, avec son runtime, et
+    /// rend son issue par un canal lu avec une borne: une attente sans fin
+    /// rougit en quelques secondes, elle ne pend pas.
+    #[cfg(test)]
+    mod tests_pipe_occupe {
+        use super::tests_identite_serveur::attendu_du_client;
+        use super::*;
+        use std::sync::mpsc;
+        use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND};
+
+        fn nom(suffixe: &str) -> String {
+            format!(
+                r"\\.\pipe\bifrost-ipc-occupe-{}-{suffixe}",
+                std::process::id()
+            )
+        }
+
+        fn runtime_serveur() -> tokio::runtime::Runtime {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .expect("runtime du serveur")
+        }
+
+        /// Ce que `connect_verified` a rendu, reduit a ce qui traverse un
+        /// canal.
+        #[derive(Debug, PartialEq, Eq)]
+        enum Issue {
+            Admis(ServerRule),
+            Refuse(ServerIdentityError),
+            Io(Option<i32>),
+            Autre(String),
+        }
+
+        /// Un client dans un fil a lui: son issue, et le temps qu'il y a mis.
+        fn client(nom: String, attendu: ServerRequirement) -> mpsc::Receiver<(Issue, Duration)> {
+            let (tx, rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("runtime du client");
+                let debut = Instant::now();
+                let issue = match rt.block_on(IpcClient::connect_verified(&nom, attendu)) {
+                    Ok((_, regle)) => Issue::Admis(regle),
+                    Err(IpcError::ServerIdentity(e)) => Issue::Refuse(e),
+                    Err(IpcError::Io(e)) => Issue::Io(e.raw_os_error()),
+                    Err(autre) => Issue::Autre(autre.to_string()),
+                };
+                let _ = tx.send((issue, debut.elapsed()));
+            });
+            rx
+        }
+
+        /// Le serveur de recette, dont l'unique instance est prise par un
+        /// premier client que personne n'accepte: le pipe existe, et aucune
+        /// de ses instances n'attend de client.
+        fn serveur_occupe(nom: &str, rt: &tokio::runtime::Runtime) -> (IpcServer, NamedPipeClient) {
+            let _dans = rt.enter();
+            let serveur = IpcServer::bind_avec_descripteur(
+                Path::new(nom),
+                AuthPolicy::default(),
+                SDDL_RECETTE,
+            )
+            .expect("serveur de recette");
+            let premier = ClientOptions::new().open(nom).expect("premier client");
+            (serveur, premier)
+        }
+
+        /// Occupe au-dela de la borne: le client a attendu au moins
+        /// `ATTENTE_PIPE_OCCUPE`, puis rend l'erreur du systeme telle quelle,
+        /// sans pendre.
+        #[test]
+        fn un_pipe_occupe_au_dela_de_la_borne_rend_son_erreur_sans_pendre() {
+            let rt = runtime_serveur();
+            let nom = nom("borne");
+            let (_serveur, _premier) = serveur_occupe(&nom, &rt);
+            let (issue, duree) = client(nom, ServerRequirement::Privileged)
+                .recv_timeout(ATTENTE_PIPE_OCCUPE + Duration::from_secs(3))
+                .expect("l'attente d'une instance libre doit etre bornee");
+            assert_eq!(issue, Issue::Io(Some(PIPE_OCCUPE)), "{duree:?}");
+            assert!(
+                duree >= ATTENTE_PIPE_OCCUPE,
+                "le client n'a pas attendu d'instance libre: {duree:?}"
+            );
+            assert!(
+                duree < ATTENTE_PIPE_OCCUPE + Duration::from_secs(1),
+                "l'attente a depasse sa borne: {duree:?}"
+            );
+        }
+
+        /// Une instance se libere pendant l'attente: le client l'ouvre, et
+        /// l'identite du serveur est exigee de CETTE instance comme de toute
+        /// autre. Le pipe de recette appartient au compte courant, que la
+        /// preuve refuse (sous SYSTEM il appartient a LocalSystem, qu'elle
+        /// admet): `attendu_du_client` le dit en clair.
+        #[test]
+        fn l_identite_est_exigee_de_l_instance_obtenue_apres_l_attente() {
+            let rt = runtime_serveur();
+            let nom = nom("identite");
+            let (mut serveur, _premier) = serveur_occupe(&nom, &rt);
+            let proprietaire = pipe_owner(
+                serveur
+                    .next
+                    .as_ref()
+                    .expect("instance prete")
+                    .as_raw_handle(),
+            )
+            .expect("proprietaire");
+            let issue = client(nom, ServerRequirement::Privileged);
+            std::thread::sleep(Duration::from_millis(300));
+            assert!(
+                matches!(issue.try_recv(), Err(mpsc::TryRecvError::Empty)),
+                "le client a rendu sans attendre d'instance libre"
+            );
+            // Le serveur accepte le premier client et prepare l'instance
+            // suivante, que personne n'occupe.
+            let _connexion = rt.block_on(serveur.accept()).expect("acceptation");
+            let (issue, duree) = issue
+                .recv_timeout(ATTENTE_PIPE_OCCUPE + Duration::from_secs(3))
+                .expect("le client doit rendre son issue dans un temps borne");
+            assert!(duree >= Duration::from_millis(300), "{duree:?}");
+            let attendu = match attendu_du_client(proprietaire, ServerRequirement::Privileged) {
+                Some(regle) => Issue::Admis(regle),
+                None => Issue::Refuse(ServerIdentityError::Refused),
+            };
+            assert_eq!(issue, attendu, "{proprietaire:?}, {duree:?}");
+        }
+
+        /// Toute autre erreur d'ouverture est rendue a la premiere: un pipe
+        /// absent, et un pipe que sa DACL ferme a ce compte (SYSTEM seul).
+        #[test]
+        fn toute_autre_erreur_d_ouverture_est_rendue_sans_attendre() {
+            let immediat = ATTENTE_PIPE_OCCUPE / 4;
+            let (issue, duree) = client(nom("absent"), ServerRequirement::Elevated)
+                .recv_timeout(ATTENTE_PIPE_OCCUPE + Duration::from_secs(3))
+                .expect("un pipe absent doit rendre son erreur dans un temps borne");
+            assert_eq!(issue, Issue::Io(Some(ERROR_FILE_NOT_FOUND as i32)));
+            assert!(duree < immediat, "pipe absent: {duree:?}");
+
+            let rt = runtime_serveur();
+            let nom = nom("refuse");
+            let _dans = rt.enter();
+            let serveur = create_pipe(&nom, "D:P(A;;GA;;;SY)", true).expect("pipe de SYSTEM");
+            let proprietaire = pipe_owner(serveur.as_raw_handle()).expect("proprietaire");
+            let (issue, duree) = client(nom, ServerRequirement::Elevated)
+                .recv_timeout(ATTENTE_PIPE_OCCUPE + Duration::from_secs(3))
+                .expect("un acces refuse doit rendre son erreur dans un temps borne");
+            if proprietaire == PipeOwner::LocalSystem {
+                // Sous SYSTEM la DACL admet ce compte: le pipe s'ouvre.
+                assert_eq!(issue, Issue::Admis(ServerRule::WindowsSystemPipeOwner));
+            } else {
+                assert_eq!(issue, Issue::Io(Some(ERROR_ACCESS_DENIED as i32)));
+                assert!(duree < immediat, "acces refuse: {duree:?}");
+            }
+        }
+    }
+
     /// La DACL du pipe est le SEUL controle d'acces sous Windows.
     ///
     /// [`peer_identity`] rend `uid: 0` en dur, et le dit: l'identite du pair ne
@@ -1254,6 +1540,35 @@ mod imp {
             }
         }
 
+        /// `bind` pose `PIPE_SDDL`, le descripteur en parametre de
+        /// `bind_avec_descripteur` n'etant qu'une couture pour les recettes;
+        /// et sa premiere instance exige `first_pipe_instance`: un nom deja
+        /// tenu par un autre serveur, meme grand ouvert, fait echouer `bind`
+        /// au lieu de lui ajouter une instance.
+        #[tokio::test]
+        async fn bind_pose_le_descripteur_du_daemon_et_exige_la_premiere_instance() {
+            let nom = |suffixe: &str| {
+                format!(
+                    r"\\.\pipe\bifrost-ipc-sddl-{}-{suffixe}",
+                    std::process::id()
+                )
+            };
+            let serveur = IpcServer::bind(nom("libre"), AuthPolicy::default(), None)
+                .await
+                .expect("bind");
+            assert_eq!(serveur.sddl, PIPE_SDDL);
+
+            let tenu = nom("tenu");
+            let _tiers = create_pipe(&tenu, "D:P(A;;GA;;;WD)", true).expect("pipe du tiers");
+            match IpcServer::bind(&tenu, AuthPolicy::default(), None).await {
+                Err(IpcError::Io(e)) => {
+                    assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied, "{e}")
+                }
+                Ok(_) => panic!("bind a ajoute une instance a un pipe deja tenu"),
+                Err(autre) => panic!("{autre}"),
+            }
+        }
+
         /// Et Windows accepte cette chaine.
         ///
         /// Une coquille dans le SDDL ne se voit aujourd'hui qu'au demarrage du
@@ -1291,6 +1606,357 @@ mod imp {
 pub use imp::{Connection, IpcClient, IpcServer};
 #[cfg(windows)]
 pub use imp::{PipeOwner, decide_pipe_owner};
+
+/// Plusieurs clients a la fois, et un client qui se tait: ce qu'en font le
+/// serveur et le client, par le chemin de production. Linux: `bind`, dans un
+/// repertoire de la recette. Windows: `bind_avec_descripteur`, le corps de
+/// `bind`, avec le descripteur de recette qui laisse ce compte ouvrir le pipe.
+/// Puis `accept`, `recv` et `connect_verified`, tels quels.
+#[cfg(test)]
+mod tests_clients_concurrents {
+    use super::*;
+    use crate::protocol::Command;
+    use std::sync::{Arc, Barrier, mpsc};
+    use std::time::{Duration, Instant};
+
+    #[cfg(unix)]
+    fn euid() -> u32 {
+        // SAFETY: geteuid ne prend aucun argument et ne touche aucune memoire.
+        unsafe { libc::geteuid() }
+    }
+
+    /// Ce qu'exigent les clients de ces recettes, dont le serveur est CE
+    /// processus. Linux: son uid. Windows: la regle des commandes, qui admet
+    /// le pipe d'un jeton eleve et refuse celui d'un compte ordinaire. Dans
+    /// les deux cas, une identite DECIDEE dit que le client a joint le
+    /// serveur.
+    fn exigence() -> ServerRequirement {
+        #[cfg(unix)]
+        {
+            ServerRequirement::Uid(euid())
+        }
+        #[cfg(windows)]
+        {
+            ServerRequirement::Elevated
+        }
+    }
+
+    #[cfg(unix)]
+    async fn serveur(nom: &str) -> (IpcServer, String) {
+        use std::os::unix::fs::PermissionsExt;
+        let dossier = std::env::temp_dir().join(format!(
+            "bifrost-ipc-concurrents-{}-{nom}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dossier);
+        std::fs::create_dir_all(&dossier).expect("repertoire de la recette");
+        // Mode pose explicitement: `bind` pose un `umask(0o117)`, valable pour
+        // tout le processus, le temps de se lier; un repertoire cree pendant
+        // le bind d'une recette voisine naitrait sans bit d'execution, donc
+        // intraversable, et ce bind-ci echouerait en `EACCES`.
+        std::fs::set_permissions(&dossier, std::fs::Permissions::from_mode(0o755))
+            .expect("repertoire de la recette en 0755");
+        let chemin = dossier.join("d.sock");
+        let policy = AuthPolicy {
+            allowed_uids: vec![0, euid()],
+            allowed_gid: None,
+        };
+        let serveur = IpcServer::bind(&chemin, policy, None).await.expect("bind");
+        (serveur, chemin.to_string_lossy().into_owned())
+    }
+
+    #[cfg(windows)]
+    async fn serveur(nom: &str) -> (IpcServer, String) {
+        let chemin = format!(
+            r"\\.\pipe\bifrost-ipc-concurrents-{}-{nom}",
+            std::process::id()
+        );
+        let serveur = IpcServer::bind_avec_descripteur(
+            std::path::Path::new(&chemin),
+            AuthPolicy::default(),
+            imp::SDDL_RECETTE,
+        )
+        .expect("serveur de recette");
+        (serveur, chemin)
+    }
+
+    /// Retire le repertoire de la recette (Linux); rien a retirer sous
+    /// Windows, le pipe disparait avec sa derniere poignee.
+    fn nettoyer(chemin: &str) {
+        #[cfg(unix)]
+        if let Some(dossier) = std::path::Path::new(chemin).parent() {
+            let _ = std::fs::remove_dir_all(dossier);
+        }
+        #[cfg(windows)]
+        let _ = chemin;
+    }
+
+    /// Un client qui ne passe pas par `IpcClient`: il ouvre le canal et
+    /// n'ecrit que ce que la recette lui fait ecrire.
+    #[cfg(unix)]
+    async fn client_brut(chemin: &str) -> tokio::net::UnixStream {
+        tokio::net::UnixStream::connect(chemin)
+            .await
+            .expect("connexion")
+    }
+
+    #[cfg(windows)]
+    async fn client_brut(chemin: &str) -> tokio::net::windows::named_pipe::NamedPipeClient {
+        tokio::net::windows::named_pipe::ClientOptions::new()
+            .open(chemin)
+            .expect("ouverture")
+    }
+
+    /// Ce qu'un client a obtenu.
+    #[derive(Debug)]
+    enum Issue {
+        /// L'identite du serveur a ete decidee, et, admise, l'echange a
+        /// abouti.
+        Joint,
+        /// L'ouverture a echoue: le code du systeme.
+        Ouverture(Option<i32>),
+        Autre(String),
+    }
+
+    fn lancer_un_client(chemin: String, depart: Arc<Barrier>, tx: mpsc::Sender<(Issue, Duration)>) {
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime du client");
+            depart.wait();
+            let debut = Instant::now();
+            let issue = rt.block_on(async {
+                match IpcClient::connect_verified(&chemin, exigence()).await {
+                    Ok((mut client, _)) => {
+                        match client.request(&Request::new(Command::Status)).await {
+                            Ok(Response::Ok) => Issue::Joint,
+                            autre => Issue::Autre(format!("{autre:?}")),
+                        }
+                    }
+                    Err(IpcError::ServerIdentity(_)) => Issue::Joint,
+                    Err(IpcError::Io(e)) => Issue::Ouverture(e.raw_os_error()),
+                    Err(autre) => Issue::Autre(autre.to_string()),
+                }
+            });
+            let _ = tx.send((issue, debut.elapsed()));
+        });
+    }
+
+    /// K clients lances ensemble, chacun dans un fil a lui comme dans un
+    /// processus a lui, contre un serveur qui sert comme le daemon: une tache
+    /// par connexion, l'acceptation suivante aussitot. Chacun joint le
+    /// serveur. Le nombre d'ouvertures refusees, leurs codes et le plus long
+    /// des temps de connexion sont imprimes: c'est la mesure.
+    #[test]
+    fn k_clients_concurrents_joignent_tous_le_serveur() {
+        let mut ecarts = Vec::new();
+        for k in [2usize, 4, 16] {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .expect("runtime du serveur");
+            let (mut serveur, chemin) = rt.block_on(serveur(&format!("k{k}")));
+            rt.spawn(async move {
+                while let Ok(mut connexion) = serveur.accept().await {
+                    tokio::spawn(async move {
+                        while connexion.recv().await.is_ok() {
+                            if connexion.send(&Response::Ok).await.is_err() {
+                                break;
+                            }
+                        }
+                    });
+                }
+            });
+            let depart = Arc::new(Barrier::new(k));
+            let (tx, rx) = mpsc::channel();
+            for _ in 0..k {
+                lancer_un_client(chemin.clone(), depart.clone(), tx.clone());
+            }
+            drop(tx);
+            let issues: Vec<(Issue, Duration)> = (0..k)
+                .map(|_| {
+                    rx.recv_timeout(Duration::from_secs(10))
+                        .expect("chaque client rend son issue dans un temps borne")
+                })
+                .collect();
+            rt.shutdown_timeout(Duration::from_secs(1));
+            nettoyer(&chemin);
+            let joints = issues
+                .iter()
+                .filter(|(i, _)| matches!(i, Issue::Joint))
+                .count();
+            let refusees: Vec<Option<i32>> = issues
+                .iter()
+                .filter_map(|(i, _)| match i {
+                    Issue::Ouverture(code) => Some(*code),
+                    _ => None,
+                })
+                .collect();
+            let autres: Vec<&String> = issues
+                .iter()
+                .filter_map(|(i, _)| match i {
+                    Issue::Autre(raison) => Some(raison),
+                    _ => None,
+                })
+                .collect();
+            let plus_long = issues.iter().map(|(_, d)| *d).max().unwrap_or_default();
+            println!(
+                "mesure clients concurrents: K={k} joints={joints} ouvertures refusees={} codes={refusees:?} autres={autres:?} plus long={plus_long:?}",
+                refusees.len()
+            );
+            if joints != k {
+                ecarts.push(format!("K={k}: {joints} joints sur {k}: {issues:?}"));
+            }
+        }
+        assert!(ecarts.is_empty(), "{ecarts:#?}");
+    }
+
+    const DELAI_COURT: Duration = Duration::from_millis(300);
+    const AU_PLUS: Duration = Duration::from_secs(5);
+
+    /// La lecture a rendu `RequestTimeout` dans le delai, ni avant ni bien
+    /// apres; un `recv` qui attend encore apres `AU_PLUS` est une connexion
+    /// tenue sans borne.
+    fn rendue_dans_le_delai(
+        issue: std::result::Result<Result<Request>, tokio::time::error::Elapsed>,
+        duree: Duration,
+    ) {
+        match issue {
+            Err(_) => panic!("aucune borne: la connexion est tenue depuis {duree:?}"),
+            Ok(Err(IpcError::RequestTimeout)) => {}
+            Ok(autre) => panic!("issue inattendue apres {duree:?}: {autre:?}"),
+        }
+        assert!(
+            duree >= DELAI_COURT && duree < DELAI_COURT + Duration::from_secs(1),
+            "{duree:?}"
+        );
+    }
+
+    /// Un client qui se connecte et n'ecrit rien ne tient pas la connexion,
+    /// donc la tache du daemon, au-dela du delai.
+    #[tokio::test]
+    async fn une_connexion_sans_requete_est_rendue_dans_le_delai() {
+        let (mut serveur, chemin) = serveur("muet").await;
+        serveur.delai_requete = DELAI_COURT;
+        let _client = client_brut(&chemin).await;
+        let mut connexion = serveur.accept().await.expect("acceptation");
+        let debut = Instant::now();
+        let issue = tokio::time::timeout(AU_PLUS, connexion.recv()).await;
+        let duree = debut.elapsed();
+        drop(connexion);
+        drop(serveur);
+        nettoyer(&chemin);
+        rendue_dans_le_delai(issue, duree);
+    }
+
+    /// La borne vaut pour chaque requete, pas pour la premiere seulement: un
+    /// client qui a obtenu une reponse puis se tait, connexion ouverte, ne la
+    /// tient pas davantage.
+    #[tokio::test]
+    async fn la_borne_vaut_pour_chaque_requete() {
+        use tokio::io::AsyncWriteExt;
+        let (mut serveur, chemin) = serveur("apres").await;
+        serveur.delai_requete = DELAI_COURT;
+        let mut client = client_brut(&chemin).await;
+        let mut connexion = serveur.accept().await.expect("acceptation");
+        let mut requete = serde_json::to_vec(&Request::new(Command::Status)).expect("requete");
+        requete.push(b'\n');
+        client.write_all(&requete).await.expect("ecriture");
+        let premiere = tokio::time::timeout(AU_PLUS, connexion.recv()).await;
+        assert!(
+            matches!(premiere, Ok(Ok(_))),
+            "une requete ecrite aussitot est lue: {premiere:?}"
+        );
+        connexion.send(&Response::Ok).await.expect("reponse");
+        let debut = Instant::now();
+        let seconde = tokio::time::timeout(AU_PLUS, connexion.recv()).await;
+        let duree = debut.elapsed();
+        drop(connexion);
+        drop(serveur);
+        nettoyer(&chemin);
+        rendue_dans_le_delai(seconde, duree);
+    }
+
+    /// La borne de temps ne remplace pas la borne de taille: une trame de plus
+    /// de `MAX_FRAME_BYTES` sans fin de ligne est refusee comme telle, sans
+    /// attendre le delai.
+    #[tokio::test]
+    async fn une_trame_trop_longue_reste_refusee_pour_sa_taille() {
+        use tokio::io::AsyncWriteExt;
+        let (mut serveur, chemin) = serveur("longue").await;
+        // Large: la lecture de la trame ne doit pas l'approcher sous charge.
+        serveur.delai_requete = Duration::from_secs(2);
+        let mut client = client_brut(&chemin).await;
+        let mut connexion = serveur.accept().await.expect("acceptation");
+        let ecriture = tokio::spawn(async move {
+            let _ = client.write_all(&vec![b'a'; MAX_FRAME_BYTES + 1]).await;
+            client
+        });
+        let debut = Instant::now();
+        let issue = tokio::time::timeout(AU_PLUS, connexion.recv()).await;
+        let duree = debut.elapsed();
+        drop(connexion);
+        let _ = ecriture.await;
+        drop(serveur);
+        nettoyer(&chemin);
+        // `FrameTooLarge` et non `RequestTimeout`: la taille a tranche avant
+        // le delai.
+        assert!(
+            matches!(issue, Ok(Err(IpcError::FrameTooLarge))),
+            "apres {duree:?}: {issue:?}"
+        );
+    }
+
+    /// Une requete entamee puis suspendue n'echappe pas a la borne: elle
+    /// porte sur la trame complete, pas sur son premier octet.
+    #[tokio::test]
+    async fn une_requete_entamee_puis_suspendue_est_bornee_aussi() {
+        use tokio::io::AsyncWriteExt;
+        let (mut serveur, chemin) = serveur("entamee").await;
+        serveur.delai_requete = DELAI_COURT;
+        let mut client = client_brut(&chemin).await;
+        let mut connexion = serveur.accept().await.expect("acceptation");
+        client.write_all(b"{\"version\":").await.expect("ecriture");
+        let debut = Instant::now();
+        let issue = tokio::time::timeout(AU_PLUS, connexion.recv()).await;
+        let duree = debut.elapsed();
+        drop(connexion);
+        drop(serveur);
+        nettoyer(&chemin);
+        rendue_dans_le_delai(issue, duree);
+    }
+
+    /// Une requete ecrite goutte a goutte, un octet a la fois a intervalle
+    /// plus court que le delai et sans jamais de fin de ligne, n'echappe pas
+    /// davantage: le delai court sur la trame entiere, il ne repart pas a
+    /// chaque octet recu.
+    #[tokio::test]
+    async fn une_requete_ecrite_goutte_a_goutte_est_bornee_au_total() {
+        use tokio::io::AsyncWriteExt;
+        let (mut serveur, chemin) = serveur("goutte").await;
+        serveur.delai_requete = DELAI_COURT;
+        let mut client = client_brut(&chemin).await;
+        let mut connexion = serveur.accept().await.expect("acceptation");
+        // Un octet par tiers de delai: aucun silence n'approche le delai,
+        // meme si l'ordonnanceur tarde.
+        let goutte = tokio::spawn(async move {
+            while client.write_all(b" ").await.is_ok() {
+                tokio::time::sleep(DELAI_COURT / 3).await;
+            }
+        });
+        let debut = Instant::now();
+        let issue = tokio::time::timeout(AU_PLUS, connexion.recv()).await;
+        let duree = debut.elapsed();
+        goutte.abort();
+        let _ = goutte.await;
+        drop(connexion);
+        drop(serveur);
+        nettoyer(&chemin);
+        rendue_dans_le_delai(issue, duree);
+    }
+}
 
 #[cfg(test)]
 mod tests_regles_serveur {

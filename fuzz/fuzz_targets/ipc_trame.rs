@@ -45,8 +45,11 @@ struct Banc {
 fn banc() -> &'static Banc {
     static BANC: OnceLock<Banc> = OnceLock::new();
     BANC.get_or_init(|| {
+        // Le pilote de temps, comme en production (`enable_all`): `recv`
+        // borne dans le temps la lecture d'une requete.
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_io()
+            .enable_time()
             .build()
             .expect("le runtime du banc doit demarrer");
         let dossier = std::env::temp_dir().join(format!("bifrost-fuzz-ipc-{}", std::process::id()));
