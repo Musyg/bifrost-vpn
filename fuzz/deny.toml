@@ -1,6 +1,9 @@
 # La politique de `deny.toml` (racine), appliquee au verrou du harnais de
-# fuzzing: `cargo deny --manifest-path fuzz/Cargo.toml check --config
-# fuzz/deny.toml`.
+# fuzzing par `cargo deny check` lance DEPUIS `fuzz/`, sans `--manifest-path`
+# ni `--config`. cargo-deny y prend `fuzz/Cargo.toml`, puis cherche
+# `deny.toml` en partant du dossier de ce manifeste: il lit ce fichier-ci
+# avant celui de la racine. Sans lui, il lirait celui de la racine, qui
+# refuse `libfuzzer-sys`.
 #
 # `fuzz/` est un espace de travail separe, avec son propre `Cargo.lock`: le
 # fichier racine ne le voit pas. Celui-ci en est la copie, raisons comprises

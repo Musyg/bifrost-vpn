@@ -368,8 +368,17 @@ jobs:
       # Le harnais de fuzzing est un espace de travail separe, avec son propre
       # verrou que la ligne precedente ne lit pas. Meme politique, plus une
       # exception nominative pour libFuzzer: voir `fuzz/deny.toml`.
+      #
+      # Lance DEPUIS `fuzz/`, sans `--manifest-path` ni `--config`: cargo-deny
+      # y prend `fuzz/Cargo.toml`, puis cherche `deny.toml` en partant du
+      # dossier de ce manifeste, et trouve `fuzz/deny.toml` avant celui de la
+      # racine. La place de `--config` a change avec cargo-deny 0.20.0 (avant
+      # la sous-commande, et non plus apres `check`), et l'action ci-dessus
+      # installe la derniere version: chacune des deux formes explicites est
+      # refusee par l'autre version, celle-ci tient sous les deux.
       - name: Licences, sources, doublons et avis du harnais de fuzzing
-        run: cargo deny --manifest-path fuzz/Cargo.toml check --config fuzz/deny.toml
+        working-directory: fuzz
+        run: cargo deny check
 
       # Le CRA impose un SBOM lisible par machine dans la documentation
       # technique (Annexe I partie II), et le document 07 le veut a chaque
