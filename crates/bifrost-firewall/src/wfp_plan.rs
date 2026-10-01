@@ -6,10 +6,11 @@
 //! testable sur n'importe quelle plateforme, y compris en CI Linux.
 //!
 //! Le plan reproduit celui de WireGuard for Windows (document 02 partie 1.3):
-//! sublayer dedie de poids `0xFFFF`, filtres permit aux poids 11 a 15, filtre
+//! sublayer dedie de poids `0xFFFF`, filtres permit aux poids 10 a 15, filtre
 //! block-all au poids 0, et flag `FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT` sur les
 //! blocages pour qu'un hard permit d'un sublayer concurrent ne puisse pas les
-//! ecraser (faille simplewall #689).
+//! ecraser (faille simplewall #689). Le reseau local, quand il est ouvert,
+//! pese 10, sous le refus de son :853 (11).
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
@@ -327,9 +328,27 @@ mod weight {
     /// s'appliquer a lui comme a tout le monde, et il resout par le resolveur
     /// local, dont le permit est plus haut encore.
     pub const COEUR: u8 = 12;
-    pub const LAN: u8 = 11;
+    /// Le :853 du reseau local (DoT en TCP, DoQ en UDP), refuse quand le
+    /// reseau local est ouvert: le pendant du `block-dns` pour le DNS chiffre,
+    /// borne au LAN parce que le :853 d'Internet passe par le tunnel.
+    ///
+    /// Strictement au-dessus de [`LAN`]: a poids egal, WFP ne dit pas lequel
+    /// des deux l'emporte. Strictement sous [`TUNNEL`]: un serveur d'adresse
+    /// privee joint PAR le tunnel reste servi, comme sous Linux ou le drop du
+    /// :853 du LAN vient apres l'acceptation de l'interface du tunnel.
+    ///
+    /// L'exception du resolveur declare, que le rendu Linux pose quand ce
+    /// resolveur vit sur le LAN, n'a pas de filtre ici: Windows exige un
+    /// resolveur sur la boucle locale (la pose et la declaration de `prove
+    /// wfp` refusent tout autre), hors des prefixes de ce refus, et
+    /// `permit-loopback` le sert au-dessus.
+    pub const DNS_CHIFFRE_LAN: u8 = 11;
+    pub const LAN: u8 = 10;
     pub const BLOCK_ALL: u8 = 0;
 }
+
+/// Le port du DNS chiffre: DoT (RFC 7858) en TCP, DoQ (RFC 9250) en UDP.
+pub const PORT_DNS_CHIFFRE: u16 = 853;
 
 /// Construit le plan complet.
 ///
@@ -786,27 +805,73 @@ fn ndp() -> FilterSpec {
     }
 }
 
+/// Le reseau local ouvert, sans son DNS.
+///
+/// Le :53 du LAN n'a pas besoin d'un filtre a lui: `block-dns` (14) le refuse
+/// vers toute destination, LAN compris, hors resolveur declare et exceptions
+/// par identite (daemon, resolveur embarque). Le :853 (DoT, DoQ) en a besoin,
+/// parce que son refus est borne au LAN: d'ou `block-dot-lan-v4` et
+/// `block-dot-lan-v6`, sortants seulement, au poids 11, au-dessus des permits
+/// du LAN (10).
+///
+/// Le DoH vers une adresse du LAN sur le 443 reste admis: il ne se distingue
+/// pas de HTTPS a la couche ALE, qui voit une adresse, un port et un
+/// protocole, jamais ce que porte la session TLS.
 fn lan_filters() -> Vec<FilterSpec> {
-    let v4 = [
+    let v4: Vec<Condition> = [
         (Ipv4Addr::new(10, 0, 0, 0), 8),
         (Ipv4Addr::new(172, 16, 0, 0), 12),
         (Ipv4Addr::new(192, 168, 0, 0), 16),
         (Ipv4Addr::new(169, 254, 0, 0), 16),
+    ]
+    .iter()
+    .map(|(addr, prefix)| Condition::RemoteAddrV4 {
+        addr: *addr,
+        prefix: *prefix,
+    })
+    .collect();
+    let v6 = vec![
+        Condition::RemoteAddrV6 {
+            addr: Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 0),
+            prefix: 7,
+        },
+        Condition::RemoteAddrV6 {
+            addr: Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0),
+            prefix: 10,
+        },
     ];
+    // Les prefixes du LAN (OU entre eux), ET le :853, ET UDP ou TCP.
+    let dns_chiffre = |prefixes: &[Condition]| -> Vec<Condition> {
+        let mut c = prefixes.to_vec();
+        c.push(Condition::RemotePort(PORT_DNS_CHIFFRE));
+        c.push(Condition::Protocol(IPPROTO_UDP));
+        c.push(Condition::Protocol(IPPROTO_TCP));
+        c
+    };
     vec![
+        FilterSpec {
+            name: "block-dot-lan-v4".into(),
+            layers: vec![Layer::AuthConnectV4],
+            weight: weight::DNS_CHIFFRE_LAN,
+            action: Action::Block,
+            hard: true,
+            conditions: dns_chiffre(&v4),
+        },
+        FilterSpec {
+            name: "block-dot-lan-v6".into(),
+            layers: vec![Layer::AuthConnectV6],
+            weight: weight::DNS_CHIFFRE_LAN,
+            action: Action::Block,
+            hard: true,
+            conditions: dns_chiffre(&v6),
+        },
         FilterSpec {
             name: "permit-lan-v4".into(),
             layers: Layer::V4.to_vec(),
             weight: weight::LAN,
             action: Action::Permit,
             hard: false,
-            conditions: v4
-                .iter()
-                .map(|(addr, prefix)| Condition::RemoteAddrV4 {
-                    addr: *addr,
-                    prefix: *prefix,
-                })
-                .collect(),
+            conditions: v4,
         },
         FilterSpec {
             name: "permit-lan-v6".into(),
@@ -814,16 +879,7 @@ fn lan_filters() -> Vec<FilterSpec> {
             weight: weight::LAN,
             action: Action::Permit,
             hard: false,
-            conditions: vec![
-                Condition::RemoteAddrV6 {
-                    addr: Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 0),
-                    prefix: 7,
-                },
-                Condition::RemoteAddrV6 {
-                    addr: Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0),
-                    prefix: 10,
-                },
-            ],
+            conditions: v6,
         },
     ]
 }
@@ -1524,6 +1580,8 @@ mod tests {
             "permit-tunnel-interface",
             "permit-lan-v4",
             "permit-lan-v6",
+            "block-dot-lan-v4",
+            "block-dot-lan-v6",
             "demarrage reseau local sortant",
             "demarrage DHCPv6 (relais) sortant",
             "demarrage reseau overlay entrant",
@@ -1896,7 +1954,7 @@ mod tests {
     fn allow_lan_active_ouvre_les_prefixes_prives_a_poids_moindre() {
         let p = plan(&policy(true), PathBuf::from("x.exe"), Some(1));
         let v4 = find(&p, "permit-lan-v4");
-        assert_eq!(v4.weight, 11);
+        assert_eq!(v4.weight, 10);
         assert!(v4.conditions.contains(&Condition::RemoteAddrV4 {
             addr: Ipv4Addr::new(192, 168, 0, 0),
             prefix: 16
@@ -1904,6 +1962,235 @@ mod tests {
         // Le LAN ne doit jamais primer sur la politique DNS.
         let dns = find(&p, "block-dns");
         assert!(v4.weight < dns.weight);
+    }
+
+    /// Sous `allow_lan`, le :853 du LAN (DoT en TCP, DoQ en UDP) est refuse
+    /// en sortie, sur la couche de chaque famille, par un veto qui couvre
+    /// EXACTEMENT les prefixes que le LAN ouvre, au-dessus de leur permit.
+    #[test]
+    fn sous_allow_lan_le_853_du_lan_est_refuse_au_dessus_de_son_permit() {
+        let p = plan(&policy(true), PathBuf::from("x.exe"), Some(1));
+        for (refus, permit, couche) in [
+            ("block-dot-lan-v4", "permit-lan-v4", Layer::AuthConnectV4),
+            ("block-dot-lan-v6", "permit-lan-v6", Layer::AuthConnectV6),
+        ] {
+            let r = find(&p, refus);
+            let l = find(&p, permit);
+            assert_eq!(r.layers, vec![couche], "{refus}");
+            assert_eq!(r.action, Action::Block, "{refus}");
+            assert!(r.hard, "{refus}: un refus sans veto est contournable");
+            assert!(r.weight > l.weight, "{refus} sous {permit}");
+            let prefixes: Vec<&Condition> = r
+                .conditions
+                .iter()
+                .filter(|c| {
+                    matches!(
+                        c,
+                        Condition::RemoteAddrV4 { .. } | Condition::RemoteAddrV6 { .. }
+                    )
+                })
+                .collect();
+            assert_eq!(
+                prefixes,
+                l.conditions.iter().collect::<Vec<_>>(),
+                "{refus}: le refus doit couvrir exactement le LAN ouvert"
+            );
+            for c in [
+                Condition::RemotePort(PORT_DNS_CHIFFRE),
+                Condition::Protocol(IPPROTO_UDP),
+                Condition::Protocol(IPPROTO_TCP),
+            ] {
+                assert!(r.conditions.contains(&c), "{refus}: {c:?} absente");
+            }
+            assert_eq!(r.conditions.len(), prefixes.len() + 3, "{refus}");
+        }
+        assert_eq!(PORT_DNS_CHIFFRE, 853, "RFC 7858 et RFC 9250");
+    }
+
+    /// LAN ferme, rien ne nomme le :853: le block-all le refuse deja.
+    #[test]
+    fn sans_allow_lan_aucun_filtre_ne_nomme_le_853() {
+        for f in plan(&policy(false), PathBuf::from("x.exe"), Some(1)) {
+            assert!(
+                !f.conditions
+                    .contains(&Condition::RemotePort(PORT_DNS_CHIFFRE)),
+                "{}",
+                f.name
+            );
+        }
+    }
+
+    /// L'ordre des poids dont depend le refus du :853 du LAN, lu sur les
+    /// filtres du plan: strictement au-dessus du LAN, strictement sous le
+    /// tunnel et la boucle locale.
+    #[test]
+    fn le_refus_du_853_du_lan_reste_entre_le_lan_et_le_tunnel() {
+        let p = plan(&policy(true), PathBuf::from("x.exe"), Some(1));
+        let poids = |nom: &str| find(&p, nom).weight;
+        for (refus, permit) in [
+            ("block-dot-lan-v4", "permit-lan-v4"),
+            ("block-dot-lan-v6", "permit-lan-v6"),
+        ] {
+            assert!(poids(permit) < poids(refus), "{refus} sous {permit}");
+            assert!(
+                poids(refus) < poids("permit-tunnel-interface"),
+                "{refus} au niveau du tunnel"
+            );
+            assert!(
+                poids(refus) < poids("permit-loopback"),
+                "{refus} au niveau de la boucle locale"
+            );
+            assert!(poids(permit) > poids("block-all"), "{permit}");
+        }
+    }
+
+    /// Un flux sortant tel que la couche ALE de connexion le voit, emis par
+    /// une application ordinaire: ni le daemon, ni le coeur, ni le resolveur
+    /// embarque. C'est le cas du DNS chiffre du systeme ou d'un navigateur.
+    struct Flux {
+        adresse: IpAddr,
+        port: u16,
+        protocole: u8,
+        interface: u64,
+    }
+
+    /// Une condition traduite matche-t-elle ce flux?
+    fn condition_matche(c: &ConditionWfp, flux: &Flux) -> bool {
+        match (c.champ, &c.valeur) {
+            (Champ::AdresseDistante, Valeur::V4 { adresse, masque }) => {
+                matches!(flux.adresse, IpAddr::V4(a) if u32::from(a) & masque == adresse & masque)
+            }
+            (Champ::AdresseDistante, Valeur::V6 { adresse, prefixe }) => match flux.adresse {
+                IpAddr::V6(a) => {
+                    let masque = match *prefixe {
+                        0 => 0,
+                        p => u128::MAX << (128 - u32::from(p.min(128))),
+                    };
+                    u128::from(a) & masque == u128::from_be_bytes(*adresse) & masque
+                }
+                IpAddr::V4(_) => false,
+            },
+            (Champ::PortDistant, Valeur::U16(p)) => flux.port == *p,
+            (Champ::PortLocal, Valeur::U16(_)) => false,
+            (Champ::Protocole, Valeur::U8(p)) => flux.protocole == *p,
+            (Champ::InterfaceLocale, Valeur::U64(l)) => flux.interface == *l,
+            (Champ::Drapeaux, Valeur::U32(b)) => {
+                *b == cles::DRAPEAU_BOUCLE && flux.adresse.is_loopback()
+            }
+            (Champ::AppId, _) | (Champ::UserId, _) => false,
+            (champ, valeur) => panic!("condition non simulee: {champ:?} {valeur:?}"),
+        }
+    }
+
+    /// L'arbitrage du sublayer sur les filtres TRADUITS (ceux que la pose
+    /// remet au moteur): meme champ en OU, champs differents en ET, et le
+    /// plus fort poids qui matche decide. Deux actions differentes au meme
+    /// poids rendent l'arbitrage indefini: la simulation refuse de trancher.
+    fn arbitrage(filtres: &[FiltreWfp], flux: &Flux) -> (Action, String) {
+        let couche = if flux.adresse.is_ipv4() {
+            Layer::AuthConnectV4
+        } else {
+            Layer::AuthConnectV6
+        };
+        let matchent: Vec<&FiltreWfp> = filtres
+            .iter()
+            .filter(|f| f.couche == couche)
+            .filter(|f| {
+                let mut champs: Vec<Champ> = f.conditions.iter().map(|c| c.champ).collect();
+                champs.dedup();
+                champs.iter().all(|champ| {
+                    f.conditions
+                        .iter()
+                        .filter(|c| c.champ == *champ)
+                        .any(|c| condition_matche(c, flux))
+                })
+            })
+            .collect();
+        let haut = matchent.iter().map(|f| f.poids).max().expect("block-all");
+        let gagnants: Vec<&&FiltreWfp> = matchent.iter().filter(|f| f.poids == haut).collect();
+        assert!(
+            gagnants.iter().all(|f| f.action == gagnants[0].action),
+            "poids {haut} egal pour des actions differentes: {:?}",
+            gagnants.iter().map(|f| &f.nom).collect::<Vec<_>>()
+        );
+        (gagnants[0].action, gagnants[0].nom.clone())
+    }
+
+    /// Le refus du :853 du LAN mesure sur l'arbitrage du plan traduit, et non
+    /// sur la seule presence d'un filtre: DoT et DoQ vers le LAN refuses, le
+    /// meme serveur joint par le tunnel servi, le reste du LAN (443 compris:
+    /// le DoH ne se distingue pas de HTTPS) ouvert, le :53 du LAN refuse
+    /// comme avant, la boucle locale servie. LAN ferme, tout tombe au
+    /// block-all, sauf le tunnel.
+    #[test]
+    fn l_arbitrage_refuse_le_853_du_lan_et_rien_d_autre() {
+        const PHYSIQUE: u64 = 3;
+        const TUNNEL: u64 = 7;
+        let tcp = IPPROTO_TCP;
+        let udp = IPPROTO_UDP;
+        for resolveur in [
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+        ] {
+            for allow_lan in [true, false] {
+                let politique = FirewallPolicy {
+                    dns_resolver: resolveur,
+                    coeur_executable: Some(PathBuf::from(r"C:\Bifrost\coeurs\sing-box.exe")),
+                    ..policy_avec_resolveur()
+                };
+                let politique = FirewallPolicy {
+                    allow_lan,
+                    ..politique
+                };
+                let filtres =
+                    filtres_wfp(&plan(&politique, PathBuf::from("x.exe"), Some(TUNNEL))).unwrap();
+                let lan_ou_bloc = |permis: Action| if allow_lan { permis } else { Action::Block };
+                let cas: [(&str, u16, u8, u64, Action); 16] = [
+                    ("192.168.1.1", 853, tcp, PHYSIQUE, Action::Block),
+                    ("192.168.1.1", 853, udp, PHYSIQUE, Action::Block),
+                    ("10.0.0.53", 853, tcp, PHYSIQUE, Action::Block),
+                    ("172.31.255.254", 853, udp, PHYSIQUE, Action::Block),
+                    ("169.254.0.1", 853, tcp, PHYSIQUE, Action::Block),
+                    ("fd00::53", 853, tcp, PHYSIQUE, Action::Block),
+                    ("fe80::1", 853, udp, PHYSIQUE, Action::Block),
+                    ("192.168.1.1", 853, tcp, TUNNEL, Action::Permit),
+                    ("fd00::53", 853, udp, TUNNEL, Action::Permit),
+                    (
+                        "192.168.1.1",
+                        443,
+                        tcp,
+                        PHYSIQUE,
+                        lan_ou_bloc(Action::Permit),
+                    ),
+                    ("fd00::53", 443, udp, PHYSIQUE, lan_ou_bloc(Action::Permit)),
+                    (
+                        "192.168.1.1",
+                        854,
+                        tcp,
+                        PHYSIQUE,
+                        lan_ou_bloc(Action::Permit),
+                    ),
+                    ("192.168.1.1", 53, udp, PHYSIQUE, Action::Block),
+                    ("9.9.9.9", 853, tcp, PHYSIQUE, Action::Block),
+                    ("9.9.9.9", 853, tcp, TUNNEL, Action::Permit),
+                    ("127.0.0.1", 853, tcp, PHYSIQUE, Action::Permit),
+                ];
+                for (adresse, port, protocole, interface, attendu) in cas {
+                    let flux = Flux {
+                        adresse: adresse.parse().unwrap(),
+                        port,
+                        protocole,
+                        interface,
+                    };
+                    let (action, nom) = arbitrage(&filtres, &flux);
+                    assert_eq!(
+                        action, attendu,
+                        "resolveur {resolveur}, allow_lan {allow_lan}: {adresse}:{port} \
+                         proto {protocole} interface {interface} tranche par {nom}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

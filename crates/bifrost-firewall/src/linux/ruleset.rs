@@ -18,9 +18,36 @@ use bifrost_core::ports::FirewallPolicy;
 pub const TABLE: &str = "bifrost";
 
 /// Prefixes RFC1918 et unique-local, autorises seulement si `allow_lan`, et
-/// jamais pour leur :53 hors resolveur declare (voir `render_lan_permit`).
+/// jamais pour leur DNS hors resolveur declare, en clair (:53) comme chiffre
+/// (:853) (voir `render_lan_permit`).
 const LAN_V4: &str = "10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16";
 const LAN_V6: &str = "fc00::/7, fe80::/10";
+
+/// Port du DNS chiffre sur TLS (DoT, RFC 7858) en TCP, et sur QUIC (DoQ,
+/// RFC 9250) ou DTLS (RFC 8094) en UDP.
+const PORT_DNS_CHIFFRE: u16 = 853;
+
+/// L'adresse tombe-t-elle dans un prefixe du LAN (`LAN_V4`, `LAN_V6`)?
+///
+/// Les quatre plages IPv4 sont exactement `is_private` (10/8, 172.16/12,
+/// 192.168/16) et `is_link_local` (169.254/16); les deux IPv6, exactement
+/// `is_unique_local` (fc00::/7) et `is_unicast_link_local` (fe80::/10). La
+/// recette `l_appartenance_au_lan_suit_les_prefixes_rendus` le verifie aux
+/// bornes de chaque prefixe ecrit dans les constantes.
+fn dans_le_lan(adresse: IpAddr) -> bool {
+    match adresse {
+        IpAddr::V4(a) => a.is_private() || a.is_link_local(),
+        IpAddr::V6(a) => a.is_unique_local() || a.is_unicast_link_local(),
+    }
+}
+
+/// La famille nft et l'adresse ecrite d'une destination.
+fn famille_et_adresse(adresse: IpAddr) -> (&'static str, String) {
+    match adresse {
+        IpAddr::V4(a) => ("ip", a.to_string()),
+        IpAddr::V6(a) => ("ip6", a.to_string()),
+    }
+}
 
 /// Types ICMPv6 indispensables au fonctionnement d'IPv6 (NDP).
 const NDP_TYPES: &str = "nd-router-solicit, nd-router-advert, nd-neighbor-solicit, \
@@ -99,13 +126,14 @@ fn render_output(s: &mut String, policy: &FirewallPolicy) {
 
     s.push_str("\t\t# DNS hors tunnel: uniquement vers le resolveur declare. Tout\n");
     s.push_str("\t\t# autre :53 qui arrive ici tombe: dans la policy drop, ou,\n");
-    s.push_str("\t\t# LAN ouvert, dans le drop pose avant l'acceptation du LAN.\n");
+    s.push_str("\t\t# LAN ouvert, dans le drop pose avant l'acceptation du LAN,\n");
+    s.push_str("\t\t# comme le :853 (DoT, DoQ) du LAN hors resolveur declare.\n");
     render_dns_permits(s, policy.dns_resolver);
 
     render_coeur_permit(s, policy);
 
     if policy.allow_lan {
-        render_lan_permit(s);
+        render_lan_permit(s, policy.dns_resolver);
     }
 
     s.push_str("\n\t\t# tout le reste est droppe par la policy. Le compteur sert\n");
@@ -193,32 +221,58 @@ fn render_resolveur_restriction(s: &mut String, policy: &FirewallPolicy) {
     s.push_str("\t\ttcp dport 53 drop\n\n");
 }
 
-/// Ouvre le LAN, que l'utilisateur a demande, sauf son :53.
+/// Ouvre le LAN, que l'utilisateur a demande, sauf son DNS: le :53 en clair
+/// et le :853 du DNS chiffre (DoT en TCP, DoQ en UDP).
 ///
-/// Les drops du :53 precedent l'acceptation du LAN, dans les deux familles et
-/// en TCP comme en UDP, et c'est leur position qui les fait mordre: poses
-/// apres elle, ils seraient syntaxiquement corrects et sans le moindre effet.
-/// Sans eux, une requete DNS vers une adresse du LAN (le serveur DNS du lien
+/// Les drops precedent l'acceptation du LAN, dans les deux familles et en TCP
+/// comme en UDP, et c'est leur position qui les fait mordre: poses apres elle,
+/// ils seraient syntaxiquement corrects et sans le moindre effet. Sans ceux du
+/// :53, une requete DNS vers une adresse du LAN (le serveur DNS du lien
 /// physique, annonce par DHCP, typiquement la box) sortirait en clair par ce
-/// permis, hors tunnel. C'est la fuite que le reste du ruleset interdit, et
-/// celle que Windows ferme par le poids: `block-dns` (14) y passe au-dessus de
-/// `permit-lan-v4` et `permit-lan-v6` (11).
+/// permis, hors tunnel. Sans ceux du :853, la meme requete y sortirait
+/// chiffree, mais vers un resolveur du LAN qui n'est pas celui que le produit
+/// impose, hors tunnel lui aussi. Windows ferme les deux par le poids:
+/// `block-dns` (14) au-dessus du tunnel (12) et du LAN, et `block-dot-lan-v4`
+/// et `block-dot-lan-v6` (11) au-dessus de `permit-lan-v4` et `permit-lan-v6`
+/// (10) mais sous le tunnel.
+///
+/// Le resolveur declare (`dns_resolver`) echappe aux deux. Son :53 est accepte
+/// plus haut par son propre permit; son :853, quand il vit sur le LAN, par les
+/// deux accepts poses ici juste avant les drops du :853. Hors du LAN, aucun
+/// drop ne le concerne et rien n'est emis: un resolveur de boucle locale passe
+/// par `oifname "lo" accept`, un resolveur public ne gagne aucune sortie.
 ///
 /// Ce qui passe encore, parce que c'est accepte PLUS HAUT dans la chaine: le
-/// resolveur declare (`dns_resolver`), meme quand il vit sur le LAN; le
-/// tunnel, y compris vers un resolveur d'une plage privee joint par lui; le
-/// trafic marque par WireGuard; le coeur, dont le :53 est deja tombe par ses
-/// propres drops; et le resolveur embarque, dont la restriction ferme deja le
-/// :53 pour tous les autres. Le reste du LAN reste ouvert, :853 compris,
-/// comme sous Windows ou `permit-lan` ne filtre aucun port.
-fn render_lan_permit(s: &mut String) {
+/// tunnel, y compris vers un resolveur d'une plage privee joint par lui, :853
+/// compris; le trafic marque par WireGuard; le coeur, dont le :53 est deja
+/// tombe par ses propres drops; et le resolveur embarque, dont la restriction
+/// ferme deja le :53 pour tous les autres. Le reste du LAN reste ouvert, 443
+/// compris: un DoH vers le LAN ne se distingue pas de HTTPS a la couche ou
+/// travaillent nftables et WFP, et ce ruleset ne pretend pas le fermer.
+fn render_lan_permit(s: &mut String, resolveur: IpAddr) {
     s.push_str("\n\t\t# acces LAN active explicitement par l'utilisateur, sauf son\n");
-    s.push_str("\t\t# :53, qui tombe d'abord dans les deux familles: le resolveur\n");
-    s.push_str("\t\t# declare a deja son permit, plus haut.\n");
+    s.push_str("\t\t# DNS, :53 puis :853, qui tombe d'abord dans les deux familles:\n");
+    s.push_str("\t\t# le resolveur declare a son permit :53 plus haut, et son :853\n");
+    s.push_str("\t\t# juste avant les drops du :853 quand il vit sur le LAN.\n");
     for (famille, prefixes) in [("ip", LAN_V4), ("ip6", LAN_V6)] {
         for proto in ["udp", "tcp"] {
             s.push_str(&format!(
                 "\t\t{famille} daddr {{ {prefixes} }} {proto} dport 53 drop\n"
+            ));
+        }
+    }
+    if dans_le_lan(resolveur) {
+        let (famille, adresse) = famille_et_adresse(resolveur);
+        for proto in ["udp", "tcp"] {
+            s.push_str(&format!(
+                "\t\t{famille} daddr {adresse} {proto} dport {PORT_DNS_CHIFFRE} accept\n"
+            ));
+        }
+    }
+    for (famille, prefixes) in [("ip", LAN_V4), ("ip6", LAN_V6)] {
+        for proto in ["udp", "tcp"] {
+            s.push_str(&format!(
+                "\t\t{famille} daddr {{ {prefixes} }} {proto} dport {PORT_DNS_CHIFFRE} drop\n"
             ));
         }
     }
@@ -227,10 +281,7 @@ fn render_lan_permit(s: &mut String) {
 }
 
 fn render_dns_permits(s: &mut String, resolver: IpAddr) {
-    let (family, addr) = match resolver {
-        IpAddr::V4(a) => ("ip", a.to_string()),
-        IpAddr::V6(a) => ("ip6", a.to_string()),
-    };
+    let (family, addr) = famille_et_adresse(resolver);
     s.push_str(&format!("\t\t{family} daddr {addr} udp dport 53 accept\n"));
     s.push_str(&format!("\t\t{family} daddr {addr} tcp dport 53 accept\n"));
 }
@@ -669,6 +720,208 @@ mod tests {
         }
     }
 
+    /// Sous `allow_lan`, le :853 du LAN (DoT en TCP, DoQ en UDP) tombe AVANT
+    /// son acceptation, comme le :53, famille par famille et protocole par
+    /// protocole, regle entiere.
+    ///
+    /// Le defaut que ces drops ferment: l'acceptation du LAN admettait le DNS
+    /// chiffre vers toute adresse du LAN, hors tunnel. Mesure avant correction
+    /// le 01/10/2026 sur essai-linux, ruleset rendu par ce code dans un
+    /// namespace jetable, LAN ouvert: les huit envois :853 (TCP et UDP; IPv4,
+    /// IPv6 unique-locale et de lien) arrivaient aux ecouteurs du LAN.
+    #[test]
+    fn sous_allow_lan_le_853_du_lan_tombe_avant_son_acceptation() {
+        let r = render(&policy_lan());
+        for (famille, prefixes) in FAMILLES_DU_LAN {
+            let acceptation = ligne_de(&r, &format!("{famille} daddr {{ {prefixes} }} accept"));
+            for proto in ["udp", "tcp"] {
+                let drop = ligne_de(
+                    &r,
+                    &format!("{famille} daddr {{ {prefixes} }} {proto} dport 853 drop"),
+                );
+                assert!(
+                    drop < acceptation,
+                    "{famille}/{proto}: le drop du :853 du LAN suit son acceptation, sans effet\n{r}"
+                );
+            }
+        }
+    }
+
+    /// Le resolveur declare echappe au drop du :853 comme a celui du :53:
+    /// quand il vit sur le LAN, son accept, dans sa famille seulement, precede
+    /// les drops du :853. Sans lui, un resolveur du lien que l'intention
+    /// declare perdrait son DNS chiffre a l'ouverture du LAN.
+    #[test]
+    fn le_853_d_un_resolveur_declare_sur_le_lan_reste_admis() {
+        for (resolveur, famille, prefixes, autre) in [
+            ("192.168.1.1", "ip", LAN_V4, "ip6"),
+            ("10.0.0.53", "ip", LAN_V4, "ip6"),
+            ("172.31.255.254", "ip", LAN_V4, "ip6"),
+            ("169.254.0.1", "ip", LAN_V4, "ip6"),
+            ("fd00::53", "ip6", LAN_V6, "ip"),
+            ("fe80::1", "ip6", LAN_V6, "ip"),
+        ] {
+            let p = FirewallPolicy {
+                dns_resolver: resolveur.parse().unwrap(),
+                ..policy_lan()
+            };
+            let r = render(&p);
+            for proto in ["udp", "tcp"] {
+                let accept = ligne_de(
+                    &r,
+                    &format!("{famille} daddr {resolveur} {proto} dport 853 accept"),
+                );
+                let drop = ligne_de(
+                    &r,
+                    &format!("{famille} daddr {{ {prefixes} }} {proto} dport 853 drop"),
+                );
+                assert!(
+                    accept < drop,
+                    "{resolveur}/{proto}: le resolveur declare est bloque par le drop du :853\n{r}"
+                );
+                assert!(
+                    !regles_nft::porte(
+                        &r,
+                        &format!("{autre} daddr {resolveur} {proto} dport 853 accept")
+                    ),
+                    "{resolveur}/{proto}: accept du :853 dans la mauvaise famille\n{r}"
+                );
+            }
+            assert_eq!(
+                r.matches("dport 853 accept").count(),
+                2,
+                "{resolveur}: l'exception du :853 vise plus que le resolveur declare\n{r}"
+            );
+        }
+    }
+
+    /// Hors du LAN, le resolveur declare n'a besoin d'aucune exception (aucun
+    /// drop ne le vise) et n'en recoit aucune: une boucle locale passe deja par
+    /// `oifname "lo" accept`, et un resolveur public ne doit gagner aucune
+    /// sortie :853 hors tunnel du seul fait que le LAN s'ouvre.
+    #[test]
+    fn hors_du_lan_le_resolveur_declare_ne_gagne_aucun_853() {
+        for resolveur in ["127.0.0.1", "::1", "9.9.9.9", "2001:db8::53", "100.64.0.1"] {
+            let p = FirewallPolicy {
+                dns_resolver: resolveur.parse().unwrap(),
+                ..policy_lan()
+            };
+            let r = render(&p);
+            // Absence par la sous-chaine la plus large: aucune variante d'accept du :853.
+            assert!(
+                !r.contains("dport 853 accept"),
+                "{resolveur}: accept du :853 hors du LAN\n{r}"
+            );
+            assert_eq!(r.matches("dport 853 drop").count(), 4, "{resolveur}\n{r}");
+        }
+    }
+
+    /// LAN ferme, le :853 ne parait nulle part: la policy drop le refuse deja
+    /// partout hors tunnel, et le rendu sans LAN reste celui d'avant.
+    #[test]
+    fn sans_allow_lan_aucune_regle_ne_nomme_le_853() {
+        for resolveur in ["127.0.0.1", "192.168.1.1", "fd00::53"] {
+            let p = FirewallPolicy {
+                dns_resolver: resolveur.parse().unwrap(),
+                ..policy()
+            };
+            // Absence par la sous-chaine la plus large, sur les REGLES: un
+            // commentaire du rendu nomme le :853, et n'est pas une regle.
+            let r = render(&p);
+            assert!(
+                regles_nft::lignes_normalisees(&r)
+                    .iter()
+                    .all(|l| !l.contains("853")),
+                "{resolveur}: une regle nomme le :853 alors que le LAN est ferme\n{r}"
+            );
+        }
+    }
+
+    /// La boucle locale passe avant toute regle du DNS, en clair comme chiffre.
+    ///
+    /// Voulu, et c'est un ecart avec Windows, ou `block-dns` (14) passe
+    /// au-dessus de `permit-loopback` (13). Ici le systeme interroge son
+    /// resolveur sur la boucle locale (le stub `127.0.0.53` de
+    /// systemd-resolved, ou le resolveur embarque), et ce sont les sorties de
+    /// CE resolveur que les regles suivantes filtrent. Une regle du :53 ou du
+    /// :853 posee avant `oifname "lo" accept` couperait la resolution de la
+    /// machine au lieu de la contenir. Mesure le 01/10/2026 en namespaces
+    /// jetables: un stub de boucle locale non declare est servi, et ses relais
+    /// vers le LAN et vers le tunnel suivent le ruleset.
+    #[test]
+    fn la_boucle_locale_precede_toute_regle_du_dns() {
+        for p in [
+            policy(),
+            policy_avec_resolveur(),
+            policy_avec_coeur(),
+            FirewallPolicy {
+                dns_resolver: "192.168.1.1".parse().unwrap(),
+                ..policy_lan()
+            },
+        ] {
+            let r = render(&p);
+            let boucle = ligne_de(&r, "oifname \"lo\" accept");
+            let mut vues = 0;
+            for (i, l) in r.lines().enumerate() {
+                if let Some(regle) = regles_nft::normaliser(l)
+                    && regle
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .windows(2)
+                        .any(|w| w[0] == "dport" && (w[1] == "53" || w[1] == "853"))
+                {
+                    vues += 1;
+                    assert!(
+                        boucle < i,
+                        "regle du DNS avant la boucle locale: {regle}\n{r}"
+                    );
+                }
+            }
+            assert!(
+                vues >= 2,
+                "aucune regle du DNS lue: la recette ne regarde rien\n{r}"
+            );
+        }
+    }
+
+    /// `dans_le_lan` et les prefixes ECRITS dans le rendu disent la meme chose:
+    /// aux deux bornes de chaque prefixe de `LAN_V4` et `LAN_V6` l'adresse est
+    /// dedans, et juste a cote elle est dehors. Une plage ajoutee a l'une sans
+    /// l'autre ferait diverger l'exception du resolveur et les drops.
+    #[test]
+    fn l_appartenance_au_lan_suit_les_prefixes_rendus() {
+        for prefixe in LAN_V4.split(", ") {
+            let (adresse, longueur) = prefixe.split_once('/').unwrap();
+            let debut = u32::from(adresse.parse::<Ipv4Addr>().unwrap());
+            let taille = 1u32 << (32 - longueur.parse::<u32>().unwrap());
+            let fin = debut + (taille - 1);
+            for (a, attendu) in [
+                (debut, true),
+                (fin, true),
+                (debut - 1, false),
+                (fin + 1, false),
+            ] {
+                let ip = IpAddr::V4(Ipv4Addr::from(a));
+                assert_eq!(dans_le_lan(ip), attendu, "{prefixe}: {ip}");
+            }
+        }
+        for prefixe in LAN_V6.split(", ") {
+            let (adresse, longueur) = prefixe.split_once('/').unwrap();
+            let debut = u128::from(adresse.parse::<Ipv6Addr>().unwrap());
+            let taille = 1u128 << (128 - longueur.parse::<u32>().unwrap());
+            let fin = debut + (taille - 1);
+            for (a, attendu) in [
+                (debut, true),
+                (fin, true),
+                (debut - 1, false),
+                (fin + 1, false),
+            ] {
+                let ip = IpAddr::V6(Ipv6Addr::from(a));
+                assert_eq!(dans_le_lan(ip), attendu, "{prefixe}: {ip}");
+            }
+        }
+    }
+
     /// Le bloc LAN est le SEUL apport d'`allow_lan`, et il est pose en dernier.
     ///
     /// Sur 32 politiques (tunnel, marque, coeur, resolveur embarque, resolveur
@@ -676,15 +929,19 @@ mod tests {
     /// sans LAN: le permit du resolveur declare, l'acceptation du tunnel, la
     /// marque, les drops du coeur et la restriction du resolveur embarque ne
     /// changent ni de forme ni d'ordre. Et le bloc sortant est d'un seul tenant,
-    /// drops d'abord, juste avant le compteur de la chaine.
+    /// drops du :53 puis du :853 d'abord, juste avant le compteur de la chaine.
+    /// Les resolveurs de ces 32 politiques sont de boucle locale: aucun accept
+    /// du :853 ne s'intercale.
     #[test]
     fn le_bloc_lan_ne_change_aucune_autre_regle() {
         let mut bloc_sortie: Vec<String> = Vec::new();
-        for (famille, prefixes) in FAMILLES_DU_LAN {
-            for proto in ["udp", "tcp"] {
-                bloc_sortie.push(format!(
-                    "{famille} daddr {{ {prefixes} }} {proto} dport 53 drop"
-                ));
+        for port in [53, PORT_DNS_CHIFFRE] {
+            for (famille, prefixes) in FAMILLES_DU_LAN {
+                for proto in ["udp", "tcp"] {
+                    bloc_sortie.push(format!(
+                        "{famille} daddr {{ {prefixes} }} {proto} dport {port} drop"
+                    ));
+                }
             }
         }
         for (famille, prefixes) in FAMILLES_DU_LAN {

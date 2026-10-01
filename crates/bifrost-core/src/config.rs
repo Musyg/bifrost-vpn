@@ -420,7 +420,9 @@ pub struct TunnelConfig {
     pub mtu: u32,
     pub dns: DnsPolicy,
     /// Autorise le trafic vers les prefixes RFC1918 hors tunnel, sauf le DNS
-    /// (:53) vers eux: il reste reserve a `dns.local_resolver`.
+    /// vers eux, en clair (:53) comme chiffre (:853): il reste reserve a
+    /// `dns.local_resolver`. Le DoH (443) vers le LAN reste admis, faute de
+    /// se distinguer de HTTPS a la couche du pare-feu.
     #[serde(default)]
     pub allow_lan: bool,
     /// Ce qui porte le trafic, et ce qu'il exige.
