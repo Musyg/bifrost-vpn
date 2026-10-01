@@ -62,6 +62,8 @@ Rust 1.93 ou superieur (`rust-version`), edition 2024. La chaine de construction
 est epinglee a 1.98.0 par `rust-toolchain.toml`, que rustup applique de lui-meme:
 changer de version est un changement a part entiere, verifie sur chaque hote. Sous Linux, le module noyau `wireguard` et le binaire `nft` sont requis a l'execution.
 
+Sous Windows (MSVC), `.cargo/config.toml` active Control Flow Guard (`-C control-flow-guard=checks`) pour toute construction lancee depuis le depot, `--release` comprise; sous Linux, PIE, RELRO complet et pile non executable sont les defauts de rustc et le fichier n'y change rien. Deux facons de perdre CFG sans message: definir `RUSTFLAGS` ou `CARGO_ENCODED_RUSTFLAGS`, meme a vide, qui remplacent la table au lieu de s'y ajouter, et lancer cargo hors du depot (`--manifest-path` depuis un autre repertoire), qui ne lit pas le fichier. Pour ajouter un drapeau sans perdre CFG, le passer par `CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS`, qui s'ajoute a la table, ou le repeter dans `RUSTFLAGS` (`-C control-flow-guard=checks ...`). Tant que la table s'applique, un `build.rustflags` de la configuration personnelle de cargo est ignore. La recette `durcissement_binaire.rs` lit les en-tetes de son propre executable et rougit si l'un de ces durcissements manque.
+
 ## Utiliser
 
 Ecrire un profil, par exemple `/etc/bifrost/tunnel.toml`, a partir de [`examples/tunnel.toml`](examples/tunnel.toml). Il contient une cle privee : `chmod 600`.

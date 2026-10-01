@@ -191,7 +191,64 @@ l'approche.
 
 Integration continue : OSS-Fuzz est gratuit mais reserve aux projets critiques pour l'infrastructure mondiale (decision au cas par cas via PR, avec score de criticite) ; si refuse, deployer **ClusterFuzzLite** en CI (auto-heberge, base sur ClusterFuzz).
 
-**2.4 Durcissement compilation/execution** - Rust : ASLR/DEP/stack protector actifs par defaut ; activer explicitement CFG sur Windows (`-C control-flow-guard`), RELRO complet et PIE sur Linux (souvent defaut). Verification : winchecksec (Windows), checksec/hardening-check (Linux) en CI post-build. Cote Windows execution : `SetProcessMitigationPolicy` avec `ProcessDynamicCodePolicy` (ACG - `PROCESS_MITIGATION_DYNAMIC_CODE_POLICY.ProhibitDynamicCode = 1`), `ProcessSignaturePolicy` (bloque l'injection de DLL non signee Microsoft), `ProcessControlFlowGuardPolicy`, `ProcessImageLoadPolicy`. Le service Windows doit avoir une ACL restrictive et un SID de service dedie.
+**2.4 Durcissement compilation/execution** - Rust : ASLR et DEP sont poses par defaut, la
+protection de pile ne l'est pas (`-Z stack-protector`, nightly) ; activer explicitement CFG sur
+Windows (`-C control-flow-guard`), RELRO complet et PIE sur Linux (defauts de rustc). Cote Windows
+execution : `SetProcessMitigationPolicy` avec `ProcessDynamicCodePolicy` (ACG -
+`PROCESS_MITIGATION_DYNAMIC_CODE_POLICY.ProhibitDynamicCode = 1`), `ProcessSignaturePolicy`
+(bloque l'injection de DLL non signee Microsoft), `ProcessControlFlowGuardPolicy`,
+`ProcessImageLoadPolicy`. Le service Windows doit avoir une ACL restrictive et un SID de service
+dedie.
+
+**Ce qui etait deja la, mesure le 01/10/2026** sur `bifrost-daemon` et `bifrost-cli` construits
+en `--release`, avant toute modification. Sous Windows (dev-windows, `dumpbin`): ASLR 64 bits et
+DEP (DYNAMIC_BASE, HIGH_ENTROPY_VA, NX_COMPAT), poses par l'editeur de liens; aucun Control Flow
+Guard: ni GUARD_CF, ni table des cibles, et les seuls controles etaient ceux de la bibliotheque C
+de Microsoft. GuardFlags y valait pourtant 0x100, << CF instrumented >>: la Load Config vient de
+cette bibliotheque, deja compilee avec /guard:cf, et ce drapeau seul ne prouve rien. Sous Linux
+(essai-linux, `readelf`): executable PIE, RELRO complet (PT_GNU_RELRO et liaison immediate), pile
+non executable, sans rien demander; la chaine gcc d'Ubuntu ajoute meme `-z now` d'elle-meme, si
+bien que `-C relro-level=partial` seul y laisse un RELRO complet.
+
+**Ce qui est pose.** `.cargo/config.toml` demande `-C control-flow-guard=checks` pour les cibles
+Windows MSVC, et rien d'autre; sous Linux le fichier ne change rien (memes empreintes des
+binaires). Mesure apres, binaires `--release` de dev-windows: GUARD_CF, 1758 cibles CFG pour le
+daemon et 2332 pour la CLI, 4201 et 4476 appels indirects qui passent par le controle (3 et 3
+avant); il reste 198 et 209 appels indirects nus, surtout dans le code precompile de la
+bibliotheque standard. LTO (`thin`) garde CFG. Cout: +0,65 % de taille pour le daemon, +0,84 %
+pour la CLI; temps de construction `--release` inchange a l'echantillon (291,5 s puis 289,4 s).
+
+**Ce qui l'annule sans un mot, mesure.** cargo ne lit cette table que s'il est lance depuis le
+depot (pas avec `--manifest-path` depuis un autre repertoire, pas par `cargo install` sans
+`--path`), et `RUSTFLAGS` ou `CARGO_ENCODED_RUSTFLAGS`, meme definis a vide, la remplacent au lieu
+de s'y ajouter.
+
+**La garde.** `crates/bifrost-daemon/tests/durcissement_binaire.rs` lit les en-tetes de son
+propre executable, sans outil externe. Sous Windows: les trois bits d'ASLR et de DEP, GUARD_CF
+avec une table de cibles non vide, et un appel par pointeur ecrit dans ce fichier qui doit passer
+par le pointeur de controle que l'image declare; ce dernier point separe `checks` de `nochecks`,
+qui pose la table sans emettre un seul controle. Sous Linux: PIE, RELRO complet, pile non
+executable. Partout: la table de `.cargo/config.toml`, seule partie que la CI automatique,
+Linux, execute pour Windows. Chaque recette a ete vue rouge: drapeau retire, `nochecks`,
+`RUSTFLAGS` vide ou autre, `CARGO_ENCODED_RUSTFLAGS` vide, cargo lance hors du depot, chacun des
+trois bits ASLR/DEP; relocation statique, RELRO coupe ou paresseux, pile executable.
+Elle lit un binaire de recette (profil de test, sans LTO), pas les binaires `--release`: les
+drapeaux de cible sont les memes, et l'effet de LTO n'est mesure que par la mesure ci-dessus.
+
+**Ce qui manque.**
+- La bibliotheque standard n'est pas instrumentee: elle est livree precompilee sans CFG, et seul
+  `-Z build-std`, sur une chaine nightly, la recompilerait.
+- L'effet a l'execution: aucun appel vers une cible invalide n'a ete fait tomber; la mesure
+  statique compte les controles, pas leur effet. Un temoin d'execution devra empecher
+  l'optimiseur de rendre l'appel direct (`std::hint::black_box`), sans quoi il ne prouve rien:
+  c'est la cause de rust-lang/rust#135963, fermee le 24/01/2025 comme comportement attendu.
+- Aucune etape de CI ne lit les binaires `--release`; la recette tourne dans `controles` (Linux)
+  et dans `windows` (sur demande).
+- Ni CET (pile fantome, `/CETCOMPAT`), ni protection de pile de rustc: absents des binaires,
+  non poses. Le seul `__stack_chk_fail` des binaires Linux vient du code C d'une dependance de la
+  CLI.
+- Les politiques d'execution Windows (`SetProcessMitigationPolicy`: ACG, signature, chargement
+  d'images) ne sont pas posees: elles demandent une mesure sur essai-windows.
 
 ### PARTIE 3 - AUDIT EXTERNE
 

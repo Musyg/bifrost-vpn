@@ -1,0 +1,24 @@
+# Durcissement de compilation des binaires du depot.
+#
+# Control Flow Guard sous Windows (MSVC). rustc ne l'active pas de lui-meme
+# (`-C control-flow-guard`, defaut `no`). Le reste est deja pose sans rien
+# demander, mesure le 01/10/2026 sur les binaires `--release` avant ce
+# fichier: ASLR 64 bits et DEP sous Windows (DYNAMIC_BASE, HIGH_ENTROPY_VA,
+# NX_COMPAT), PIE, RELRO complet et pile non executable sous Linux. Rien n'est
+# donc ajoute pour Linux, ou cette table ne s'applique pas.
+#
+# Ce que ce reglage ne couvre PAS:
+# - la bibliotheque standard est livree precompilee sans CFG; ses appels
+#   indirects ne sont pas controles (seul `-Z build-std`, sur une chaine
+#   nightly, la recompilerait);
+# - cargo ignore cette table des que RUSTFLAGS ou CARGO_ENCODED_RUSTFLAGS est
+#   defini, meme a vide, et ignore aussi `build.rustflags` d'une configuration
+#   personnelle tant que cette table s'applique;
+# - cargo ne lit ce fichier que s'il est lance depuis le depot ou un de ses
+#   sous-repertoires: pas avec `--manifest-path` depuis ailleurs, pas par
+#   `cargo install` sans `--path`.
+#
+# Garde: `crates/bifrost-daemon/tests/durcissement_binaire.rs` lit les
+# en-tetes de son propre executable, construit avec les memes drapeaux.
+[target.'cfg(all(target_os = "windows", target_env = "msvc"))']
+rustflags = ["-C", "control-flow-guard=checks"]
