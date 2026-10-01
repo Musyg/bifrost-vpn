@@ -1,0 +1,13 @@
+{
+  "projection": "wfp",
+  "schema_version": 1,
+  "dns_resolver": "::1",
+  "allow_lan": true,
+  "resolveur_embarque": true,
+  "resolveur_executable": "C:\\Bifrost\\dnscrypt-proxy.exe",
+  "resolveur_sid": "S-1-5-19",
+  "coeur_executable": "C:\\Bifrost\\coeurs\\sing-box.exe",
+  "tunnel_luid": 81985529216486895,
+  "daemon_executable": "C:\\Bifrost\\bifrost-daemon.exe",
+  "identite": "S-1-5-80-1-2-3-4-5"
+}

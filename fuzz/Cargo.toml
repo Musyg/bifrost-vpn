@@ -1,0 +1,130 @@
+# Harnais de fuzzing (cargo-fuzz, libFuzzer) des parseurs exposes de Bifrost.
+#
+# Espace de travail SEPARE du workspace racine, et c'est voulu: la section
+# `[workspace]` ci-dessous en fait la racine de son propre espace. `cargo test
+# --workspace`, clippy, cargo-deny et `scripts/recettes-strict.sh` lances a la
+# racine du depot ne voient donc ni ce paquet ni ses dependances, et le
+# `Cargo.lock` racine ne bouge pas. Ce paquet a son propre verrou,
+# `fuzz/Cargo.lock`, verifie par `cargo deny` avec `fuzz/deny.toml`.
+#
+# Chaque cible appelle la fonction de PRODUCTION d'une crate du produit, par
+# son chemin `pub`, jamais une copie. Le recensement des parseurs, leur
+# frontiere de confiance et la raison de chaque cible sont dans
+# `docs/07-programme-securite-produit.md`, section 2.3.
+#
+# Lancement: `scripts/fuzz-linux.sh` (chaine nightly et cargo-fuzz requises).
+
+[package]
+name = "bifrost-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "MPL-2.0"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+bifrost-amorce = { path = "../crates/bifrost-amorce" }
+bifrost-coffre = { path = "../crates/bifrost-coffre" }
+bifrost-core = { path = "../crates/bifrost-core" }
+bifrost-daemon = { path = "../crates/bifrost-daemon" }
+bifrost-firewall = { path = "../crates/bifrost-firewall" }
+bifrost-ipc = { path = "../crates/bifrost-ipc" }
+# Deja dans l'arbre du produit (memes versions que le `Cargo.lock` racine):
+# serde_json et toml sont les deserialiseurs que le daemon et la CLI appellent,
+# tokio porte le vrai serveur IPC de la cible `ipc_trame`.
+serde_json = "1.0"
+toml = "0.9"
+tokio = { version = "1.53", features = ["rt", "net"] }
+
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "lien_colle"
+path = "fuzz_targets/lien_colle.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "lien_colle_chiffre"
+path = "fuzz_targets/lien_colle_chiffre.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "moisson"
+path = "fuzz_targets/moisson.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "signature_profil"
+path = "fuzz_targets/signature_profil.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "reponses_reseau"
+path = "fuzz_targets/reponses_reseau.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "lien_profil"
+path = "fuzz_targets/lien_profil.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ipc_trame"
+path = "fuzz_targets/ipc_trame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ipc_json"
+path = "fuzz_targets/ipc_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "profil_toml"
+path = "fuzz_targets/profil_toml.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "politique_nft"
+path = "fuzz_targets/politique_nft.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "politique_wfp"
+path = "fuzz_targets/politique_wfp.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "instantane_wfp"
+path = "fuzz_targets/instantane_wfp.rs"
+test = false
+doc = false
+bench = false

@@ -1,0 +1,4 @@
+# Une graine est une suite d'octets, pas du texte: aucune normalisation de fin
+# de ligne. La graine d'une signature aux fins de ligne Windows doit garder ses
+# retours chariot, sans quoi elle ne mesure plus ce pour quoi elle existe.
+graines/** binary

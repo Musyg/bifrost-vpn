@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "tunnel_interface": "wg0",
+  "fwmark": 51820,
+  "dns_resolver": "127.0.0.1",
+  "allow_lan": false,
+  "coeur_uid": null,
+  "resolveur_uid": null
+}
