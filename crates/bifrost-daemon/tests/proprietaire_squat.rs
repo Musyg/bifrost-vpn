@@ -32,10 +32,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use bifrost_daemon::coeurs::doublure::Configuration;
+use bifrost_daemon::coeurs::doublure::{self, Configuration, Essai, Gabarit, Liaison};
 use bifrost_daemon::coeurs::lancement::Lancement;
 use bifrost_daemon::coeurs::proprietaire::{self, Proprietaire};
-use bifrost_daemon::coeurs::{alea, atelier, bascule, clash, facade, port, superviseur, vitalite};
+use bifrost_daemon::coeurs::{alea, atelier, bascule, clash, facade, superviseur, vitalite};
 use bifrost_evasion::Coeur;
 
 /// Budget confie a la sonde et a la bascule dans les recettes en session.
@@ -68,6 +68,19 @@ fn coeur_qui_a_relache_son_port() -> std::process::Child {
 
 fn binaire_du_daemon() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_bifrost-daemon"))
+}
+
+/// Une doublure sans selecteur, montee et lancee par
+/// [`doublure::lancer_sauf_vol`] ou [`doublure::demarrer_sauf_vol`]: un nouvel
+/// essai seulement si elle a PROUVE que son port lui a ete pris avant son
+/// `bind`. Un refus de reconnaissance d'une doublure qui tient son port rougit
+/// au premier essai.
+fn gabarit() -> Gabarit {
+    Gabarit {
+        programme: binaire_du_daemon(),
+        selecteur: String::new(),
+        sorties: vec![],
+    }
 }
 
 /// Un repertoire de travail propre a CETTE execution, comme les autres recettes
@@ -270,42 +283,24 @@ async fn un_squatteur_de_l_api_ne_recoit_jamais_le_secret() {
 #[tokio::test]
 async fn le_coeur_qu_on_a_lance_est_bien_reconnu() {
     let rep = repertoire_temporaire("legitime");
-    let reserve = port::reserver().unwrap();
-    let port = reserve.port();
-    let secret = alea::secret().unwrap();
-    let config = rep.join("doublure.json");
-    std::fs::write(
-        &config,
-        serde_json::to_string(&Configuration {
-            port,
-            secret: secret.clone(),
-            selecteur: String::new(),
-            sorties: vec![],
-        })
-        .unwrap(),
-    )
-    .unwrap();
-    let lancement = Lancement {
-        programme: binaire_du_daemon(),
-        arguments: vec!["--faux-coeur".into(), config.clone().into()],
-        configuration: config,
-        api_clash: Some(port),
-        utilisateur: None,
-    };
-
-    // Rendu a l'instant ou la doublure va le prendre.
-    reserve.liberer();
-    let debut = Instant::now();
-    let en_cours = superviseur::demarrer(Coeur::SingBox, &lancement, &secret)
-        .await
-        .expect("un coeur lance par nous doit etre reconnu et interroge");
+    // La duree du SEUL demarrage qui a abouti: un essai qu'un vol de port a
+    // coute ne compte pas dans ce que la reconnaissance coute.
+    let mut duree = Duration::ZERO;
+    let (en_cours, essai) = doublure::demarrer_sauf_vol(&rep, &gabarit(), async |e: &Essai| {
+        let debut = Instant::now();
+        let r = superviseur::demarrer(Coeur::SingBox, &e.lancement, &e.secret).await;
+        duree = debut.elapsed();
+        r.map_err(|x| format!("{x:#}"))
+    })
+    .await
+    .expect("un coeur lance par nous doit etre reconnu et interroge");
     assert!(
-        debut.elapsed() < superviseur::BUDGET_DEMARRAGE,
+        duree < superviseur::BUDGET_DEMARRAGE,
         "la reconnaissance ne doit pas couter l'echeance entiere"
     );
     assert_eq!(
         en_cours.api(),
-        Some(SocketAddr::from(([127, 0, 0, 1], port)))
+        Some(SocketAddr::from(([127, 0, 0, 1], essai.port)))
     );
     en_cours.arreter().await.expect("l'arret doit aboutir");
     let _ = std::fs::remove_dir_all(&rep);
@@ -331,30 +326,6 @@ fn un_squatteur_de_l_entree_socks_n_est_pas_publie() {
     let socks = squatteur.adresse();
 
     let rep = repertoire_temporaire("socks");
-    let reserve = port::reserver().unwrap();
-    let port_api = reserve.port();
-    let secret = alea::secret().unwrap();
-    let config = rep.join("doublure.json");
-    std::fs::write(
-        &config,
-        serde_json::to_string(&Configuration {
-            port: port_api,
-            secret: secret.clone(),
-            selecteur: String::new(),
-            sorties: vec![],
-        })
-        .unwrap(),
-    )
-    .unwrap();
-    let lancement = Lancement {
-        programme: binaire_du_daemon(),
-        arguments: vec!["--faux-coeur".into(), config.clone().into()],
-        configuration: config,
-        api_clash: Some(port_api),
-        utilisateur: None,
-    };
-    // Rendu a l'instant ou la doublure va prendre son port d'API.
-    reserve.liberer();
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -363,10 +334,18 @@ fn un_squatteur_de_l_entree_socks_n_est_pas_publie() {
     let (poignee, coeur_actif, tache) = atelier::ouvrir();
     runtime.spawn(tache);
 
-    let issue =
-        std::thread::spawn(move || poignee.lancer(Coeur::SingBox, lancement, &secret, socks))
-            .join()
-            .expect("le fil ne doit pas paniquer");
+    // Le refus attendu vient d'une doublure qui TIENT son port d'API: il est
+    // rendu au premier essai, jamais retente. Seul un port d'API pris avant
+    // le `bind` de la doublure en fait monter une autre.
+    let rep_du_fil = rep.clone();
+    let issue = std::thread::spawn(move || {
+        doublure::lancer_sauf_vol(&rep_du_fil, &gabarit(), |e| {
+            poignee.lancer(Coeur::SingBox, e.lancement.clone(), &e.secret, socks)
+        })
+        .map(|(vivant, _)| vivant)
+    })
+    .join()
+    .expect("le fil ne doit pas paniquer");
 
     // Rien ne doit avoir ete publie: la facade ne pointera jamais sur le
     // squatteur.
@@ -587,8 +566,17 @@ async fn la_facade_ne_mene_pas_le_trafic_a_un_squatteur_en_session() {
 /// Qu'elle reponde etablit deux faits a la fois: elle a pu se lier a cote de
 /// l'ecoute tierce, et c'est ELLE qui recoit les connexions vers `127.0.0.1`
 /// (l'ecoute de la recette n'accepte jamais: une connexion qui lui arriverait
-/// resterait sans reponse). `Err` si la doublure n'a pas pu se lier - le port
-/// v4 etait pris ailleurs -, pour que la recette en essaie un autre.
+/// resterait sans reponse).
+///
+/// Elle n'est interrogee qu'une fois son temoin a [`Liaison::Liee`]. Avant le
+/// 30/09/2026 on l'interrogeait des le lancement, et toute reponse 200 comptait:
+/// si `127.0.0.1:<port>` etait deja ecoute ailleurs - l'ecoute d'une AUTRE
+/// recette de ce binaire, par exemple, qui repond une version -, la doublure
+/// mourait de son `bind`, cette ecoute-la repondait a sa place avec le secret
+/// de la doublure en main, et la recette jugeait le proprietaire d'un pid
+/// mort. `Err` seulement si la doublure a ecrit que son port etait pris
+/// ([`Liaison::PortPris`]), pour que la recette en essaie un autre; toute
+/// autre issue panique en la nommant.
 async fn doublure_a_cote(port: u16, nom: &str) -> Result<(std::process::Child, PathBuf), String> {
     let rep = repertoire_temporaire(nom);
     let secret = alea::secret().unwrap();
@@ -614,26 +602,50 @@ async fn doublure_a_cote(port: u16, nom: &str) -> Result<(std::process::Child, P
     let adresse = SocketAddr::from(([127, 0, 0, 1], port));
     let debut = Instant::now();
     loop {
-        let reponse = tokio::time::timeout(
-            Duration::from_millis(500),
-            clash::interroger_version(adresse, &secret),
-        )
-        .await;
-        if let Ok(Ok(_)) = reponse {
-            return Ok((enfant, rep));
-        }
-        if let Ok(Some(statut)) = enfant.try_wait() {
-            let _ = std::fs::remove_dir_all(&rep);
-            return Err(format!(
-                "la doublure n'a pas pu se lier sur {adresse}: {statut}"
-            ));
+        match doublure::liaison(&config) {
+            Liaison::Liee => {
+                let reponse = tokio::time::timeout(
+                    Duration::from_millis(500),
+                    clash::interroger_version(adresse, &secret),
+                )
+                .await;
+                if let Ok(Ok(_)) = reponse {
+                    return Ok((enfant, rep));
+                }
+            }
+            Liaison::PortPris { code } => {
+                // Par PID, jamais par motif.
+                let _ = enfant.kill();
+                let _ = enfant.wait();
+                let _ = std::fs::remove_dir_all(&rep);
+                return Err(format!(
+                    "le port de la doublure {adresse} etait pris avant son bind (code {code:?})"
+                ));
+            }
+            Liaison::Echec(raison) => {
+                let _ = enfant.kill();
+                let _ = enfant.wait();
+                let _ = std::fs::remove_dir_all(&rep);
+                panic!(
+                    "la doublure n'a pas pu se lier sur {adresse}, et pas faute de port: {raison}"
+                );
+            }
+            Liaison::Inconnue => {
+                if let Ok(Some(statut)) = enfant.try_wait() {
+                    let _ = std::fs::remove_dir_all(&rep);
+                    panic!(
+                        "la doublure s'est arretee ({statut}) sans dire ce qu'elle a fait de {adresse}"
+                    );
+                }
+            }
         }
         if debut.elapsed() > Duration::from_secs(10) {
             // Par PID, jamais par motif.
             let _ = enfant.kill();
             let _ = enfant.wait();
+            let temoin = doublure::liaison(&config);
             let _ = std::fs::remove_dir_all(&rep);
-            panic!("la doublure ne repond pas sur {adresse}");
+            panic!("la doublure ne repond pas sur {adresse} (temoin: {temoin:?})");
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -641,8 +653,8 @@ async fn doublure_a_cote(port: u16, nom: &str) -> Result<(std::process::Child, P
 
 /// Tient `ecoute_tierce` (rendue par `lier`) a cote d'une doublure sur le meme
 /// port, et rend le verdict de la verification pour la doublure. Quelques
-/// essais, un port neuf a chaque fois, si la moitie v4 du port etait deja prise
-/// sur la machine de recette.
+/// essais, un port neuf a chaque fois, SEULEMENT si la doublure a ecrit que la
+/// moitie v4 du port etait deja prise (voir [`doublure_a_cote`]).
 async fn verdict_a_cote_de(lier: fn() -> std::io::Result<TcpListener>, nom: &str) -> Proprietaire {
     let mut raisons = Vec::new();
     for _ in 0..5 {

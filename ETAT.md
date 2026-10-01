@@ -39,15 +39,15 @@ service, les litteraux abimes par un transport d'antislashs et le trou FF
 de la garde des abstentions, la comparaison des objets nft nommes, puis la
 garde sans privilege du contrat de `check` sans banc et des drop-ins de l'unite, puis l'isolement des executions concurrentes
 d'une meme suite (repertoires temporaires par processus, ports sans personne
-tenus), puis la preuve des regles de routage et des routes (D1c.1), puis le refus des tables de routage que le noyau se reserve, puis le demontage exact du routage, puis l'identification du proprietaire des ecoutes de boucle locale du chemin par coeur, puis le rafraichissement du tableau de survie au 30/09/2026, puis la preuve du routage face au daemon (D1c.2), puis la fermeture du :53 du LAN sous `allow_lan`. L'hote qui tient le role `essai-linux` a change le 29/09: ses comptes ne se comparent pas a ceux d'avant cette date.
+tenus), puis la preuve des regles de routage et des routes (D1c.1), puis le refus des tables de routage que le noyau se reserve, puis le demontage exact du routage, puis l'identification du proprietaire des ecoutes de boucle locale du chemin par coeur, puis le rafraichissement du tableau de survie au 30/09/2026, puis la preuve du routage face au daemon (D1c.2), puis la fermeture du :53 du LAN sous `allow_lan`, puis la liberation effective des ports reserves aux coeurs de recette. L'hote qui tient le role `essai-linux` a change le 29/09: ses comptes ne se comparent pas a ceux d'avant cette date.
 
 Compte honnete des recettes cargo, par hote. La colonne `reelles` est ce qui a
 verifie quelque chose: `annoncees` moins `abstentions` moins `rouges`.
 
 | Hote | Annoncees | Abstentions | Rouges | Reelles |
 |---|---|---|---|---|
-| dev-windows | 1470 | 19 | 0 | 1451 |
-| essai-linux | 1533 | 25 | 0 | 1508 |
+| dev-windows | 1481 | 19 | 0 | 1462 |
+| essai-linux | 1547 | 25 | 0 | 1522 |
 
 Les deux lignes ont ete prises par `scripts/recettes-strict.sh`, chacune sur son
 hote: le portage a ajoute 14 recettes des deux cotes, D1b.3b 11 sur dev-windows et 22
@@ -74,7 +74,7 @@ par coeur sont propres a Linux, le constat hors Linux a Windows), le refus des t
 de routage reservees au noyau 12 sur dev-windows et 13 sur `essai-linux` (la
 comparaison aux constantes de libc est propre a Linux), le demontage exact du routage
 19 sur dev-windows et 24 sur `essai-linux` (la lecture du noyau avant la pose, le
-proprietaire de l'interface et le refus rendu par `down` sont propres a Linux), l'identification du proprietaire des ecoutes de boucle locale du chemin par coeur 16 sur dev-windows et 38 sur `essai-linux` (la lecture de `/proc`, le chemin par le compte dedie et le refus de `SO_REUSEPORT` par la facade sont propres a Linux, la table des ecoutes et l'ecoute large a cote du coeur a Windows), le rafraichissement du tableau de survie 3 sur chaque hote, la preuve du routage face au daemon 10 sur dev-windows et 20 sur `essai-linux` (le faux daemon sur socket Unix qui eprouve le protocole et l'analyse stricte est propre a Linux), la fermeture du :53 du LAN sous `allow_lan` 1 sur dev-windows et 4 sur `essai-linux` (les recettes du rendu nft sont propres a Linux, celle de la reference de `prove nft` tourne sur les deux hotes). Sur `essai-linux` une recette de plus est ignoree par
+proprietaire de l'interface et le refus rendu par `down` sont propres a Linux), l'identification du proprietaire des ecoutes de boucle locale du chemin par coeur 16 sur dev-windows et 38 sur `essai-linux` (la lecture de `/proc`, le chemin par le compte dedie et le refus de `SO_REUSEPORT` par la facade sont propres a Linux, la table des ecoutes et l'ecoute large a cote du coeur a Windows), le rafraichissement du tableau de survie 3 sur chaque hote, la preuve du routage face au daemon 10 sur dev-windows et 20 sur `essai-linux` (le faux daemon sur socket Unix qui eprouve le protocole et l'analyse stricte est propre a Linux), la fermeture du :53 du LAN sous `allow_lan` 1 sur dev-windows et 4 sur `essai-linux` (les recettes du rendu nft sont propres a Linux, celle de la reference de `prove nft` tourne sur les deux hotes), la liberation effective des ports reserves aux coeurs de recette 11 sur dev-windows et 14 sur `essai-linux` (les trois recettes de l'attente d'une liberation qu'un fork concurrent ne retient plus sont propres a Linux). Sur `essai-linux` une recette de plus est ignoree par
 construction (elle pose une route et ne tourne qu'en espace de noms reseau).
 La ligne `essai-linux` a ete prise dans un clone, ou la garde des modes de
 scripts mesure (elle lit l'index); dans une copie sans `.git` elle s'abstient,
