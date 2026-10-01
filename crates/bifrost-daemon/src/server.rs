@@ -7,7 +7,7 @@ use bifrost_ipc::protocol::{Command, Response};
 use bifrost_ipc::transport::{IpcError, IpcServer};
 use bifrost_ipc::{AuthPolicy, Connection};
 
-use crate::supervisor::Cmd;
+use crate::supervisor::{Cmd, RoutageDeclare};
 
 /// Boucle d'acceptation. Ne rend la main qu'en cas d'erreur fatale d'ecoute.
 pub async fn serve(
@@ -109,7 +109,12 @@ async fn dispatch(command: Command, tx: &Sender<Cmd>, profil: &std::path::Path) 
         // peut pas etre lue au milieu d'un montage. Un seul controle d'acces, a
         // l'acceptation, vaut pour toutes les commandes.
         Command::DeclarationRoutage => match ask(tx, Cmd::DeclarationRoutage).await {
-            Ok(declaration) => Response::DeclarationRoutage(Box::new(declaration)),
+            Ok(RoutageDeclare::Linux(declaration)) => {
+                Response::DeclarationRoutage(Box::new(declaration))
+            }
+            Ok(RoutageDeclare::Windows(declaration)) => {
+                Response::DeclarationRoutageWindows(Box::new(declaration))
+            }
             Err(e) => Response::error(e),
         },
         // Rien a attendre: le superviseur range le verdict et poursuit. Lui

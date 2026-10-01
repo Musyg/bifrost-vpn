@@ -19,6 +19,9 @@ pub mod profil;
 /// Le plan de routage Linux du produit, en donnees pures: le daemon en tire ses
 /// commandes `ip`, la preuve `prove routes` son attendu. Une seule source.
 pub mod routage;
+/// Le plan de routage Windows du produit, en donnees pures: le daemon en tire
+/// ses appels IP Helper, la preuve `prove routes` son attendu. Une seule source.
+pub mod routage_windows;
 pub mod state;
 
 pub use checks::{CheckOutcome, CheckReport, CheckVector, Verdict};

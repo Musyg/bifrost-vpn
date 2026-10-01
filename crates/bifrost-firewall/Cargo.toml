@@ -21,6 +21,9 @@ windows-sys = { version = "0.61", features = [
     # NET_LUID_LH vit dans Ndis, et ConvertInterfaceAliasToLuid est gate dessus.
     "Win32_NetworkManagement_Ndis",
     "Win32_NetworkManagement_WindowsFilteringPlatform",
+    # SOCKADDR_INET et ADDRESS_FAMILY: les lignes des tables IP Helper que lit
+    # `prove routes` (windows::lecture_routes) en sont faites, et y sont gatees.
+    "Win32_Networking_WinSock",
     "Win32_Security",
     # ConvertStringSecurityDescriptorToSecurityDescriptorW et
     # ConvertSidToStringSidW, pour la condition ALE_USER_ID.

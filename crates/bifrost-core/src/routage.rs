@@ -575,20 +575,23 @@ impl Plan {
 /// sur la meme configuration, que celle dont il a tire ses commandes
 /// (`Plan::arguments_ip`), evaluee une seconde fois apres la derniere commande
 /// reussie. Egal par construction au plan des commandes, ce n'est pas une
-/// capture de ces commandes. Les trois cas sont ceux que la commande IPC porte:
+/// capture de ces commandes. Les cas sont ceux que la commande IPC porte:
 ///
-/// - [`RoutagePose::Pose`]: une interface est montee, avec ce plan;
+/// - [`RoutagePose::Pose`]: une interface est montee sous Linux, avec ce plan;
+/// - [`RoutagePose::PoseWindows`]: une interface est montee sous Windows, avec
+///   le plan IP Helper ([`crate::routage_windows::PlanWindows`]) que la pose a
+///   execute;
 /// - [`RoutagePose::Aucun`]: rien de pose (jamais monte, ou demonte);
 /// - [`RoutagePose::NonApplicable`]: ce peripherique ne pose pas de plan de
-///   routage de ce genre sur sa plateforme (Windows: la table IP Helper, hors
-///   perimetre de cette preuve). C'est le defaut du port
-///   (`TunnelDevice::routage_pose`): un peripherique qui ne le surcharge pas ne
-///   pretend rien avoir pose.
+///   routage. C'est le defaut du port (`TunnelDevice::routage_pose`): un
+///   peripherique qui ne le surcharge pas, comme un double de test, ne pretend
+///   rien avoir pose.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RoutagePose {
     NonApplicable,
     Aucun,
     Pose(Plan),
+    PoseWindows(crate::routage_windows::PlanWindows),
 }
 
 /// Une regle telle que la lit la verification d'occupation: ce qui decide

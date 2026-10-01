@@ -1113,18 +1113,6 @@ fn le_rapport_n_exporte_ni_adresse_ni_interface_ni_parametre() {
     }
 }
 
-/// Hors Linux, la collecte n'existe pas: jamais une correspondance.
-#[cfg(not(target_os = "linux"))]
-#[test]
-fn hors_linux_la_preuve_n_est_pas_mesuree() {
-    let f = Fichier::nouveau(WG);
-    let r = verifier(&f.0);
-    assert_eq!(
-        (r.verdict, r.failed_input),
-        ("UNMEASURED", Some("observed"))
-    );
-}
-
 // --- trames ------------------------------------------------------------------
 
 fn attr(genre: u16, valeur: &[u8]) -> Vec<u8> {
@@ -1546,30 +1534,6 @@ fn le_lien_du_tunnel_se_reconnait_a_son_nom() {
     assert!(d[17..].iter().all(|o| *o == 0));
     let d = trames::requete_dump(trames::RTM_GETADDR, trames::AF_INET, 7, 42);
     assert_eq!(d.len(), 24);
-}
-
-/// Hors Linux, rien du noyau n'est lu: le rapport ne nomme aucune source
-/// (`source: null`), dans les deux modes, plutot que la collecte rtnetlink qui
-/// n'a pas eu lieu. Sous Linux, la source est la collecte (recettes
-/// `deux_lectures_identiques_font_une_mesure` et `protocole_daemon`).
-#[cfg(not(target_os = "linux"))]
-#[test]
-fn hors_linux_aucune_source_n_est_nommee() {
-    let f = Fichier::nouveau(WG);
-    let r = verifier(&f.0);
-    assert_eq!((r.verdict, r.live_kernel), ("UNMEASURED", false));
-    let v = serde_json::to_value(&r).unwrap();
-    assert!(v["source"].is_null(), "intention: {v}");
-
-    let r = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .unwrap()
-        .block_on(verifier_declaration(r"\\.\pipe\bifrost-recette-absent"));
-    assert_eq!((r.verdict, r.live_kernel), ("UNMEASURED", false));
-    assert_eq!(r.failed_input, Some("daemon-declaration"));
-    let v = serde_json::to_value(&r).unwrap();
-    assert!(v["source"].is_null(), "daemon: {v}");
-    assert_eq!(v["expected_source"], "daemon-declared-active-routing-plan");
 }
 
 /// Les categories qui ne dependent pas de l'etiquette (regles tierces et routes
@@ -2103,8 +2067,68 @@ mod protocole_daemon {
         }
     }
 
-    /// Une declaration valide qui ne pose aucun plan (ou n'en pose pas de ce
-    /// type sur sa plateforme): rien n'est compare, la collecte n'a pas lieu.
+    /// La forme Windows de la declaration, bien formee, offerte au lecteur
+    /// Linux: jamais lue comme un plan Linux, ni comme "rien de pose". Chaque
+    /// etat (pose par WireGuard, pose par le coeur, aucun, non applicable) est
+    /// refuse hors schema par l'analyse, et la preuve ne collecte rien.
+    #[tokio::test]
+    async fn une_declaration_de_la_forme_windows_n_est_pas_mesuree() {
+        use bifrost_ipc::protocol::{
+            DECLARATION_ROUTAGE_WINDOWS_VERSION, DeclarationRoutageWindows, FamilleRoutage,
+            PlanRoutageWindows,
+        };
+        let windows = |application: u64, issue: EtatRoutage, plan: Option<PlanRoutageWindows>| {
+            let d = DeclarationRoutageWindows {
+                schema_version: DECLARATION_ROUTAGE_WINDOWS_VERSION,
+                instance: INSTANCE.into(),
+                application,
+                issue,
+                plan,
+            };
+            let mut v =
+                serde_json::to_vec(&Response::DeclarationRoutageWindows(Box::new(d))).unwrap();
+            v.push(b'\n');
+            v
+        };
+        let wg = PlanRoutageWindows {
+            chemin: CheminRoutage::Wireguard,
+            interface: "bfwg0".into(),
+            mtu: 1420,
+            familles: vec![FamilleRoutage::Ipv4, FamilleRoutage::Ipv6],
+            destinations: Some(vec!["198.51.100.0/24".parse().unwrap()]),
+        };
+        let coeur = PlanRoutageWindows {
+            chemin: CheminRoutage::Coeur,
+            interface: "bftun0".into(),
+            mtu: 1420,
+            familles: vec![FamilleRoutage::Ipv4],
+            destinations: None,
+        };
+        for (nom, t) in [
+            ("pose wireguard", windows(4, EtatRoutage::Pose, Some(wg))),
+            ("pose coeur", windows(4, EtatRoutage::Pose, Some(coeur))),
+            ("aucun", windows(0, EtatRoutage::Aucun, None)),
+            (
+                "non applicable",
+                windows(0, EtatRoutage::NonApplicable, None),
+            ),
+        ] {
+            assert_eq!(
+                crate::declaration::analyser_routage(&t).map(|_| ()),
+                Err(HORS_SCHEMA),
+                "{nom}"
+            );
+            let daemon = FauxDaemon::demarrer(vec![t]);
+            let r = sans_collecte(&daemon).await;
+            assert_eq!(r["verdict"], "UNMEASURED", "{nom}: {r}");
+            assert_eq!(r["reason"], HORS_SCHEMA, "{nom}: {r}");
+            assert_eq!(r["failed_input"], "daemon-declaration", "{nom}");
+            rien_de_la_declaration(&r);
+        }
+    }
+
+    /// Une declaration valide qui ne pose aucun plan (ou n'en declare pas):
+    /// rien n'est compare, la collecte n'a pas lieu.
     #[tokio::test]
     async fn sans_plan_pose_rien_n_est_compare() {
         for (issue, application, raison) in [
@@ -2116,7 +2140,7 @@ mod protocole_daemon {
             (
                 EtatRoutage::NonApplicable,
                 0,
-                "le daemon ne pose pas de plan de routage de ce type sur sa plateforme (jumeau IP Helper hors perimetre)",
+                "le daemon ne declare pas de plan de routage",
             ),
         ] {
             let daemon = FauxDaemon::demarrer(vec![trame(application, issue, None)]);

@@ -40,6 +40,8 @@
 //! son propre transport du routage. Voir `--wgnt-e2e-bouclage`.
 
 use bifrost_core::ports::{HandshakeInfo, TunnelDevice};
+use bifrost_core::routage::RoutagePose;
+use bifrost_core::routage_windows::PlanWindows;
 use bifrost_core::{Error, Result, TunnelConfig};
 
 use super::wgnt::adapter::Adapter;
@@ -50,11 +52,19 @@ pub struct WindowsTunnel {
     /// `None` tant qu'aucun tunnel n'est monte. L'adaptateur se ferme, donc se
     /// retire, a la liberation.
     adapter: Option<Adapter>,
+    /// Le plan de routage que la derniere pose a execute en entier
+    /// (`ipcfg::apply` le rend apres son dernier appel reussi), retenu pour la
+    /// declaration que sert `prove routes --politique-daemon`. `None` quand
+    /// rien n'est monte, ou des le debut du demontage.
+    routage: Option<PlanWindows>,
 }
 
 impl WindowsTunnel {
     pub fn new() -> Result<Self> {
-        Ok(Self { adapter: None })
+        Ok(Self {
+            adapter: None,
+            routage: None,
+        })
     }
 
     /// LUID de l'interface, une fois l'adaptateur cree. C'est ce que le kill
@@ -84,9 +94,12 @@ impl TunnelDevice for WindowsTunnel {
         // laisserait un adaptateur orphelin que plus rien ne ferme.
         self.adapter = Some(adapter);
 
-        if let Err(e) = ipcfg::apply(luid, cfg) {
-            let _ = self.down(cfg);
-            return Err(e);
+        match ipcfg::apply(luid, cfg) {
+            Ok(plan) => self.routage = Some(plan),
+            Err(e) => {
+                let _ = self.down(cfg);
+                return Err(e);
+            }
         }
 
         tracing::info!(
@@ -99,6 +112,10 @@ impl TunnelDevice for WindowsTunnel {
     }
 
     fn down(&mut self, cfg: &TunnelConfig) -> Result<()> {
+        // Des le debut du demontage, le peripherique ne declare plus rien de
+        // pose: un retrait qui echoue a mi-chemin ne laisse pas de plan
+        // qu'aucune pose n'aurait refait.
+        self.routage = None;
         let Some(adapter) = self.adapter.take() else {
             // Rien a demonter. Ce n'est pas une erreur: `down` doit pouvoir
             // etre appele sans condition, y compris pour desarmer le kill
@@ -125,6 +142,14 @@ impl TunnelDevice for WindowsTunnel {
     /// l'identifiant directement.
     fn interface_handle(&self) -> Option<u64> {
         self.luid()
+    }
+
+    /// Le plan IP Helper de la derniere pose reussie, ou rien de pose.
+    fn routage_pose(&self) -> RoutagePose {
+        match &self.routage {
+            Some(p) => RoutagePose::PoseWindows(p.clone()),
+            None => RoutagePose::Aucun,
+        }
     }
 
     fn handshake(&self, _cfg: &TunnelConfig) -> Result<Option<HandshakeInfo>> {

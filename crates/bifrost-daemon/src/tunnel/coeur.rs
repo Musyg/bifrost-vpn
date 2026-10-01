@@ -104,11 +104,17 @@ pub struct CoeurTunnel {
     /// quand rien n'est monte. Une seconde evaluation de `aiguillage::plan` sur
     /// l'aiguillage de la pose, retenue apres sa derniere etape reussie: egale
     /// par construction au plan dont les commandes sont tirees, pas une capture
-    /// de ces commandes. Linux seulement: sous Windows l'echappement du coeur passe
-    /// par la configuration du coeur (liaison de socket), pas par un plan de
-    /// routage de ce genre, et la declaration rend `non-applicable`.
+    /// de ces commandes.
     #[cfg(target_os = "linux")]
     routage: Option<Plan>,
+    /// Sous Windows, le produit pose lui-meme les routes du coeur sur le TUN
+    /// (`ipcfg::apply`, la route par defaut de chaque famille adressee);
+    /// l'echappement du coeur, lui, passe par sa configuration (liaison de
+    /// socket). Le plan retenu est celui que `ipcfg::apply` rend apres son
+    /// dernier appel reussi, garde une fois le passage ouvert. `None` quand rien
+    /// n'est monte.
+    #[cfg(windows)]
+    routage: Option<bifrost_core::routage_windows::PlanWindows>,
 }
 
 impl CoeurTunnel {
@@ -133,7 +139,6 @@ impl CoeurTunnel {
             luid: None,
             coeur_actif,
             monte: None,
-            #[cfg(target_os = "linux")]
             routage: None,
         }
     }
@@ -274,7 +279,7 @@ impl CoeurTunnel {
         // le TUN en sortant, ce qui detruit l'adaptateur - et Windows emporte
         // avec lui les adresses et les routes qui le designaient. Rien a
         // deposer.
-        ipcfg::apply(luid, cfg)?;
+        let plan = ipcfg::apply(luid, cfg)?;
 
         // Le TUN passe de l'autre cote de la frontiere, et sa duree de vie
         // devient celle du passage.
@@ -283,6 +288,9 @@ impl CoeurTunnel {
             .ouvrir_passage(tun, self.coeur.clone(), Self::mtu(cfg)?)
             .map_err(Error::Tunnel)?;
 
+        // Retenir, apres la derniere etape reussie, le plan que la pose vient
+        // d'executer appel par appel.
+        self.routage = Some(plan);
         self.luid = Some(luid);
         self.monte = Some(nom);
         Ok(())
@@ -322,6 +330,8 @@ impl CoeurTunnel {
         let ferme = self.passage.fermer();
         self.luid = None;
         self.monte = None;
+        // Plus rien de pose: la declaration ne rend plus l'ancien plan.
+        self.routage = None;
         ferme.map_err(Error::Tunnel)
     }
 
@@ -350,9 +360,8 @@ impl TunnelDevice for CoeurTunnel {
         self.demonter_ici(cfg)
     }
 
-    /// Le plan de routage pose par l'aiguillage, sous Linux; sous Windows,
-    /// `non-applicable` (l'echappement du coeur y passe par la configuration du
-    /// coeur, pas par un plan de routage de ce genre).
+    /// Le plan de routage pose: celui de l'aiguillage sous Linux, celui de la
+    /// pose IP Helper sur le TUN sous Windows. Rien de pose sinon.
     fn routage_pose(&self) -> RoutagePose {
         #[cfg(target_os = "linux")]
         {
@@ -363,7 +372,10 @@ impl TunnelDevice for CoeurTunnel {
         }
         #[cfg(windows)]
         {
-            RoutagePose::NonApplicable
+            match &self.routage {
+                Some(p) => RoutagePose::PoseWindows(p.clone()),
+                None => RoutagePose::Aucun,
+            }
         }
     }
 

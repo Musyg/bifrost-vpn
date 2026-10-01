@@ -147,6 +147,14 @@ pub enum Command {
     /// Aucun parametre, aucun effet, meme controle d'acces que `Status`. Elle ne
     /// transporte ni cle ni profil: seulement les champs qui definissent le plan
     /// (voir [`DeclarationRoutage`]), et l'etat (pose, rien, non applicable).
+    ///
+    /// # Deux formes de reponse, une par plateforme
+    ///
+    /// Sous Linux, la reponse est [`Response::DeclarationRoutage`]. Sous
+    /// Windows, ou le plan est la table IP Helper et non des regles et une
+    /// table, c'est [`Response::DeclarationRoutageWindows`], avec sa propre
+    /// version de contenu ([`DECLARATION_ROUTAGE_WINDOWS_VERSION`]). Chaque
+    /// lecteur strict n'accepte que la forme de sa plateforme.
     DeclarationRoutage,
 }
 
@@ -196,6 +204,7 @@ pub enum Response {
     Check(Box<CheckReport>),
     DeclarationPareFeu(Box<DeclarationPareFeu>),
     DeclarationRoutage(Box<DeclarationRoutage>),
+    DeclarationRoutageWindows(Box<DeclarationRoutageWindows>),
     Error { message: String },
 }
 
@@ -268,8 +277,8 @@ pub const DECLARATION_ROUTAGE_VERSION: u32 = 1;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum EtatRoutage {
-    /// Ce peripherique ne pose pas de plan de routage de ce genre sur sa
-    /// plateforme (Windows: la table IP Helper, hors perimetre de la preuve).
+    /// Ce peripherique ne declare pas de plan de routage (le defaut du port,
+    /// celui d'un double de test).
     NonApplicable,
     /// Rien de pose: le peripherique n'a jamais monte, ou a demonte.
     Aucun,
@@ -281,9 +290,12 @@ pub enum EtatRoutage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CheminRoutage {
-    /// `netcfg::add_routing`: table dediee et marque.
+    /// Linux: `netcfg::add_routing`, table dediee et marque. Windows:
+    /// l'adaptateur WireGuardNT, une route par prefixe autorise.
     Wireguard,
-    /// `aiguillage::poser`: table du coeur et, s'il y en a un, compte du coeur.
+    /// Linux: `aiguillage::poser`, table du coeur et, s'il y en a un, compte du
+    /// coeur. Windows: le TUN du coeur, la route par defaut de chaque famille
+    /// adressee.
     Coeur,
 }
 
@@ -330,6 +342,61 @@ pub struct DeclarationRoutage {
     pub issue: EtatRoutage,
     /// Present si et seulement si `issue` vaut `pose`.
     pub plan: Option<PlanRoutage>,
+}
+
+/// Version du contenu de [`DeclarationRoutageWindows`], distincte de celle de
+/// la forme Linux ([`DECLARATION_ROUTAGE_VERSION`]): les deux plans n'ont pas
+/// les memes champs, et un lecteur strict refuse une forme qu'il ne connait
+/// pas plutot que d'en comparer une partie.
+pub const DECLARATION_ROUTAGE_WINDOWS_VERSION: u32 = 1;
+
+/// Une famille d'adresses adressee sur l'interface du tunnel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FamilleRoutage {
+    Ipv4,
+    Ipv6,
+}
+
+/// La projection du plan de routage Windows: ce qui suffit a reconstruire
+/// `bifrost_core::routage_windows::PlanWindows` par le meme constructeur que
+/// la pose (`PlanWindows::wireguard`, `PlanWindows::coeur`), et rien d'autre.
+/// Presente si et seulement si [`DeclarationRoutageWindows::issue`] vaut
+/// [`EtatRoutage::Pose`].
+///
+/// Ni cle, ni point d'acces, ni adresse du tunnel: le chemin, l'alias de
+/// l'interface, la MTU de ses lignes, les familles adressees et, pour
+/// WireGuard, les destinations posees (les prefixes autorises du profil,
+/// masques et dedoublonnes, dans l'ordre de pose). Ces destinations ne sont
+/// transmises qu'a un appelant admis sur le canal du daemon, et une preuve ne
+/// les recopie jamais dans son rapport.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanRoutageWindows {
+    pub chemin: CheminRoutage,
+    pub interface: String,
+    pub mtu: u32,
+    /// IPv4 puis IPv6, sans doublon.
+    pub familles: Vec<FamilleRoutage>,
+    /// WireGuard: les destinations des routes, dans l'ordre de pose. `null`
+    /// pour le coeur, dont les routes se deduisent des familles.
+    pub destinations: Option<Vec<bifrost_core::config::IpNet>>,
+}
+
+/// Declaration du peripherique du tunnel sous Windows: le plan IP Helper qu'il
+/// a pose en dernier. Memes six cles que [`DeclarationRoutage`], meme sens de
+/// l'instance, du numero et de l'etat; seul le plan differe, et la version.
+///
+/// C'est une DECLARATION, jamais une observation: seul un verificateur qui lit
+/// la table du systeme (`prove routes`) peut la confronter a la realite.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeclarationRoutageWindows {
+    /// Toujours [`DECLARATION_ROUTAGE_WINDOWS_VERSION`].
+    pub schema_version: u32,
+    pub instance: String,
+    pub application: u64,
+    pub issue: EtatRoutage,
+    /// Present si et seulement si `issue` vaut `pose`.
+    pub plan: Option<PlanRoutageWindows>,
 }
 
 impl Response {
@@ -431,6 +498,61 @@ mod tests {
             (CheminRoutage::Coeur, "coeur"),
         ] {
             assert_eq!(serde_json::to_value(chemin).unwrap(), fil);
+        }
+    }
+
+    /// La forme Windows, cle par cle: son propre nom de resultat, les memes six
+    /// cles au niveau superieur, cinq dans le plan, les destinations ecrites en
+    /// prefixes. Le lecteur strict de `prove routes --politique-daemon` sous
+    /// Windows compare exactement cela.
+    #[test]
+    fn la_reponse_de_declaration_routage_windows_a_sa_forme() {
+        let d = DeclarationRoutageWindows {
+            schema_version: DECLARATION_ROUTAGE_WINDOWS_VERSION,
+            instance: "00".repeat(24),
+            application: 2,
+            issue: EtatRoutage::Pose,
+            plan: Some(PlanRoutageWindows {
+                chemin: CheminRoutage::Wireguard,
+                interface: "wg0".into(),
+                mtu: 1420,
+                familles: vec![FamilleRoutage::Ipv4, FamilleRoutage::Ipv6],
+                destinations: Some(vec![
+                    "198.51.100.0/24".parse().unwrap(),
+                    "2001:db8::/32".parse().unwrap(),
+                ]),
+            }),
+        };
+        let v =
+            serde_json::to_value(Response::DeclarationRoutageWindows(Box::new(d.clone()))).unwrap();
+        let mut cles: Vec<_> = v.as_object().unwrap().keys().cloned().collect();
+        cles.sort();
+        assert_eq!(
+            cles,
+            [
+                "application",
+                "instance",
+                "issue",
+                "plan",
+                "result",
+                "schema_version"
+            ]
+        );
+        assert_eq!(v["result"], "declaration-routage-windows");
+        let mut cles: Vec<_> = v["plan"].as_object().unwrap().keys().cloned().collect();
+        cles.sort();
+        assert_eq!(
+            cles,
+            ["chemin", "destinations", "familles", "interface", "mtu"]
+        );
+        assert_eq!(v["plan"]["familles"], serde_json::json!(["ipv4", "ipv6"]));
+        assert_eq!(
+            v["plan"]["destinations"],
+            serde_json::json!(["198.51.100.0/24", "2001:db8::/32"])
+        );
+        match serde_json::from_value::<Response>(v).unwrap() {
+            Response::DeclarationRoutageWindows(relue) => assert_eq!(*relue, d),
+            autre => panic!("attendu une declaration de routage Windows, recu {autre:?}"),
         }
     }
 

@@ -688,9 +688,12 @@ mod imp {
     }
 
     /// Le proprietaire d'un pipe, tel que la decision le lit: trois classes,
-    /// et rien d'autre ne sort de ce module.
+    /// et rien d'autre ne sort de ce module (ni SID, ni compte). Public avec
+    /// [`decide_pipe_owner`], pour qu'une preuve montre sans privilege ce que
+    /// son exigence admet; le client ne s'ouvre toujours que par
+    /// `IpcClient::connect_verified`.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum PipeOwner {
+    pub enum PipeOwner {
         /// LocalSystem, `S-1-5-18`: le daemon installe en service.
         LocalSystem,
         /// Les Administrateurs, `S-1-5-32-544`: proprietaire par defaut des
@@ -750,8 +753,9 @@ mod imp {
         }
     }
 
-    /// La decision, fonction pure du proprietaire lu et de l'exigence.
-    fn decide_pipe_owner(
+    /// La decision, fonction pure du proprietaire lu et de l'exigence: celle
+    /// que `IpcClient::connect_verified` applique au proprietaire du pipe.
+    pub fn decide_pipe_owner(
         proprietaire: PipeOwner,
         attendu: ServerRequirement,
     ) -> std::result::Result<ServerRule, ServerIdentityError> {
@@ -1285,6 +1289,8 @@ mod imp {
 }
 
 pub use imp::{Connection, IpcClient, IpcServer};
+#[cfg(windows)]
+pub use imp::{PipeOwner, decide_pipe_owner};
 
 #[cfg(test)]
 mod tests_regles_serveur {

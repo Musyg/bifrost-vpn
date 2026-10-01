@@ -59,6 +59,11 @@
 //!
 //! Le rapport ne porte que des categories et des comptes: ni adresse, ni nom
 //! d'interface, ni table, ni marque, ni compte.
+//!
+//! Sous Windows, la commande passe par `preuve_routes_windows`, le jumeau IP
+//! Helper: ce module n'y est compile que pour ses recettes, qui comptent sur
+//! les deux hotes.
+#![cfg_attr(windows, allow(dead_code))]
 
 use std::path::Path;
 use std::time::Instant;
@@ -835,7 +840,9 @@ where
     r
 }
 
-/// `prove routes --intention F --actif`.
+/// `prove routes --intention F --actif`, hors Windows (voir
+/// `preuve_routes_windows`).
+#[cfg(not(windows))]
 pub fn verifier(intention: &Path) -> Rapport {
     #[cfg(target_os = "linux")]
     {
@@ -845,7 +852,7 @@ pub fn verifier(intention: &Path) -> Rapport {
     {
         // Rien du noyau n'est lu ici: le rapport ne nomme aucune source.
         let mut r = verifier_avec(intention, |_| {
-            Err("collecte des routes disponible uniquement sous Linux")
+            Err("collecte des routes disponible uniquement sous Linux et Windows")
         });
         r.source = None;
         r
@@ -882,9 +889,7 @@ fn plan_de_la_declaration(
 ) -> Result<Plan, &'static str> {
     use bifrost_ipc::protocol::{CheminRoutage, EtatRoutage};
     match d.issue {
-        EtatRoutage::NonApplicable => Err(
-            "le daemon ne pose pas de plan de routage de ce type sur sa plateforme (jumeau IP Helper hors perimetre)",
-        ),
+        EtatRoutage::NonApplicable => Err("le daemon ne declare pas de plan de routage"),
         EtatRoutage::Aucun => Err("aucun plan de routage pose par ce daemon: rien a comparer"),
         EtatRoutage::Pose => {
             let plan = d
@@ -927,7 +932,9 @@ fn plan_de_la_declaration(
 
 /// `prove routes --politique-daemon --actif`: l'attendu est le plan que le
 /// peripherique du tunnel joint par `socket` declare avoir pose, relu avant et
-/// apres la collecte du noyau, par le lecteur COMMUN de `declaration`.
+/// apres la collecte du noyau, par le lecteur COMMUN de `declaration`. Hors
+/// Windows (voir `preuve_routes_windows`).
+#[cfg(not(windows))]
 pub async fn verifier_declaration(socket: &str) -> Rapport {
     #[cfg(target_os = "linux")]
     {
@@ -939,14 +946,13 @@ pub async fn verifier_declaration(socket: &str) -> Rapport {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        // Sous Windows, aucune lecture: la commande et la preuve rendent un non
-        // applicable nomme (le jumeau IP Helper est hors de cette tranche), et
-        // le rapport ne nomme aucune source.
+        // Ni Linux ni Windows: aucune lecture, et le rapport ne nomme aucune
+        // source.
         let _ = socket;
         let debut = Instant::now();
         let mut r = commencer_declaration();
         r.source = None;
-        r.reason = "plan de routage par declaration disponible uniquement sous Linux (jumeau IP Helper hors perimetre)";
+        r.reason = "plan de routage par declaration disponible uniquement sous Linux et Windows";
         r.completed_at_unix_ms = heure();
         r.duration_ms = debut.elapsed().as_millis();
         r

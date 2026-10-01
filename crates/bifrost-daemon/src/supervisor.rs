@@ -21,8 +21,10 @@ use bifrost_core::routage::{Chemin, RoutagePose};
 use bifrost_core::state::{Action, Event, State, StateMachine, TunnelStatus};
 use bifrost_core::{Error, Result, TunnelConfig};
 use bifrost_ipc::protocol::{
-    CheminRoutage, DECLARATION_PARE_FEU_VERSION, DECLARATION_ROUTAGE_VERSION, DeclarationPareFeu,
-    DeclarationRoutage, EtatRoutage, IssueApplication, PlanRoutage,
+    CheminRoutage, DECLARATION_PARE_FEU_VERSION, DECLARATION_ROUTAGE_VERSION,
+    DECLARATION_ROUTAGE_WINDOWS_VERSION, DeclarationPareFeu, DeclarationRoutage,
+    DeclarationRoutageWindows, EtatRoutage, FamilleRoutage, IssueApplication, PlanRoutage,
+    PlanRoutageWindows,
 };
 
 use bifrost_evasion::course::{Course, Echec, Pas};
@@ -88,7 +90,7 @@ pub enum Cmd {
     /// Le plan de routage que le peripherique a pose en dernier. Servi sur CE
     /// thread, celui qui fait monter et demonter le tunnel: une lecture ne peut
     /// donc jamais tomber au milieu d'un montage.
-    DeclarationRoutage(Reply<DeclarationRoutage>),
+    DeclarationRoutage(Reply<RoutageDeclare>),
     /// La machine sort d'une mise en veille. Sans reponse: personne n'attend
     /// derriere, et la source est un rappel du systeme qui ne doit surtout pas
     /// se retrouver a attendre le superviseur.
@@ -259,19 +261,96 @@ impl SuiviRoutage {
         self.retenue = retenue;
     }
 
-    fn publier(&self, instance: String) -> DeclarationRoutage {
-        let (issue, plan) = match &self.retenue {
-            RoutagePose::NonApplicable => (EtatRoutage::NonApplicable, None),
-            RoutagePose::Aucun => (EtatRoutage::Aucun, None),
-            RoutagePose::Pose(p) => (EtatRoutage::Pose, Some(projeter_plan(p))),
+    /// La declaration, dans sa forme. Un plan pose decide de la forme: celui de
+    /// Linux donne la forme Linux, celui de Windows la forme Windows. Sans plan
+    /// (`aucun`, `non-applicable`), c'est `vide` qui decide: la forme de la
+    /// plateforme, [`FormeRoutage::DE_CETTE_PLATEFORME`] en production, pour
+    /// que le lecteur de cette plateforme lise aussi "rien de pose".
+    fn publier(&self, instance: String, vide: FormeRoutage) -> RoutageDeclare {
+        let (issue, forme) = match &self.retenue {
+            RoutagePose::NonApplicable => (EtatRoutage::NonApplicable, vide),
+            RoutagePose::Aucun => (EtatRoutage::Aucun, vide),
+            RoutagePose::Pose(_) => (EtatRoutage::Pose, FormeRoutage::Linux),
+            RoutagePose::PoseWindows(_) => (EtatRoutage::Pose, FormeRoutage::Windows),
         };
-        DeclarationRoutage {
-            schema_version: DECLARATION_ROUTAGE_VERSION,
-            instance,
-            application: self.application,
-            issue,
-            plan,
+        match forme {
+            FormeRoutage::Linux => RoutageDeclare::Linux(DeclarationRoutage {
+                schema_version: DECLARATION_ROUTAGE_VERSION,
+                instance,
+                application: self.application,
+                issue,
+                plan: match &self.retenue {
+                    RoutagePose::Pose(p) => Some(projeter_plan(p)),
+                    _ => None,
+                },
+            }),
+            FormeRoutage::Windows => RoutageDeclare::Windows(DeclarationRoutageWindows {
+                schema_version: DECLARATION_ROUTAGE_WINDOWS_VERSION,
+                instance,
+                application: self.application,
+                issue,
+                plan: match &self.retenue {
+                    RoutagePose::PoseWindows(p) => Some(projeter_plan_windows(p)),
+                    _ => None,
+                },
+            }),
         }
+    }
+}
+
+/// La forme de la declaration de routage: celle de Linux (regles et table) ou
+/// celle de Windows (table IP Helper).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FormeRoutage {
+    Linux,
+    Windows,
+}
+
+impl FormeRoutage {
+    /// La forme que lit la preuve de cette plateforme.
+    const DE_CETTE_PLATEFORME: Self = if cfg!(windows) {
+        FormeRoutage::Windows
+    } else {
+        FormeRoutage::Linux
+    };
+}
+
+/// La reponse a `Command::DeclarationRoutage`, dans l'une des deux formes que
+/// le serveur transmet telles quelles (`declaration-routage` et
+/// `declaration-routage-windows`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RoutageDeclare {
+    Linux(DeclarationRoutage),
+    Windows(DeclarationRoutageWindows),
+}
+
+/// La projection d'un plan pose sous Windows: ce qui suffit a le reconstruire
+/// au meme constructeur (`PlanWindows::wireguard`, `PlanWindows::coeur`), et
+/// rien d'autre. Les destinations sont celles des routes posees: masquer et
+/// dedoublonner a nouveau les laisse inchangees.
+fn projeter_plan_windows(plan: &bifrost_core::routage_windows::PlanWindows) -> PlanRoutageWindows {
+    use bifrost_core::routage::Famille;
+    use bifrost_core::routage_windows::CheminWindows;
+    let (chemin, destinations) = match plan.chemin {
+        CheminWindows::WireGuard => (
+            CheminRoutage::Wireguard,
+            Some(plan.routes.iter().map(|r| r.destination).collect()),
+        ),
+        CheminWindows::Coeur => (CheminRoutage::Coeur, None),
+    };
+    PlanRoutageWindows {
+        chemin,
+        interface: plan.interface.clone(),
+        mtu: plan.mtu,
+        familles: plan
+            .familles()
+            .into_iter()
+            .map(|f| match f {
+                Famille::Ipv4 => FamilleRoutage::Ipv4,
+                Famille::Ipv6 => FamilleRoutage::Ipv6,
+            })
+            .collect(),
+        destinations,
     }
 }
 
@@ -1468,8 +1547,11 @@ impl Supervisor {
     /// Le plan de routage retenu, sans rien interroger: ni le peripherique, ni
     /// le noyau. `&self` le garantit au compilateur. L'alea d'instance est celui
     /// de la declaration du pare-feu: une seule vie du daemon.
-    fn declaration_routage(&self) -> DeclarationRoutage {
-        self.routage.publier(self.declaration.instance.clone())
+    fn declaration_routage(&self) -> RoutageDeclare {
+        self.routage.publier(
+            self.declaration.instance.clone(),
+            FormeRoutage::DE_CETTE_PLATEFORME,
+        )
     }
 
     fn status(&mut self) -> TunnelStatus {
@@ -2372,23 +2454,51 @@ mod tests {
     /// meme constructeur que le produit; son compteur monte a chaque note, et un
     /// demontage retire le plan. Le superviseur ne recalcule rien depuis un
     /// profil.
+    impl RoutageDeclare {
+        fn linux(self) -> DeclarationRoutage {
+            match self {
+                RoutageDeclare::Linux(d) => d,
+                autre => panic!("attendu la forme Linux, recu {autre:?}"),
+            }
+        }
+
+        fn windows(self) -> DeclarationRoutageWindows {
+            match self {
+                RoutageDeclare::Windows(d) => d,
+                autre => panic!("attendu la forme Windows, recu {autre:?}"),
+            }
+        }
+
+        fn issue(&self) -> EtatRoutage {
+            match self {
+                RoutageDeclare::Linux(d) => d.issue,
+                RoutageDeclare::Windows(d) => d.issue,
+            }
+        }
+    }
+
     #[test]
     fn le_suivi_du_routage_projette_le_plan_du_peripherique() {
         // L'etat initial ne compte pas comme une application.
-        let na = SuiviRoutage::nouveau(RoutagePose::NonApplicable).publier("i".into());
+        let na = SuiviRoutage::nouveau(RoutagePose::NonApplicable)
+            .publier("i".into(), FormeRoutage::Linux)
+            .linux();
         assert_eq!(na.issue, EtatRoutage::NonApplicable);
         assert_eq!(na.application, 0);
         assert!(na.plan.is_none());
-        let aucun = SuiviRoutage::nouveau(RoutagePose::Aucun).publier("i".into());
+        let aucun = SuiviRoutage::nouveau(RoutagePose::Aucun)
+            .publier("i".into(), FormeRoutage::Linux)
+            .linux();
         assert_eq!(aucun.issue, EtatRoutage::Aucun);
         assert!(aucun.plan.is_none());
 
-        // Un montage WireGuard: compteur a 1, plan projete.
+        // Un montage WireGuard: compteur a 1, plan projete. Le plan decide de
+        // la forme, quelle que soit celle des etats vides.
         let mut s = SuiviRoutage::nouveau(RoutagePose::Aucun);
         s.noter(RoutagePose::Pose(bifrost_core::routage::Plan::wireguard(
             "bfwg0", 777_001, 30_303,
         )));
-        let d = s.publier("ff".into());
+        let d = s.publier("ff".into(), FormeRoutage::Windows).linux();
         assert_eq!(d.application, 1);
         assert_eq!(d.issue, EtatRoutage::Pose);
         assert_eq!(d.instance, "ff");
@@ -2401,7 +2511,7 @@ mod tests {
 
         // Un demontage: compteur a 2, plan retire.
         s.noter(RoutagePose::Aucun);
-        let d = s.publier("ff".into());
+        let d = s.publier("ff".into(), FormeRoutage::Linux).linux();
         assert_eq!(d.application, 2);
         assert_eq!(d.issue, EtatRoutage::Aucun);
         assert!(d.plan.is_none());
@@ -2425,18 +2535,107 @@ mod tests {
                 "bfwg0", 777_001, 30_303,
             )),
         }));
-        let d = sup.declaration_routage();
+        let d = sup.declaration_routage().linux();
         assert_eq!(d.issue, EtatRoutage::Pose);
         assert_eq!(d.application, 0, "l'etat initial n'est pas une application");
         assert_eq!(d.plan.unwrap().chemin, CheminRoutage::Wireguard);
         assert_eq!(d.instance, sup.declaration().instance);
 
         // Un peripherique qui ne pose rien de routage (defaut du trait): non
-        // applicable, sans plan.
+        // applicable, sans plan, dans la forme que lit la preuve de CETTE
+        // plateforme.
         let sup = superviseur_nu();
         let d = sup.declaration_routage();
-        assert_eq!(d.issue, EtatRoutage::NonApplicable);
+        assert_eq!(d.issue(), EtatRoutage::NonApplicable);
+        if cfg!(windows) {
+            assert!(d.windows().plan.is_none());
+        } else {
+            assert!(d.linux().plan.is_none());
+        }
+    }
+
+    fn cfg_windows(adresses: &[&str], autorises: &[&str]) -> TunnelConfig {
+        let mut c = *cfg();
+        c.interface = "bfwg0".into();
+        c.addresses = adresses.iter().map(|s| s.parse().unwrap()).collect();
+        if let Portage::Wireguard(wg) = &mut c.portage {
+            wg.peer.allowed_ips = autorises.iter().map(|s| s.parse().unwrap()).collect();
+        }
+        c
+    }
+
+    /// Un plan IP Helper pose donne la forme Windows, et sa projection se
+    /// reconstruit au meme constructeur que la pose: c'est ce que la preuve
+    /// Windows fait de la declaration. Un etat vide prend la forme demandee.
+    #[test]
+    fn le_suivi_projette_le_plan_windows_au_meme_constructeur() {
+        use bifrost_core::routage_windows::PlanWindows;
+
+        let pose = PlanWindows::de_la_configuration(&cfg_windows(
+            &["192.0.2.2/32", "2001:db8:ffff::2/128"],
+            &["198.51.100.7/24", "198.51.100.0/24", "2001:db8:d1c::/48"],
+        ));
+        let mut s = SuiviRoutage::nouveau(RoutagePose::Aucun);
+        s.noter(RoutagePose::PoseWindows(pose.clone()));
+        let d = s.publier("ff".into(), FormeRoutage::Linux).windows();
+        assert_eq!(
+            (
+                d.schema_version,
+                d.application,
+                d.issue,
+                d.instance.as_str()
+            ),
+            (
+                DECLARATION_ROUTAGE_WINDOWS_VERSION,
+                1,
+                EtatRoutage::Pose,
+                "ff"
+            )
+        );
+        let p = d.plan.expect("un plan pose est joint");
+        assert_eq!(p.chemin, CheminRoutage::Wireguard);
+        assert_eq!(p.familles, [FamilleRoutage::Ipv4, FamilleRoutage::Ipv6]);
+        let destinations = p.destinations.expect("WireGuard declare ses destinations");
+        assert_eq!(destinations.len(), 2, "masquees et dedoublonnees");
+        assert_eq!(
+            PlanWindows::wireguard(&p.interface, &pose.familles(), &destinations, p.mtu),
+            pose
+        );
+
+        let coeur = PlanWindows::coeur("bftun0", &[bifrost_core::routage::Famille::Ipv4], 1400);
+        let pc = projeter_plan_windows(&coeur);
+        assert_eq!(
+            (pc.chemin, pc.interface.as_str(), pc.mtu, pc.destinations),
+            (CheminRoutage::Coeur, "bftun0", 1400, None)
+        );
+        assert_eq!(pc.familles, [FamilleRoutage::Ipv4]);
+
+        // Demonte: rien de pose, dans la forme demandee pour un etat vide.
+        s.noter(RoutagePose::Aucun);
+        let d = s.publier("ff".into(), FormeRoutage::Windows).windows();
+        assert_eq!((d.application, d.issue), (2, EtatRoutage::Aucun));
         assert!(d.plan.is_none());
+        let d = s.publier("ff".into(), FormeRoutage::Linux).linux();
+        assert_eq!((d.application, d.issue), (2, EtatRoutage::Aucun));
+    }
+
+    /// La forme d'un etat vide est celle de la plateforme du daemon: sous
+    /// Windows la preuve ne lit que la forme Windows, et doit pouvoir lire
+    /// "rien de pose" avant le premier montage.
+    #[test]
+    fn un_etat_vide_prend_la_forme_de_la_plateforme() {
+        let attendue = if cfg!(windows) {
+            FormeRoutage::Windows
+        } else {
+            FormeRoutage::Linux
+        };
+        assert_eq!(FormeRoutage::DE_CETTE_PLATEFORME, attendue);
+        let sup = superviseur_avec_tunnel(Box::new(TunnelRoutant {
+            pose: RoutagePose::Aucun,
+        }));
+        let d = sup.declaration_routage();
+        assert_eq!(d.issue(), EtatRoutage::Aucun);
+        assert_eq!(matches!(d, RoutageDeclare::Windows(_)), cfg!(windows));
     }
 
     /// Une poignee de sonde dont les deux autres bouts restent tenus.

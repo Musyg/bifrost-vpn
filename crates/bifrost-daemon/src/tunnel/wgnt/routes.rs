@@ -33,14 +33,14 @@
 //! DNS, le MTU des gros paquets et tout le reste du trafic de la machine. La
 //! question du bouclage, elle, est tranchee.
 
-use std::net::{IpAddr, Ipv6Addr};
+use std::net::IpAddr;
 
 use bifrost_core::config::{IpNet, TunnelConfig};
+use bifrost_core::routage_windows::{self, PlanWindows, RouteWindows};
 
-/// Metrique des routes du tunnel. Zero, comme WireGuard for Windows: la route
-/// la plus specifique gagne de toute facon, et une metrique nulle evite que
-/// Windows en calcule une automatiquement qui varierait d'une machine a l'autre.
-pub const ROUTE_METRIC: u32 = 0;
+/// Metrique des routes du tunnel: celle du plan,
+/// [`routage_windows::METRIQUE_ROUTE`].
+pub const ROUTE_METRIC: u32 = routage_windows::METRIQUE_ROUTE;
 
 /// Une route a poser sur l'interface du tunnel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,30 +50,28 @@ pub struct Route {
     pub metric: u32,
 }
 
-/// Les routes a poser pour cette configuration.
-///
-/// Sous WireGuard: une par prefixe autorise, dedupliquee. La destination est
-/// masquee, Windows refusant une route dont l'adresse porte des bits hors du
-/// prefixe, et `10.1.2.3/8` etant une facon parfaitement legitime d'ecrire
-/// `10.0.0.0/8` dans un fichier de configuration.
-///
-/// Sous coeur: voir [`routes_du_coeur`], qui n'a pas de prefixes autorises a
-/// lire et prend tout.
-pub fn routes_for(cfg: &TunnelConfig) -> Vec<Route> {
-    let mut routes: Vec<Route> = Vec::new();
-    let Some(wg) = cfg.portage.wireguard() else {
-        return routes_du_coeur(cfg);
-    };
-    for net in &wg.peer.allowed_ips {
-        let route = Route {
-            dest: masked(net),
-            metric: ROUTE_METRIC,
-        };
-        if !routes.contains(&route) {
-            routes.push(route);
+impl From<RouteWindows> for Route {
+    fn from(r: RouteWindows) -> Self {
+        Self {
+            dest: r.destination,
+            metric: r.metrique,
         }
     }
-    routes
+}
+
+/// Les routes a poser pour cette configuration: celles du plan
+/// ([`PlanWindows::de_la_configuration`]), dans son ordre. Il n'y a pas de
+/// seconde implementation ici.
+///
+/// Sous WireGuard: une par prefixe autorise, masquee et dedoublonnee. Sous
+/// coeur: la route par defaut de chaque famille adressee, faute de prefixes
+/// autorises a lire. Voir [`PlanWindows::wireguard`] et [`PlanWindows::coeur`].
+pub fn routes_for(cfg: &TunnelConfig) -> Vec<Route> {
+    PlanWindows::de_la_configuration(cfg)
+        .routes
+        .into_iter()
+        .map(Route::from)
+        .collect()
 }
 
 /// Route hote vers l'endpoint, posee SUR LE TUNNEL.
@@ -140,27 +138,19 @@ pub fn route_bouclage(endpoint: IpAddr) -> Route {
 /// a poser. C'est ce que Linux obtient explicitement par
 /// `suppress_prefixlength 0`, parce que la-bas la question se pose dans une
 /// autre table.
+///
+/// Le plan lui-meme est [`PlanWindows::coeur`]: cette fonction n'en rend que
+/// les routes.
 pub fn routes_du_coeur(cfg: &TunnelConfig) -> Vec<Route> {
-    let mut routes = Vec::new();
-    if cfg.addresses.iter().any(IpNet::is_ipv4) {
-        routes.push(Route {
-            dest: IpNet {
-                addr: IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
-                prefix_len: 0,
-            },
-            metric: ROUTE_METRIC,
-        });
-    }
-    if cfg.addresses.iter().any(|a| !a.is_ipv4()) {
-        routes.push(Route {
-            dest: IpNet {
-                addr: IpAddr::V6(Ipv6Addr::UNSPECIFIED),
-                prefix_len: 0,
-            },
-            metric: ROUTE_METRIC,
-        });
-    }
-    routes
+    PlanWindows::coeur(
+        &cfg.interface,
+        &routage_windows::familles_adressees(&cfg.addresses),
+        cfg.mtu,
+    )
+    .routes
+    .into_iter()
+    .map(Route::from)
+    .collect()
 }
 
 /// Vrai si le plan capture tout le trafic d'au moins une famille.
@@ -169,54 +159,6 @@ pub fn routes_du_coeur(cfg: &TunnelConfig) -> Vec<Route> {
 /// coupe du reseau si le tunnel ne transporte rien.
 pub fn contient_route_par_defaut(routes: &[Route]) -> bool {
     routes.iter().any(|r| r.dest.prefix_len == 0)
-}
-
-/// Vrai si le plan capture TOUT le trafic d'une famille donnee.
-///
-/// Sert a une decision et une seule, cote Windows: quand le tunnel prend la
-/// route par defaut d'une famille, la metrique automatique de son interface
-/// doit etre remplacee par zero. Sans cela, deux routes `/0` coexistent - celle
-/// du lien physique et la notre - et c'est la SOMME metrique d'interface plus
-/// metrique de route qui departage. Une interface fraiche recoit une metrique
-/// calculee sur la vitesse du lien, que rien ne garantit inferieure a celle du
-/// lien physique: le tunnel monterait, et le trafic continuerait de sortir en
-/// clair a cote.
-///
-/// Les deux references font exactement cela, et seulement dans ce cas:
-/// WireGuard pour Windows sous `if foundDefault4 { UseAutomaticMetric = false;
-/// Metric = 0 }`, et sing-tun sous `if AutoRoute`.
-pub fn capture_toute_la_famille(routes: &[Route], v4: bool) -> bool {
-    routes
-        .iter()
-        .any(|r| r.dest.prefix_len == 0 && r.dest.addr.is_ipv4() == v4)
-}
-
-/// Remet a zero les bits situes hors du prefixe.
-pub fn masked(net: &IpNet) -> IpNet {
-    let addr = match net.addr {
-        IpAddr::V4(v4) => {
-            let bits = u32::from(v4);
-            let masque = if net.prefix_len == 0 {
-                0
-            } else {
-                u32::MAX << (32 - net.prefix_len.min(32))
-            };
-            IpAddr::from((bits & masque).to_be_bytes())
-        }
-        IpAddr::V6(v6) => {
-            let bits = u128::from(v6);
-            let masque = if net.prefix_len == 0 {
-                0
-            } else {
-                u128::MAX << (128 - net.prefix_len.min(128))
-            };
-            IpAddr::V6(Ipv6Addr::from(bits & masque))
-        }
-    };
-    IpNet {
-        addr,
-        prefix_len: net.prefix_len,
-    }
 }
 
 #[cfg(test)]
@@ -274,17 +216,20 @@ mod tests {
 
     #[test]
     fn la_metrique_ne_se_force_que_pour_la_famille_reellement_capturee() {
-        // C'est la question exacte que pose `ipcfg::apply`, famille par
-        // famille. Forcer la metrique d'une famille qui n'est pas capturee
-        // avantagerait le tunnel pour un trafic qu'il ne transporte pas.
-        let v4_seule = routes_for(&cfg_coeur(&["10.7.0.2/32"]));
-        assert!(capture_toute_la_famille(&v4_seule, true));
-        assert!(!capture_toute_la_famille(&v4_seule, false));
+        // C'est la question exacte que pose `ipcfg::apply`, ligne par ligne.
+        // Forcer la metrique d'une famille qui n'est pas capturee avantagerait
+        // le tunnel pour un trafic qu'il ne transporte pas.
+        let v4_seule = PlanWindows::de_la_configuration(&cfg_coeur(&["10.7.0.2/32"]));
+        assert_eq!(v4_seule.lignes.len(), 1);
+        assert!(v4_seule.lignes[0].capture);
 
-        // Et un plan WireGuard qui ne prend qu'un prefixe ne capture rien.
-        let etroit = routes_for(&cfg(&["10.0.0.0/8"]));
-        assert!(!capture_toute_la_famille(&etroit, true));
-        assert!(!capture_toute_la_famille(&etroit, false));
+        // Et un plan WireGuard qui ne prend qu'un prefixe ne capture rien,
+        // meme avec une adresse dans chaque famille.
+        let mut c = cfg(&["10.0.0.0/8"]);
+        c.addresses.push("fd00::2/128".parse().unwrap());
+        let etroit = PlanWindows::de_la_configuration(&c);
+        assert_eq!(etroit.lignes.len(), 2);
+        assert!(etroit.lignes.iter().all(|l| !l.capture));
     }
 
     fn cfg(allowed: &[&str]) -> TunnelConfig {
@@ -336,7 +281,11 @@ mod tests {
         ];
         for (brut, attendu) in cas {
             let net: IpNet = brut.parse().unwrap();
-            assert_eq!(masked(&net).to_string(), attendu, "en masquant {brut}");
+            assert_eq!(
+                routage_windows::masquer(&net).to_string(),
+                attendu,
+                "en masquant {brut}"
+            );
         }
     }
 

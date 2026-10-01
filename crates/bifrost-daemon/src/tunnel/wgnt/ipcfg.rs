@@ -2,8 +2,11 @@
 //!
 //! WireGuardNT ne fait que le transport: tout ce qui suit est du ressort de la
 //! pile IP de Windows, et se fait par LUID d'interface. Le plan de ce qu'il
-//! faut poser vit dans [`super::routes`], qui est pur; ici il n'y a que les
-//! appels systeme.
+//! faut poser vit dans `bifrost_core::routage_windows`, qui est pur, et c'est
+//! de lui que [`apply`] et [`remove`] tirent chacun de leurs appels
+//! ([`PlanWindows::pose`], [`PlanWindows::retrait`]): la preuve `prove routes`
+//! reconstruit le meme plan au meme constructeur. Ici il n'y a que les appels
+//! systeme, un par operation du plan.
 //!
 //! Le retrait est fait pour ne jamais echouer a mi-chemin: chaque suppression
 //! est tentee, les objets deja absents sont tolores, et l'ensemble des erreurs
@@ -14,6 +17,8 @@
 use std::net::IpAddr;
 
 use bifrost_core::config::{IpNet, TunnelConfig};
+use bifrost_core::routage::Famille;
+use bifrost_core::routage_windows::{LigneInterface, OperationIpHelper, PlanWindows};
 use bifrost_core::{Error, Result};
 use windows_sys::Win32::Foundation::{ERROR_NOT_FOUND, ERROR_OBJECT_ALREADY_EXISTS, ERROR_SUCCESS};
 use windows_sys::Win32::NetworkManagement::IpHelper::{
@@ -29,48 +34,42 @@ use windows_sys::Win32::Networking::WinSock::{
     SOCKADDR_IN6, SOCKADDR_IN6_0, SOCKADDR_INET,
 };
 
-use super::routes::{self, Route};
+use super::routes::Route;
 
 /// Duree de vie d'une adresse posee a la main: infinie.
 const INFINITE_LIFETIME: u32 = 0xffff_ffff;
 
-/// Applique adresses, MTU, metrique puis routes.
+/// Applique le plan de la configuration: adresses, une ligne d'interface par
+/// famille adressee (MTU, detection d'adresse dupliquee, metrique), puis
+/// routes, dans l'ordre de [`PlanWindows::pose`]. S'arrete au premier appel
+/// refuse.
 ///
 /// Les routes viennent en dernier: une route vers une interface qui n'a pas
-/// encore d'adresse est refusee par Windows.
+/// encore d'adresse est refusee par Windows. Le plan est calcule EN PREMIER
+/// bien que ses routes soient posees en dernier, parce que la ligne
+/// d'interface a besoin de savoir s'il prend la route par defaut de sa famille
+/// ([`LigneInterface::capture`]).
 ///
-/// Le plan est calcule EN PREMIER bien qu'il soit pose en dernier, parce que
-/// la ligne d'interface a besoin de savoir s'il contient une route par defaut:
-/// voir [`routes::capture_toute_la_famille`].
-pub fn apply(luid: u64, cfg: &TunnelConfig) -> Result<()> {
-    let plan = routes::routes_for(cfg);
-    for net in &cfg.addresses {
-        add_address(luid, net)?;
+/// Rend le plan dont chaque appel vient d'etre execute: c'est lui que le
+/// peripherique retient et declare (`TunnelDevice::routage_pose`).
+pub fn apply(luid: u64, cfg: &TunnelConfig) -> Result<PlanWindows> {
+    let plan = PlanWindows::de_la_configuration(cfg);
+    for operation in plan.pose(&cfg.addresses) {
+        executer(luid, &operation)?;
     }
-    for famille in familles(cfg) {
-        let capture = routes::capture_toute_la_famille(&plan, famille == AF_INET);
-        configurer_interface(luid, famille, cfg.mtu, capture)?;
-    }
-    for route in &plan {
-        add_route(luid, route)?;
-    }
-    Ok(())
+    Ok(plan)
 }
 
-/// Retire tout ce qu'[`apply`] a pose. Idempotent.
+/// Retire tout ce qu'[`apply`] a pose, dans l'ordre de [`PlanWindows::retrait`].
+/// Idempotent.
 ///
 /// Ne s'arrete pas a la premiere erreur: ce qui peut etre retire l'est, et les
 /// erreurs sont rassemblees. Le MTU n'est pas restaure, l'interface disparait
 /// avec l'adaptateur.
 pub fn remove(luid: u64, cfg: &TunnelConfig) -> Result<()> {
     let mut erreurs = Vec::new();
-    for route in &routes::routes_for(cfg) {
-        if let Err(e) = del_route(luid, route) {
-            erreurs.push(e.to_string());
-        }
-    }
-    for net in &cfg.addresses {
-        if let Err(e) = del_address(luid, net) {
+    for operation in PlanWindows::de_la_configuration(cfg).retrait(&cfg.addresses) {
+        if let Err(e) = executer(luid, &operation) {
             erreurs.push(e.to_string());
         }
     }
@@ -84,15 +83,23 @@ pub fn remove(luid: u64, cfg: &TunnelConfig) -> Result<()> {
     }
 }
 
-fn familles(cfg: &TunnelConfig) -> Vec<u16> {
-    let mut f = Vec::new();
-    if cfg.addresses.iter().any(IpNet::is_ipv4) {
-        f.push(AF_INET);
+/// Une operation du plan, un appel IP Helper.
+fn executer(luid: u64, operation: &OperationIpHelper) -> Result<()> {
+    match operation {
+        OperationIpHelper::AjouterAdresse(net) => add_address(luid, net),
+        OperationIpHelper::ReglerInterface(ligne) => configurer_interface(luid, ligne),
+        OperationIpHelper::AjouterRoute(route) => add_route(luid, &Route::from(*route)),
+        OperationIpHelper::RetirerRoute(route) => del_route(luid, &Route::from(*route)),
+        OperationIpHelper::RetirerAdresse(net) => del_address(luid, net),
     }
-    if cfg.addresses.iter().any(|a| !a.is_ipv4()) {
-        f.push(AF_INET6);
+}
+
+/// La famille d'adresses Win32 d'une famille du plan.
+fn famille_win32(famille: Famille) -> u16 {
+    match famille {
+        Famille::Ipv4 => AF_INET,
+        Famille::Ipv6 => AF_INET6,
     }
-    f
 }
 
 fn add_address(luid: u64, net: &IpNet) -> Result<()> {
@@ -170,14 +177,17 @@ fn del_route(luid: u64, route: &Route) -> Result<()> {
 /// tiennent donc dans un seul aller-retour, ce qui est aussi ce que fait
 /// WireGuard pour Windows.
 ///
-/// # `capture`
+/// # La metrique
 ///
-/// Vrai quand le plan prend `::/0` ou `0.0.0.0/0` pour cette famille. Alors, et
-/// alors seulement, la metrique automatique de l'interface est remplacee par
-/// zero: sans cela la route par defaut du lien physique peut gagner la
-/// comparaison et le trafic sort en clair a cote d'un tunnel qui a l'air monte.
-/// Le detail du calcul est dans [`routes::capture_toute_la_famille`].
-fn configurer_interface(luid: u64, family: u16, mtu: u32, capture: bool) -> Result<()> {
+/// Imposee quand le plan prend `::/0` ou `0.0.0.0/0` pour cette famille
+/// ([`LigneInterface::metrique_imposee`]). Alors, et alors seulement, la
+/// metrique automatique de l'interface est remplacee par zero: sans cela la
+/// route par defaut du lien physique peut gagner la comparaison et le trafic
+/// sort en clair a cote d'un tunnel qui a l'air monte. Le detail est sur
+/// [`LigneInterface::capture`].
+fn configurer_interface(luid: u64, ligne: &LigneInterface) -> Result<()> {
+    let family = famille_win32(ligne.famille);
+    let mtu = ligne.mtu;
     let mut row = MIB_IPINTERFACE_ROW {
         Family: family,
         InterfaceLuid: net_luid(luid),
@@ -206,11 +216,11 @@ fn configurer_interface(luid: u64, family: u16, mtu: u32, capture: bool) -> Resu
     // Il n'y a personne d'autre sur cette interface pour se disputer une
     // adresse: la sonde ne peut rien trouver, elle ne peut que retarder.
     // WireGuard pour Windows fait de meme.
-    row.DadTransmits = 0;
+    row.DadTransmits = ligne.sondes_dad;
 
-    if capture {
+    if let Some(metrique) = ligne.metrique_imposee() {
         row.UseAutomaticMetric = false;
-        row.Metric = 0;
+        row.Metric = metrique;
     }
 
     // SAFETY: `row` provient d'un GetIpInterfaceEntry reussi, comme exige.
