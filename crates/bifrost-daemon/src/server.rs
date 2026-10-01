@@ -489,6 +489,13 @@ upstream = ["10.2.0.1"]
     /// serveur en fait (rend-il? combien de temps processeur brule-t-il
     /// pendant l'episode? combien de lignes de journal ecrit-il?), puis les
     /// lache et mesure le temps qu'il met a servir de nouveau.
+    ///
+    /// La limite de l'enfant se pose d'apres ses numeros de descripteur
+    /// libres, pas d'apres le plus grand ouvert: un descripteur herite a un
+    /// numero eleve ne doit pas laisser a l'enfant plus de place que la
+    /// recette n'en remplit. S'il ne peut pas poser sa limite, ou si le
+    /// parent ne tient pas plus de connexions qu'il n'y a de place, la recette
+    /// rougit en le disant.
     #[cfg(target_os = "linux")]
     mod epuisement {
         use super::*;
@@ -503,8 +510,8 @@ upstream = ["10.2.0.1"]
         /// Present dans l'environnement de l'enfant, et la seulement: le
         /// repertoire de son socket, nomme et retire par le parent.
         const ROLE_ENFANT: &str = "BIFROST_RECETTE_EPUISEMENT_ENFANT";
-        /// Descripteurs laisses a l'enfant au-dela de ceux qu'il tient deja:
-        /// son serveur en acceptera autant, pas davantage.
+        /// Numeros de descripteur laisses libres a l'enfant sous sa limite:
+        /// son serveur acceptera autant de connexions, pas davantage.
         const MARGE: u64 = 8;
         /// Connexions tenues par le parent, bien au-dela de `MARGE`.
         const TENUES: usize = 40;
@@ -522,13 +529,40 @@ upstream = ["10.2.0.1"]
             unsafe { libc::geteuid() }
         }
 
-        /// Le plus grand descripteur ouvert de ce processus.
+        /// Le plus grand descripteur ouvert de ce processus, pour le dire.
         fn plus_grand_descripteur() -> u64 {
             std::fs::read_dir("/proc/self/fd")
                 .expect("/proc/self/fd")
                 .filter_map(|e| e.ok()?.file_name().to_str()?.parse::<u64>().ok())
                 .max()
                 .expect("au moins un descripteur ouvert")
+        }
+
+        /// La limite souple qui ne laisse a ce processus que `MARGE` numeros
+        /// de descripteur libres, et le nombre de descripteurs ouverts sous
+        /// elle.
+        ///
+        /// `RLIMIT_NOFILE` borne le NUMERO d'un nouveau descripteur, le plus
+        /// petit libre, et non leur nombre: un descripteur herite a un numero
+        /// eleve laisse libres tous les numeros en dessous de lui, et une
+        /// limite posee au-dessus du plus grand ouvert n'epuise plus rien. La
+        /// limite se pose donc juste au-dessus du `MARGE`-ieme numero libre.
+        /// Chaque numero est sonde par `F_GETFD`, qui n'en ouvre aucun.
+        fn limite_a_marge() -> (u64, u64) {
+            let (mut libres, mut ouverts) = (0, 0);
+            for numero in 0..=libc::c_int::MAX {
+                // SAFETY: F_GETFD ne lit ni n'ecrit aucune memoire; sur un
+                // numero ferme il rend -1 (EBADF) sans rien allouer.
+                if unsafe { libc::fcntl(numero, libc::F_GETFD) } == -1 {
+                    libres += 1;
+                    if libres == MARGE {
+                        return (numero as u64 + 1, ouverts);
+                    }
+                } else {
+                    ouverts += 1;
+                }
+            }
+            unreachable!("plus de descripteurs ouverts que de numeros")
         }
 
         /// Le role de l'enfant: ecouter comme le daemon, sous une limite basse
@@ -580,15 +614,32 @@ upstream = ["10.2.0.1"]
             // pendant l'appel.
             let rc = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut actuelle) };
             assert_eq!(rc, 0, "getrlimit");
+            // Avant la sonde: la lecture de /proc/self/fd tient un
+            // descripteur le temps de la lire.
+            let plus_grand = plus_grand_descripteur();
+            let (limite, ouverts) = limite_a_marge();
+            // Sous une limite dure plus basse, moins de `MARGE` numeros
+            // restent libres: l'epuisement n'en vient que plus tot.
             let basse = libc::rlimit {
-                rlim_cur: (plus_grand_descripteur() + 1 + MARGE) as libc::rlim_t,
+                rlim_cur: (limite as libc::rlim_t).min(actuelle.rlim_max),
                 rlim_max: actuelle.rlim_max,
             };
             // SAFETY: setrlimit lit une structure locale, vivante pendant
             // l'appel; seule la limite souple de CE processus baisse.
-            let rc = unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &basse) };
-            assert_eq!(rc, 0, "setrlimit");
+            if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &basse) } != 0 {
+                println!(
+                    "IMPOSSIBLE setrlimit a {}: {}",
+                    basse.rlim_cur,
+                    std::io::Error::last_os_error()
+                );
+                let _ = std::io::stdout().flush();
+                std::process::exit(5);
+            }
 
+            println!(
+                "DESCRIPTEURS limite={} ouverts_dessous={ouverts} plus_grand_ouvert={plus_grand} limite_dure={}",
+                basse.rlim_cur, actuelle.rlim_max
+            );
             println!("PRET {}", chemin.display());
             let _ = std::io::stdout().flush();
             let issue = rt.block_on(serve(serveur, tx, std::path::PathBuf::from("/inexistant")));
@@ -650,6 +701,10 @@ upstream = ["10.2.0.1"]
         /// Ce que le serveur de l'enfant a fait de l'episode.
         #[derive(Debug)]
         struct Mesure {
+            /// La limite que l'enfant a posee, et ce qu'il tenait deja.
+            descripteurs: Option<String>,
+            /// Connexions que le parent a pu ouvrir et tenir.
+            tenues: usize,
             /// Ce que `serve` a rendu, s'il a rendu.
             serve_rendu: Option<String>,
             /// Delai entre l'ouverture des connexions et la premiere ligne
@@ -681,11 +736,21 @@ upstream = ["10.2.0.1"]
             sortie: &mpsc::Receiver<String>,
             journal: &mpsc::Receiver<String>,
         ) -> Mesure {
+            let mut descripteurs = None;
             let chemin = loop {
                 match sortie.recv_timeout(Duration::from_secs(10)) {
                     Ok(l) => {
                         if let Some(c) = apres(&l, "PRET ") {
                             break c.to_owned();
+                        }
+                        if let Some(d) = apres(&l, "DESCRIPTEURS ") {
+                            descripteurs = Some(d.to_owned());
+                        }
+                        if let Some(raison) = apres(&l, "IMPOSSIBLE ") {
+                            panic!(
+                                "l'enfant n'a pas pu poser sa limite de descripteurs, \
+                                 l'epuisement n'est pas garanti: {raison}"
+                            );
                         }
                     }
                     Err(_) => panic!("l'enfant n'a pas ouvert son ecoute en 10 s"),
@@ -694,6 +759,7 @@ upstream = ["10.2.0.1"]
             let tenues: Vec<std::os::unix::net::UnixStream> = (0..TENUES)
                 .filter_map(|_| std::os::unix::net::UnixStream::connect(&chemin).ok())
                 .collect();
+            let nombre_tenues = tenues.len();
             let ouverture = Instant::now();
 
             let mut serve_rendu = None;
@@ -729,6 +795,8 @@ upstream = ["10.2.0.1"]
                 serve_rendu = rendu(sortie);
             }
             Mesure {
+                descripteurs,
+                tenues: nombre_tenues,
                 serve_rendu,
                 episode,
                 lignes,
@@ -797,8 +865,14 @@ upstream = ["10.2.0.1"]
                 "le serveur s'est arrete sur l'epuisement: {mesure:?}"
             );
             assert!(
+                mesure.tenues as u64 > MARGE,
+                "epuisement non garanti: le parent ne tient pas plus de connexions que \
+                 l'enfant n'a de descripteurs libres: {mesure:?}"
+            );
+            assert!(
                 mesure.episode.is_some(),
-                "aucun episode observe: {mesure:?}"
+                "aucun episode observe, enfant a {}: {mesure:?}",
+                mesure.descripteurs.as_deref().unwrap_or("limite non dite")
             );
             assert!(
                 matches!(mesure.cpu, Some(c) if c < PLAFOND_CPU),
