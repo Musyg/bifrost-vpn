@@ -2601,25 +2601,21 @@ async fn run(args: Args) -> anyhow::Result<()> {
         }
     };
 
+    // Le superviseur tourne: plus aucune issue de `run` ne doit passer a cote
+    // de son arret. L'ouverture de l'ecoute appartient donc au service que
+    // `ecouter_et_servir` arrete.
     let policy = server::auth_policy(args.group.as_deref());
-    let gid = policy.allowed_gid;
-    let ipc = bifrost_ipc::IpcServer::bind(&args.socket, policy, gid)
-        .await
-        .with_context(|| format!("ecoute sur {}", args.socket))?;
-
     let shutdown_tx = tx.clone();
-    tokio::select! {
-        result = server::serve(ipc, tx, args.profil.clone()) => {
-            result?;
-        }
-        _ = shutdown_signal() => {
-            tracing::info!("signal d'arret recu");
-        }
-    }
-
-    let _ = shutdown_tx.send(Cmd::Shutdown);
-    let _ = handle.join();
-    Ok(())
+    server::ecouter_et_servir(
+        &args.socket,
+        policy,
+        args.profil.clone(),
+        tx,
+        shutdown_signal(),
+        shutdown_tx,
+        handle,
+    )
+    .await
 }
 
 async fn shutdown_signal() {
@@ -2967,6 +2963,126 @@ fn is_elevated() -> bool {
 mod tests {
     use super::*;
     use clap::CommandFactory;
+
+    /// Le code de `texte` sans ses commentaires de ligne ni le contenu de ses
+    /// chaines: ce qui s'y ecrit ne s'execute pas. Suffisant pour le corps de
+    /// `run`, qui n'a ni chaine brute ni caractere `"` litteral.
+    fn code_seul(texte: &str) -> String {
+        let mut code = String::with_capacity(texte.len());
+        let mut caracteres = texte.chars().peekable();
+        while let Some(c) = caracteres.next() {
+            match c {
+                '/' if caracteres.peek() == Some(&'/') => {
+                    for c in caracteres.by_ref() {
+                        if c == '\n' {
+                            code.push('\n');
+                            break;
+                        }
+                    }
+                }
+                '"' => {
+                    while let Some(c) = caracteres.next() {
+                        match c {
+                            '\\' => {
+                                caracteres.next();
+                            }
+                            '"' => break,
+                            _ => {}
+                        }
+                    }
+                    code.push_str("\"\"");
+                }
+                _ => code.push(c),
+            }
+        }
+        code
+    }
+
+    /// Le nombre d'occurrences de l'identifiant `nom` dans `code`.
+    fn occurrences(code: &str, nom: &str) -> usize {
+        code.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .filter(|mot| *mot == nom)
+            .count()
+    }
+
+    /// Une fois le superviseur lance, `run` n'a plus qu'une issue:
+    /// `server::ecouter_et_servir`, appelee avec le canal, le fil et l'emetteur
+    /// de l'arret de CE superviseur, et dont l'issue est celle de `run`. Les
+    /// recettes de `server::tests::arret` mesurent cette fonction, l'ouverture
+    /// de l'ecoute comprise; celle-ci garde qu'elle est bien le chemin du
+    /// daemon: l'appel exact, arguments compris, aucune autre sortie apres le
+    /// lancement (`?`, `return`, panique), et aucun des trois remplace en
+    /// route.
+    #[test]
+    fn run_finit_par_l_arret_ordonne_et_par_lui_seul() {
+        let source = include_str!("main.rs");
+        let debut = source
+            .find("\nasync fn run(args: Args)")
+            .expect("fn run dans main.rs");
+        let fin = debut + source[debut..].find("\n}\n").expect("fin de fn run");
+        let code = code_seul(&source[debut..fin]);
+
+        const CANAL: &str = "let (tx, rx) = mpsc::channel::<Cmd>();";
+        const LANCEMENT: &str = "    let handle = std::thread::Builder::new()\n        \
+             .name(\"\".into())\n        .spawn(move || supervisor.run(rx))?;\n";
+        const FIN: &str = "    let policy = server::auth_policy(args.group.as_deref());\n    \
+             let shutdown_tx = tx.clone();\n    server::ecouter_et_servir(\n        \
+             &args.socket,\n        policy,\n        args.profil.clone(),\n        tx,\n        \
+             shutdown_signal(),\n        shutdown_tx,\n        handle,\n    )\n    .await";
+
+        assert_eq!(code.matches(CANAL).count(), 1, "le canal du superviseur");
+        assert_eq!(
+            code.matches(LANCEMENT).count(),
+            1,
+            "le fil du superviseur, lance une fois"
+        );
+        assert!(
+            code.trim_end().ends_with(FIN),
+            "run doit finir par cet appel exact, dont l'issue est la sienne:\n{FIN}"
+        );
+
+        let lance = code.find(LANCEMENT).expect("lancement") + LANCEMENT.len();
+        let apres = &code[lance..];
+        assert!(
+            !apres.contains('?'),
+            "un `?` apres le lancement du superviseur sort sans son arret:\n{apres}"
+        );
+        for sortie in [
+            "return",
+            "bail",
+            "panic",
+            "unwrap",
+            "expect",
+            "exit",
+            "unreachable",
+            "todo",
+            "unimplemented",
+        ] {
+            assert_eq!(
+                occurrences(apres, sortie),
+                0,
+                "`{sortie}` apres le lancement du superviseur sort sans son arret"
+            );
+        }
+
+        // Ni le canal, ni le fil, ni l'emetteur de l'arret ne sont rebranches,
+        // abandonnes ou remplaces entre leur creation et l'appel: leurs seuls
+        // usages sont ceux-ci. Un usage de plus demande de relire cette garde.
+        for (nom, attendu) in [("tx", 4), ("rx", 2), ("handle", 2), ("shutdown_tx", 2)] {
+            assert_eq!(
+                occurrences(&code, nom),
+                attendu,
+                "usages de `{nom}` dans run"
+            );
+        }
+        for interdit in ["Shutdown", "join"] {
+            assert_eq!(
+                occurrences(&code, interdit),
+                0,
+                "`{interdit}` dans run: l'arret appartient a ecouter_et_servir"
+            );
+        }
+    }
 
     /// La plage CGNAT est ouverte au demarrage sauf demande contraire.
     ///

@@ -6,7 +6,7 @@
 
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
-use crate::auth::{AuthPolicy, PeerIdentity};
+use crate::auth::{AuthPolicy, PeerIdentity, SupplementaryGroups};
 use crate::protocol::{MAX_FRAME_BYTES, PROTOCOL_VERSION, Request, Response};
 
 #[derive(Debug, thiserror::Error)]
@@ -33,6 +33,21 @@ pub enum IpcError {
 }
 
 pub type Result<T> = std::result::Result<T, IpcError>;
+
+impl IpcError {
+    /// Le canal existe, et son serveur n'a pris aucune connexion de plus.
+    ///
+    /// A lire sur une erreur de `IpcClient::connect_verified`, la seule ou elle
+    /// ait ce sens. Windows: aucune instance du pipe ne s'est liberee avant la
+    /// fin de l'attente du client (`ERROR_PIPE_BUSY`, rendu passe
+    /// `ATTENTE_PIPE_OCCUPE`). Linux: la file d'attente du socket d'ecoute est
+    /// pleine, et `connect(2)` rend alors `EAGAIN` (`unix_stream_connect`, net/unix/af_unix.c).
+    /// Dans les deux cas un serveur tient le canal: ce n'est pas un daemon
+    /// absent.
+    pub fn is_server_busy(&self) -> bool {
+        matches!(self, IpcError::Io(e) if imp::canal_occupe(e))
+    }
+}
 
 /// Chemin par defaut du canal.
 pub fn default_endpoint() -> String {
@@ -306,6 +321,9 @@ mod imp {
         Acceptation,
         /// A la place de la lecture de l'identite d'un pair deja accepte.
         Identite,
+        /// A la place de la lecture de `/proc/<pid>/status`, ou se lisent les
+        /// groupes supplementaires d'un pair dont l'identite est lue.
+        Groupes,
     }
 
     /// Ce qu'une recette rend a chaque etape: `Some` substitue l'erreur.
@@ -357,6 +375,11 @@ mod imp {
             // tout ce qui n'est pas nomme ci-dessus.
             _ => Nature::Fatale,
         }
+    }
+
+    /// `connect(2)` a trouve pleine la file d'attente du socket d'ecoute.
+    pub(super) fn canal_occupe(e: &std::io::Error) -> bool {
+        e.raw_os_error() == Some(libc::EAGAIN)
     }
 
     impl IpcServer {
@@ -458,8 +481,10 @@ mod imp {
                     }
                     Err(e) => {
                         // On refuse sans rien lire du client, et on continue a
-                        // servir: un refus ne doit pas arreter le daemon.
-                        tracing::warn!(%peer, "connexion refusee");
+                        // servir: un refus ne doit pas arreter le daemon. La
+                        // cause va au journal comme au client: des groupes
+                        // illisibles ne s'y lisent pas comme un non-membre.
+                        tracing::warn!(%peer, error = %e, "connexion refusee");
                         let mut conn = Connection::new(stream, peer, self.delai_requete);
                         let _ = conn.send(&Response::error(e.to_string())).await;
                     }
@@ -482,7 +507,27 @@ mod imp {
             if let Some(e) = self.panne(Etape::Identite) {
                 return Err(e.into());
             }
-            peer_identity(stream)
+            let cred = stream.peer_cred()?;
+            let pid = cred.pid();
+            Ok(PeerIdentity {
+                uid: cred.uid(),
+                gid: cred.gid(),
+                pid,
+                supplementary_groups: match pid {
+                    Some(pid) => self.groupes(pid),
+                    None => SupplementaryGroups::Known(Vec::new()),
+                },
+            })
+        }
+
+        /// Les groupes supplementaires du pair `pid`, ou pourquoi ils n'ont
+        /// pas pu etre lus: `authorize` ne confond pas les deux.
+        fn groupes(&mut self, pid: i32) -> SupplementaryGroups {
+            #[cfg(test)]
+            if let Some(e) = self.panne(Etape::Groupes) {
+                return crate::auth::groups_from_status(Err(e));
+            }
+            crate::auth::supplementary_groups(pid)
         }
 
         /// L'erreur qu'une recette substitue a l'etape `etape`, s'il y en a
@@ -516,19 +561,6 @@ mod imp {
             return Err(std::io::Error::last_os_error().into());
         }
         Ok(())
-    }
-
-    fn peer_identity(stream: &UnixStream) -> Result<PeerIdentity> {
-        let cred = stream.peer_cred()?;
-        let pid = cred.pid();
-        Ok(PeerIdentity {
-            uid: cred.uid(),
-            gid: cred.gid(),
-            pid,
-            supplementary_groups: pid
-                .map(crate::auth::supplementary_groups)
-                .unwrap_or_default(),
-        })
     }
 
     pub struct Connection {
@@ -794,6 +826,11 @@ mod imp {
     /// Intervalle entre deux ouvertures pendant cette attente.
     const PAS_PIPE_OCCUPE: Duration = Duration::from_millis(50);
 
+    /// Aucune instance du pipe n'etait libre a la fin de l'attente.
+    pub(super) fn canal_occupe(e: &std::io::Error) -> bool {
+        e.raw_os_error() == Some(PIPE_OCCUPE)
+    }
+
     pub struct IpcServer {
         path: String,
         policy: AuthPolicy,
@@ -1001,7 +1038,7 @@ mod imp {
             uid: 0,
             gid: 0,
             pid: None,
-            supplementary_groups: Vec::new(),
+            supplementary_groups: SupplementaryGroups::Known(Vec::new()),
         }
     }
 
@@ -1604,6 +1641,19 @@ mod imp {
 
         /// Un client dans un fil a lui: son issue, et le temps qu'il y a mis.
         fn client(nom: String, attendu: ServerRequirement) -> mpsc::Receiver<(Issue, Duration)> {
+            client_parti(nom, attendu).1
+        }
+
+        /// `client`, et son heure de depart: celle d'ou le client compte sa
+        /// duree, prise juste avant `connect_verified`. Un fil se lance quand
+        /// le systeme le planifie, pas quand on le demande: une duree prise
+        /// par le client ne se compare a l'horloge de la recette qu'a partir
+        /// de cette heure.
+        fn client_parti(
+            nom: String,
+            attendu: ServerRequirement,
+        ) -> (mpsc::Receiver<Instant>, mpsc::Receiver<(Issue, Duration)>) {
+            let (parti, depart) = mpsc::channel();
             let (tx, rx) = mpsc::channel();
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Builder::new_current_thread()
@@ -1611,6 +1661,7 @@ mod imp {
                     .build()
                     .expect("runtime du client");
                 let debut = Instant::now();
+                let _ = parti.send(debut);
                 let issue = match rt.block_on(IpcClient::connect_verified(&nom, attendu)) {
                     Ok((_, regle)) => Issue::Admis(regle),
                     Err(IpcError::ServerIdentity(e)) => Issue::Refuse(e),
@@ -1619,7 +1670,7 @@ mod imp {
                 };
                 let _ = tx.send((issue, debut.elapsed()));
             });
-            rx
+            (depart, rx)
         }
 
         /// Le serveur de recette, dont l'unique instance est prise par un
@@ -1670,7 +1721,15 @@ mod imp {
             let nom = nom("identite");
             let (mut serveur, _premier) = serveur_occupe(&nom, &rt);
             let proprietaire = pipe_owner(serveur.next.as_raw_handle()).expect("proprietaire");
-            let issue = client(nom, ServerRequirement::Privileged);
+            // Les 300 ms se comptent a partir du depart du client, que le
+            // systeme peut planifier bien apres sa demande: comptees a partir
+            // de la demande, une partie s'ecoulerait avant qu'il attende.
+            let lancement = Instant::now();
+            let (parti, issue) = client_parti(nom, ServerRequirement::Privileged);
+            let depart = parti
+                .recv_timeout(Duration::from_secs(5))
+                .expect("le fil du client doit partir")
+                - lancement;
             std::thread::sleep(Duration::from_millis(300));
             assert!(
                 matches!(issue.try_recv(), Err(mpsc::TryRecvError::Empty)),
@@ -1682,6 +1741,7 @@ mod imp {
             let (issue, duree) = issue
                 .recv_timeout(ATTENTE_PIPE_OCCUPE + Duration::from_secs(3))
                 .expect("le client doit rendre son issue dans un temps borne");
+            println!("mesure instance obtenue: depart du client {depart:?}, attente {duree:?}");
             assert!(duree >= Duration::from_millis(300), "{duree:?}");
             let attendu = match attendu_du_client(proprietaire, ServerRequirement::Privileged) {
                 Some(regle) => Issue::Admis(regle),
@@ -2258,6 +2318,18 @@ mod tests_acceptation {
 
     #[cfg(unix)]
     async fn serveur(nom: &str) -> (IpcServer, String) {
+        // SAFETY: geteuid ne prend aucun argument et ne touche aucune memoire.
+        let euid = unsafe { libc::geteuid() };
+        let policy = AuthPolicy {
+            allowed_uids: vec![0, euid],
+            allowed_gid: None,
+        };
+        serveur_sous(nom, policy).await
+    }
+
+    /// Le serveur de recette, sous la politique `policy`.
+    #[cfg(unix)]
+    async fn serveur_sous(nom: &str, policy: AuthPolicy) -> (IpcServer, String) {
         use std::os::unix::fs::PermissionsExt;
         let dossier = std::env::temp_dir().join(format!(
             "bifrost-ipc-acceptation-{}-{nom}",
@@ -2270,12 +2342,6 @@ mod tests_acceptation {
         std::fs::set_permissions(&dossier, std::fs::Permissions::from_mode(0o755))
             .expect("repertoire de la recette en 0755");
         let chemin = dossier.join("d.sock");
-        // SAFETY: geteuid ne prend aucun argument et ne touche aucune memoire.
-        let euid = unsafe { libc::geteuid() };
-        let policy = AuthPolicy {
-            allowed_uids: vec![0, euid],
-            allowed_gid: None,
-        };
         let serveur = IpcServer::bind(&chemin, policy, None).await.expect("bind");
         (serveur, chemin.to_string_lossy().into_owned())
     }
@@ -2435,6 +2501,7 @@ mod tests_acceptation {
                     0 => libc::ENOTCONN,
                     _ => return None,
                 },
+                imp::Etape::Groupes => return None,
             };
             Some(std::io::Error::from_raw_os_error(code))
         }));
@@ -2475,6 +2542,172 @@ mod tests_acceptation {
             lu.len()
         );
         assert_eq!(lignes, 1, "quatre incidents, une ligne");
+    }
+
+    /// La reponse que le client a recue dans `AU_PLUS`, s'il en a recu une.
+    #[cfg(unix)]
+    async fn reponse_recue<C: tokio::io::AsyncRead + Unpin>(client: &mut C) -> Option<Response> {
+        let mut ligne = String::new();
+        tokio::time::timeout(
+            AU_PLUS,
+            tokio::io::BufReader::new(client).read_line(&mut ligne),
+        )
+        .await
+        .ok()?
+        .ok()?;
+        serde_json::from_str(&ligne).ok()
+    }
+
+    /// Les evenements de journal emis sur le fil qui l'a pose par
+    /// `tracing::subscriber::set_default`, chacun reduit a son niveau puis a
+    /// ses champs: le journal de production filtre par niveau, une ligne
+    /// emise sous ce filtre n'existe pas.
+    #[cfg(unix)]
+    #[derive(Clone, Default)]
+    struct Capture(Arc<std::sync::Mutex<Vec<String>>>);
+
+    #[cfg(unix)]
+    impl tracing::Subscriber for Capture {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, evenement: &tracing::Event<'_>) {
+            struct Champs(String);
+            impl tracing::field::Visit for Champs {
+                fn record_debug(
+                    &mut self,
+                    champ: &tracing::field::Field,
+                    valeur: &dyn std::fmt::Debug,
+                ) {
+                    self.0.push_str(&format!("{}={valeur:?} ", champ.name()));
+                }
+            }
+            let mut champs = Champs(format!("{} ", evenement.metadata().level()));
+            evenement.record(&mut champs);
+            self.0.lock().unwrap().push(champs.0);
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    /// Unix: des groupes supplementaires illisibles ne valent pas "membre
+    /// d'aucun groupe".
+    ///
+    /// Par `bind` puis `accept`, tels quels; seule la lecture de
+    /// `/proc/<pid>/status` est substituee (`Etape::Groupes`), par `EMFILE`,
+    /// ce que rend un daemon a court de descripteurs. Le pair est la recette
+    /// elle-meme, dont le gid primaire n'est pas celui de la politique: seul
+    /// un groupe supplementaire pourrait l'admettre. Sous root, l'uid
+    /// l'admet quels que soient ses groupes, et la recette le verifie aussi.
+    /// Puis la politique nomme le gid primaire de la recette: le pair est
+    /// admis sans que ses groupes supplementaires aient a etre connus.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn des_groupes_illisibles_ne_se_confondent_pas_avec_aucun_groupe() {
+        // SAFETY: geteuid et getegid ne prennent aucun argument et ne
+        // touchent aucune memoire.
+        let (euid, egid) = unsafe { (libc::geteuid(), libc::getegid()) };
+        let capture = Capture::default();
+        let _journal = tracing::subscriber::set_default(capture.clone());
+        let lectures = Arc::new(AtomicU64::new(0));
+        let illisibles = |serveur: &mut IpcServer| {
+            let l = lectures.clone();
+            serveur.panne = Some(Box::new(move |etape| {
+                (etape == imp::Etape::Groupes).then(|| {
+                    l.fetch_add(1, Ordering::SeqCst);
+                    std::io::Error::from_raw_os_error(libc::EMFILE)
+                })
+            }));
+        };
+
+        // Seul un groupe supplementaire pourrait admettre ce pair.
+        let politique = AuthPolicy {
+            allowed_uids: vec![0],
+            allowed_gid: Some(egid.wrapping_add(1)),
+        };
+        let (mut serveur, chemin) = serveur_sous("groupes-illisibles", politique).await;
+        illisibles(&mut serveur);
+        let mut client = ouvrir(&chemin).await.expect("client");
+        demander(&mut client).await;
+        let issue = tokio::time::timeout(Duration::from_millis(500), serveur.accept()).await;
+        let mesure = decrire(&issue);
+        drop(issue);
+        let reponse = reponse_recue(&mut client).await;
+        drop(serveur);
+        nettoyer(&chemin);
+        let lues = lectures.swap(0, Ordering::SeqCst);
+
+        // Le gid primaire du pair suffit, ses groupes restant illisibles.
+        let politique = AuthPolicy {
+            allowed_uids: vec![0],
+            allowed_gid: Some(egid),
+        };
+        let (mut serveur, chemin) = serveur_sous("groupe-primaire", politique).await;
+        illisibles(&mut serveur);
+        let mut client = ouvrir(&chemin).await.expect("client");
+        demander(&mut client).await;
+        let issue = tokio::time::timeout(AU_PLUS, serveur.accept()).await;
+        let primaire = decrire(&issue);
+        drop(issue);
+        drop(client);
+        drop(serveur);
+        nettoyer(&chemin);
+
+        let journal = capture.0.lock().unwrap().clone();
+        let refus: Vec<&String> = journal
+            .iter()
+            .filter(|l| l.contains("connexion refusee"))
+            .collect();
+        println!(
+            "mesure groupes illisibles: euid={euid} accept={mesure} lectures de groupes={lues} reponse={reponse:?} journal={refus:?}; gid primaire: accept={primaire}"
+        );
+        assert!(
+            lues >= 1,
+            "la couture n'a pas ete consultee: rien n'est mesure"
+        );
+        assert_eq!(primaire, "acceptee", "le gid primaire suffit");
+        if euid == 0 {
+            assert_eq!(
+                mesure, "acceptee",
+                "root est admis quels que soient ses groupes"
+            );
+            return;
+        }
+        assert_eq!(
+            mesure, "aucune acceptation dans le delai de la recette",
+            "le pair doit etre refuse"
+        );
+        let message = match reponse {
+            Some(Response::Error { message }) => message,
+            autre => panic!("refus attendu, recu {autre:?}"),
+        };
+        assert!(message.starts_with("acces refuse"), "{message}");
+        assert!(
+            message.contains("groupes supplementaires illisibles"),
+            "le refus doit nommer la cause: {message}"
+        );
+        assert!(
+            !message.contains("ni membre"),
+            "un groupe illisible n'est pas une absence de groupe: {message}"
+        );
+        assert_eq!(refus.len(), 1, "une ligne de refus: {journal:?}");
+        assert!(
+            refus[0].contains("groupes supplementaires illisibles"),
+            "le journal doit nommer la cause: {}",
+            refus[0]
+        );
+        // Le daemon journalise `bifrost_ipc` au niveau info par defaut: un
+        // refus emis plus bas n'y figurerait pas.
+        assert!(
+            refus[0].starts_with("WARN "),
+            "le refus doit etre un avertissement: {}",
+            refus[0]
+        );
     }
 
     /// Un epuisement de ressource ne fait pas rendre `accept`: il attend,
@@ -2700,6 +2933,60 @@ mod tests_regles_serveur {
             for interdit in ["uid", "pid", "S-1-"] {
                 assert!(!message.contains(interdit), "{message}");
             }
+        }
+    }
+}
+
+/// Ce que `IpcError::is_server_busy` dit d'une erreur: le canal occupe, et rien
+/// d'autre. L'erreur reelle d'un canal occupe, par `connect_verified`, est
+/// mesuree par les recettes de la CLI qui en dependent.
+#[cfg(test)]
+mod tests_classement {
+    use super::*;
+
+    #[test]
+    fn seul_un_canal_sans_place_est_dit_occupe() {
+        #[cfg(unix)]
+        let (occupe, autres) = (
+            libc::EAGAIN,
+            [
+                libc::ENOENT,
+                libc::ECONNREFUSED,
+                libc::EACCES,
+                libc::ENOTSOCK,
+            ],
+        );
+        #[cfg(windows)]
+        let (occupe, autres) = {
+            use windows_sys::Win32::Foundation::{
+                ERROR_ACCESS_DENIED, ERROR_BAD_PIPE, ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY,
+                ERROR_PIPE_NOT_CONNECTED,
+            };
+            (
+                ERROR_PIPE_BUSY as i32,
+                [
+                    ERROR_FILE_NOT_FOUND as i32,
+                    ERROR_ACCESS_DENIED as i32,
+                    ERROR_BAD_PIPE as i32,
+                    ERROR_PIPE_NOT_CONNECTED as i32,
+                ],
+            )
+        };
+        assert!(IpcError::Io(std::io::Error::from_raw_os_error(occupe)).is_server_busy());
+        for code in autres {
+            assert!(
+                !IpcError::Io(std::io::Error::from_raw_os_error(code)).is_server_busy(),
+                "{code}"
+            );
+        }
+        for autre in [
+            IpcError::Io(std::io::Error::other("sans code")),
+            IpcError::Closed,
+            IpcError::RequestTimeout,
+            IpcError::FrameTooLarge,
+            IpcError::ServerIdentity(ServerIdentityError::Refused),
+        ] {
+            assert!(!autre.is_server_busy(), "{autre}");
         }
     }
 }

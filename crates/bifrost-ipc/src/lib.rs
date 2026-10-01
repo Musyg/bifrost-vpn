@@ -25,7 +25,7 @@ pub mod auth;
 pub mod protocol;
 pub mod transport;
 
-pub use auth::{AuthError, AuthPolicy, PeerIdentity};
+pub use auth::{AuthError, AuthPolicy, PeerIdentity, SupplementaryGroups};
 pub use protocol::{Command, Request, Response};
 pub use transport::{
     Connection, IpcClient, IpcError, IpcServer, ServerIdentityError, ServerRequirement, ServerRule,
