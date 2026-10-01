@@ -27,6 +27,9 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 bifrost-amorce = { path = "../crates/bifrost-amorce" }
+# La bibliotheque du paquet de la CLI: ses lecteurs de fichiers et de
+# declarations (voir l'en-tete de `crates/bifrost-cli/src/lib.rs`).
+bifrost-cli = { path = "../crates/bifrost-cli" }
 bifrost-coffre = { path = "../crates/bifrost-coffre" }
 bifrost-core = { path = "../crates/bifrost-core" }
 bifrost-daemon = { path = "../crates/bifrost-daemon" }
@@ -125,6 +128,41 @@ bench = false
 [[bin]]
 name = "instantane_wfp"
 path = "fuzz_targets/instantane_wfp.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "capture_nft"
+path = "fuzz_targets/capture_nft.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "politique_nft_cli"
+path = "fuzz_targets/politique_nft_cli.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "intention_routes"
+path = "fuzz_targets/intention_routes.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "intention_routes_windows"
+path = "fuzz_targets/intention_routes_windows.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "declaration_daemon"
+path = "fuzz_targets/declaration_daemon.rs"
 test = false
 doc = false
 bench = false

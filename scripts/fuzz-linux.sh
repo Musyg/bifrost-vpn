@@ -33,8 +33,11 @@
 # `caracteres_de_controle.rs` parcourt comme du texte. Elle ne descend jamais
 # dans un repertoire `target`.
 #
-# Les cibles ne joignent aucun reseau; celle de l'IPC ecoute sur un socket Unix
-# du repertoire temporaire, sous le compte qui lance ce script.
+# Les cibles ne joignent aucun reseau. Celle de l'IPC ecoute sur un socket Unix,
+# sous le compte qui lance ce script, dans un repertoire par processus qu'elle
+# ne retire pas: son banc vit dans une statique, que Rust ne detruit jamais, et
+# une cible tombee ne retire rien. Ce script donne donc aux cibles (TMPDIR) un
+# repertoire temporaire a lui, et le retire a sa sortie, quelle qu'elle soit.
 
 set -euo pipefail
 
@@ -109,6 +112,13 @@ cargo +"$CHAINE" fuzz build --fuzz-dir fuzz --debug-assertions --target-dir "$CO
 # tombee, et c'est une trouvaille.
 BORNES=(-rss_limit_mb=2048 -timeout=120)
 
+# Le repertoire temporaire des cibles (voir l'en-tete), cree sous celui de
+# l'appelant et retire a la sortie: fin normale, echec, Ctrl-C ou SIGTERM.
+TEMPORAIRE="$(mktemp -d "${TMPDIR:-/tmp}/bifrost-fuzz.XXXXXX")"
+trap 'rm -rf -- "$TEMPORAIRE"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 TOMBEES=()
 for cible in "${CIBLES[@]}"; do
   binaire="$BINAIRES/$cible"
@@ -127,7 +137,7 @@ for cible in "${CIBLES[@]}"; do
 
   echo
   echo "== $cible: relecture des ${#fichiers[@]} graines =="
-  if ! "$binaire" "${BORNES[@]}" "${fichiers[@]}"; then
+  if ! TMPDIR="$TEMPORAIRE" "$binaire" "${BORNES[@]}" "${fichiers[@]}"; then
     echo "TOMBEE: $cible sur une graine (voir la sortie ci-dessus)"
     TOMBEES+=("$cible (graine)")
     continue
@@ -140,8 +150,8 @@ for cible in "${CIBLES[@]}"; do
   artefacts="fuzz/target/artefacts/$cible"
   mkdir -p "$travail" "$artefacts"
   echo "== $cible: campagne de $DUREE s =="
-  if ! "$binaire" "${BORNES[@]}" -max_total_time="$DUREE" -print_final_stats=1 \
-    -artifact_prefix="$artefacts/" "$travail" "$graines"; then
+  if ! TMPDIR="$TEMPORAIRE" "$binaire" "${BORNES[@]}" -max_total_time="$DUREE" \
+    -print_final_stats=1 -artifact_prefix="$artefacts/" "$travail" "$graines"; then
     echo "TOMBEE: $cible, entree conservee sous $artefacts/"
     TOMBEES+=("$cible (campagne)")
   fi

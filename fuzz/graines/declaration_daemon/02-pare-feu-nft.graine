@@ -1,0 +1,1 @@
+{"result":"declaration-pare-feu","schema_version":1,"instance":"000000000000000000000000000000000000000000000000","application":1,"moteur":"nftables","issue":"posee","politique":{"allow_lan":false,"coeur_uid":null,"dns_resolver":"127.0.0.1","fwmark":51820,"resolveur_uid":null,"schema_version":1,"tunnel_interface":"wg0"}}

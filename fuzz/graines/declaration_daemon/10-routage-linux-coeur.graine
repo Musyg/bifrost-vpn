@@ -1,0 +1,1 @@
+{"result":"declaration-routage","schema_version":1,"instance":"0123456789abcdef0123456789abcdef0123456789abcdef","application":4,"issue":"pose","plan":{"chemin":"coeur","interface":"bftun0","fwmark":null,"table":null,"coeur_uid":4242}}

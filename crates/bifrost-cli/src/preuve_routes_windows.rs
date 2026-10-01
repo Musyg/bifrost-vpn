@@ -201,7 +201,7 @@ pub(crate) fn plan_windows(
 }
 
 /// L'intention de routage Windows v1, lue strictement (voir l'en-tete).
-pub(crate) fn plan_de_l_intention(v: Value) -> Result<PlanWindows, &'static str> {
+pub fn plan_de_l_intention(v: Value) -> Result<PlanWindows, &'static str> {
     let objet = v.as_object().ok_or("intention de routage invalide")?;
     if objet.len() != CLES.len() || CLES.iter().any(|c| !objet.contains_key(*c)) {
         return Err("champs d'intention de routage manquants ou inconnus");
@@ -257,9 +257,7 @@ pub(crate) fn plan_de_l_intention(v: Value) -> Result<PlanWindows, &'static str>
 /// constructeur que la pose. La declaration a deja ete lue strictement (cles,
 /// types, graphie, coherence) par `analyser_routage_windows`; il reste a juger
 /// son contenu, comme celui d'une intention.
-pub(crate) fn plan_de_la_declaration(
-    d: &DeclarationRoutageWindows,
-) -> Result<PlanWindows, &'static str> {
+pub fn plan_de_la_declaration(d: &DeclarationRoutageWindows) -> Result<PlanWindows, &'static str> {
     match d.issue {
         EtatRoutage::NonApplicable => Err("le daemon ne declare pas de plan de routage"),
         EtatRoutage::Aucun => Err("aucun plan de routage pose par ce daemon: rien a comparer"),

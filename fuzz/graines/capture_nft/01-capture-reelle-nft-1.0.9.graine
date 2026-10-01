@@ -1,0 +1,21 @@
+{"nftables":[
+{"metainfo":{"version":"1.0.9","release_name":"Old Doc Yak #3","json_schema_version":1}},
+{"table":{"family":"inet","name":"bifrost","handle":7}},
+{"chain":{"family":"inet","table":"bifrost","name":"output","handle":1,"type":"filter","hook":"output","prio":0,"policy":"drop"}},
+{"chain":{"family":"inet","table":"bifrost","name":"input","handle":2,"type":"filter","hook":"input","prio":0,"policy":"drop"}},
+{"chain":{"family":"inet","table":"bifrost","name":"forward","handle":3,"type":"filter","hook":"forward","prio":0,"policy":"drop"}},
+{"rule":{"family":"inet","table":"bifrost","chain":"output","handle":4,"expr":[{"match":{"op":"==","left":{"meta":{"key":"oifname"}},"right":"lo"}},{"accept":null}]}},
+{"rule":{"family":"inet","table":"bifrost","chain":"output","handle":5,"expr":[{"match":{"op":"==","left":{"payload":{"protocol":"udp","field":"sport"}},"right":68}},{"match":{"op":"==","left":{"payload":{"protocol":"udp","field":"dport"}},"right":67}},{"accept":null}]}},
+{"rule":{"family":"inet","table":"bifrost","chain":"output","handle":6,"expr":[{"match":{"op":"==","left":{"payload":{"protocol":"ip6","field":"daddr"}},"right":{"prefix":{"addr":"fe80::","len":10}}}},{"match":{"op":"==","left":{"payload":{"protocol":"udp","field":"sport"}},"right":546}},{"match":{"op":"==","left":{"payload":{"protocol":"udp","field":"dport"}},"right":547}},{"accept":null}]}},
+{"rule":{"family":"inet","table":"bifrost","chain":"output","handle":8,"expr":[{"match":{"op":"==","left":{"payload":{"protocol":"icmpv6","field":"type"}},"right":{"set":[133,134,135,136,137]}}},{"accept":null}]}},
+{"rule":{"family":"inet","table":"bifrost","chain":"output","handle":9,"expr":[{"match":{"op":"==","left":{"payload":{"protocol":"ip","field":"daddr"}},"right":"127.0.0.1"}},{"match":{"op":"==","left":{"payload":{"protocol":"udp","field":"dport"}},"right":53}},{"accept":null}]}},
+{"rule":{"family":"inet","table":"bifrost","chain":"output","handle":10,"expr":[{"match":{"op":"==","left":{"payload":{"protocol":"ip","field":"daddr"}},"right":"127.0.0.1"}},{"match":{"op":"==","left":{"payload":{"protocol":"tcp","field":"dport"}},"right":53}},{"accept":null}]}},
+{"rule":{"family":"inet","table":"bifrost","chain":"output","handle":11,"comment":"bifrost-output-dropped","expr":[{"counter":{"packets":0,"bytes":0}}]}},
+{"rule":{"family":"inet","table":"bifrost","chain":"input","handle":12,"expr":[{"match":{"op":"==","left":{"meta":{"key":"iifname"}},"right":"lo"}},{"accept":null}]}},
+{"rule":{"family":"inet","table":"bifrost","chain":"input","handle":13,"expr":[{"match":{"op":"in","left":{"ct":{"key":"state"}},"right":[2,4]}},{"accept":null}]}},
+{"rule":{"family":"inet","table":"bifrost","chain":"input","handle":14,"expr":[{"match":{"op":"==","left":{"payload":{"protocol":"udp","field":"sport"}},"right":67}},{"match":{"op":"==","left":{"payload":{"protocol":"udp","field":"dport"}},"right":68}},{"accept":null}]}},
+{"rule":{"family":"inet","table":"bifrost","chain":"input","handle":15,"expr":[{"match":{"op":"==","left":{"payload":{"protocol":"ip6","field":"saddr"}},"right":{"prefix":{"addr":"fe80::","len":10}}}},{"match":{"op":"==","left":{"payload":{"protocol":"udp","field":"sport"}},"right":547}},{"match":{"op":"==","left":{"payload":{"protocol":"udp","field":"dport"}},"right":546}},{"accept":null}]}},
+{"rule":{"family":"inet","table":"bifrost","chain":"input","handle":17,"expr":[{"match":{"op":"==","left":{"payload":{"protocol":"icmpv6","field":"type"}},"right":{"set":[133,134,135,136,137]}}},{"accept":null}]}},
+{"rule":{"family":"inet","table":"bifrost","chain":"input","handle":18,"comment":"bifrost-input-dropped","expr":[{"counter":{"packets":0,"bytes":0}}]}},
+{"rule":{"family":"inet","table":"bifrost","chain":"forward","handle":19,"comment":"bifrost-forward-dropped","expr":[{"counter":{"packets":0,"bytes":0}}]}}
+]}

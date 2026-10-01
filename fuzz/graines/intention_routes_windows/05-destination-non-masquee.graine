@@ -1,0 +1,1 @@
+{"chemin":"wireguard","destinations":["198.51.100.1/24"],"familles":["ipv4","ipv6"],"interface":"bfwg0","mtu":1420,"plateforme":"windows","schema_version":1}
