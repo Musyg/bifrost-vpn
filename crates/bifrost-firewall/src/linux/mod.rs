@@ -252,6 +252,19 @@ mod tests {
                 allow_lan: true,
                 ..policy()
             },
+            // LAN ouvert et resolveur declare SUR le LAN: l'accept de son
+            // :853 pose une adresse seule devant les drops du :853, dans sa
+            // famille; nft seul dit si la regle est bien formee.
+            FirewallPolicy {
+                allow_lan: true,
+                dns_resolver: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
+                ..policy()
+            },
+            FirewallPolicy {
+                allow_lan: true,
+                dns_resolver: "fd00::53".parse().unwrap(),
+                ..policy()
+            },
             // L'exemption du coeur passe par `meta skuid`, une syntaxe que
             // seul `nft` peut valider. Un test de chaine ne dirait rien d'une
             // regle malformee, qui ferait echouer l'armement en production.

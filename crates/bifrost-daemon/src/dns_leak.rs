@@ -66,7 +66,7 @@ fn politique(lan: bool) -> FirewallPolicy {
         fwmark: None,
         dns_resolver: IpAddr::V4(Ipv4Addr::LOCALHOST),
         // Ouvrir le reseau local ne desarme pas `block-dns`: le blocage DNS
-        // pese 14 et le permit du LAN 11. Une requete :53 vers le LAN reste
+        // pese 14 et le permit du LAN 10. Une requete :53 vers le LAN reste
         // donc refusee, et la session d'administration survit quand meme.
         allow_lan: lan,
         coeur_uid: None,

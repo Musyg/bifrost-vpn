@@ -200,7 +200,7 @@ impl Politique {
                         regles.push(accepter(vec![meta("skuid", json!(uid))]));
                     }
                     if p.allow_lan {
-                        lan_sans_dns(&mut regles);
+                        lan_sans_dns(&mut regles, p.dns_resolver);
                         lan(&mut regles, "daddr");
                     }
                 }
@@ -286,16 +286,60 @@ fn lan(regles: &mut Vec<Vec<Value>>, champ: &str) {
         )]));
     }
 }
-/// Le :53 du LAN, qui tombe avant son acceptation: deux familles, UDP et TCP,
-/// dans l'ordre du rendu (`render_lan_permit`).
-fn lan_sans_dns(regles: &mut Vec<Vec<Value>>) {
-    for famille in ["ip", "ip6"] {
-        for proto in ["udp", "tcp"] {
-            regles.push(vec![
-                charge(famille, "daddr", prefixes_lan(famille)),
-                charge(proto, "dport", json!(53)),
-                json!({"drop":null}),
-            ]);
+/// Le DNS du LAN, qui tombe avant son acceptation, dans l'ordre du rendu
+/// (`render_lan_permit`): le :53, deux familles, UDP et TCP; puis, quand le
+/// resolveur declare vit sur le LAN, l'accept de son :853 dans sa famille;
+/// puis le :853, deux familles, UDP et TCP.
+fn lan_sans_dns(regles: &mut Vec<Vec<Value>>, resolveur: IpAddr) {
+    for port in [53, 853] {
+        if port == 853 && dans_le_lan(resolveur) {
+            let famille = if resolveur.is_ipv4() { "ip" } else { "ip6" };
+            for proto in ["udp", "tcp"] {
+                regles.push(accepter(vec![
+                    charge(famille, "daddr", json!(resolveur.to_string())),
+                    charge(proto, "dport", json!(853)),
+                ]));
+            }
+        }
+        for famille in ["ip", "ip6"] {
+            for proto in ["udp", "tcp"] {
+                regles.push(vec![
+                    charge(famille, "daddr", prefixes_lan(famille)),
+                    charge(proto, "dport", json!(port)),
+                    json!({"drop":null}),
+                ]);
+            }
+        }
+    }
+}
+
+/// L'adresse est-elle dans un prefixe de `prefixes_lan`? Calcul propre a la
+/// reference, par masque sur la liste de ses prefixes, et non par les
+/// predicats que le rendu emploie: deux ecritures que le banc confronte.
+fn dans_le_lan(adresse: IpAddr) -> bool {
+    match adresse {
+        IpAddr::V4(a) => {
+            let a = u32::from(a);
+            [
+                ([10, 0, 0, 0], 8),
+                ([169, 254, 0, 0], 16),
+                ([172, 16, 0, 0], 12),
+                ([192, 168, 0, 0], 16),
+            ]
+            .iter()
+            .any(|(reseau, longueur)| {
+                let masque = u32::MAX << (32 - longueur);
+                a & masque == u32::from_be_bytes(*reseau)
+            })
+        }
+        IpAddr::V6(a) => {
+            let a = u128::from(a);
+            [(0xfc00u128 << 112, 7u32), (0xfe80u128 << 112, 10)]
+                .iter()
+                .any(|(reseau, longueur)| {
+                    let masque = u128::MAX << (128 - longueur);
+                    a & masque == *reseau
+                })
         }
     }
 }
@@ -483,6 +527,152 @@ mod tests {
                 .all(|i| i.get("drop").is_none())),
             "un drop est pose en entree"
         );
+    }
+
+    /// Les regles de sortie d'une reference, dans l'ordre.
+    fn sortie_de(v: Value) -> Vec<Value> {
+        Politique::lire(v).unwrap().reference().unwrap()["nftables"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.get("rule"))
+            .filter(|r| r["chain"] == "output")
+            .map(|r| r["expr"].clone())
+            .collect()
+    }
+
+    /// Sous `allow_lan`, la reference fait tomber le :853 du LAN (DoT, DoQ)
+    /// AVANT l'acceptation du LAN, deux familles et deux protocoles, dans
+    /// l'ordre du rendu: drops du :53, accept du :853 du resolveur declare
+    /// quand il vit sur le LAN (dans sa famille seulement), drops du :853.
+    /// Hors du LAN, le resolveur declare ne recoit aucun accept du :853.
+    #[test]
+    fn sous_allow_lan_la_reference_fait_tomber_le_853_du_lan_sauf_le_resolveur_declare() {
+        let drop = |famille: &str, proto: &str, port: u16| {
+            json!([
+                charge(famille, "daddr", prefixes_lan(famille)),
+                charge(proto, "dport", json!(port)),
+                {"drop": null}
+            ])
+        };
+        for (resolveur, famille) in [
+            ("192.168.1.1", Some("ip")),
+            ("169.254.0.1", Some("ip")),
+            ("fd00::53", Some("ip6")),
+            ("fe80::1", Some("ip6")),
+            ("127.0.0.1", None),
+            ("::1", None),
+            ("9.9.9.9", None),
+        ] {
+            let mut v = intention();
+            v["allow_lan"] = json!(true);
+            v["dns_resolver"] = json!(resolveur);
+            let sortie = sortie_de(v);
+            let position = |expr: &Value| {
+                sortie
+                    .iter()
+                    .position(|e| e == expr)
+                    .unwrap_or_else(|| panic!("{resolveur}: regle absente: {expr}"))
+            };
+            for f in ["ip", "ip6"] {
+                let acceptation =
+                    position(&json!(accepter(vec![charge(f, "daddr", prefixes_lan(f))])));
+                for proto in ["udp", "tcp"] {
+                    let d53 = position(&drop(f, proto, 53));
+                    let d853 = position(&drop(f, proto, 853));
+                    assert!(d53 < d853 && d853 < acceptation, "{resolveur} {f}/{proto}");
+                }
+            }
+            let accepts: Vec<&Value> = sortie
+                .iter()
+                .filter(|e| {
+                    e.as_array().unwrap().iter().any(|i| {
+                        i == &charge("udp", "dport", json!(853))
+                            || i == &charge("tcp", "dport", json!(853))
+                    }) && e
+                        .as_array()
+                        .unwrap()
+                        .last()
+                        .unwrap()
+                        .get("accept")
+                        .is_some()
+                })
+                .collect();
+            match famille {
+                Some(f) => {
+                    assert_eq!(accepts.len(), 2, "{resolveur}: {accepts:?}");
+                    for proto in ["udp", "tcp"] {
+                        let accept = position(&json!(accepter(vec![
+                            charge(f, "daddr", json!(resolveur)),
+                            charge(proto, "dport", json!(853)),
+                        ])));
+                        for autre in ["ip", "ip6"] {
+                            let d853 = position(&drop(autre, proto, 853));
+                            assert!(
+                                accept < d853,
+                                "{resolveur}/{proto}: resolveur declare bloque par {autre}"
+                            );
+                        }
+                    }
+                }
+                None => assert!(accepts.is_empty(), "{resolveur}: {accepts:?}"),
+            }
+        }
+    }
+
+    /// LAN ferme, la reference ne nomme le :853 nulle part.
+    #[test]
+    fn sans_allow_lan_la_reference_ne_nomme_pas_le_853() {
+        for resolveur in ["127.0.0.1", "192.168.1.1"] {
+            let mut v = intention();
+            v["dns_resolver"] = json!(resolveur);
+            let texte =
+                serde_json::to_string(&Politique::lire(v).unwrap().reference().unwrap()).unwrap();
+            assert!(!texte.contains("853"), "{resolveur}");
+        }
+    }
+
+    /// L'appartenance au LAN de la reference suit SES prefixes
+    /// (`prefixes_lan`): dedans aux deux bornes, dehors juste a cote.
+    #[test]
+    fn l_appartenance_de_la_reference_suit_ses_prefixes() {
+        for famille in ["ip", "ip6"] {
+            for p in prefixes_lan(famille)["set"].as_array().unwrap() {
+                let addr: IpAddr = p["prefix"]["addr"].as_str().unwrap().parse().unwrap();
+                let len = p["prefix"]["len"].as_u64().unwrap() as u32;
+                let bornes: Vec<(IpAddr, bool)> = match addr {
+                    IpAddr::V4(a) => {
+                        let debut = u32::from(a);
+                        let fin = debut + ((1u32 << (32 - len)) - 1);
+                        [
+                            (debut, true),
+                            (fin, true),
+                            (debut - 1, false),
+                            (fin + 1, false),
+                        ]
+                        .iter()
+                        .map(|(x, b)| (IpAddr::V4((*x).into()), *b))
+                        .collect()
+                    }
+                    IpAddr::V6(a) => {
+                        let debut = u128::from(a);
+                        let fin = debut + ((1u128 << (128 - len)) - 1);
+                        [
+                            (debut, true),
+                            (fin, true),
+                            (debut - 1, false),
+                            (fin + 1, false),
+                        ]
+                        .iter()
+                        .map(|(x, b)| (IpAddr::V6((*x).into()), *b))
+                        .collect()
+                    }
+                };
+                for (ip, attendu) in bornes {
+                    assert_eq!(dans_le_lan(ip), attendu, "{p}: {ip}");
+                }
+            }
+        }
     }
 
     #[test]
