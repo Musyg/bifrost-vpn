@@ -365,6 +365,21 @@ jobs:
       - name: Licences, sources, doublons et avis
         run: cargo deny check
 
+      # Le harnais de fuzzing est un espace de travail separe, avec son propre
+      # verrou que la ligne precedente ne lit pas. Meme politique, plus une
+      # exception nominative pour libFuzzer: voir `fuzz/deny.toml`.
+      #
+      # Lance DEPUIS `fuzz/`, sans `--manifest-path` ni `--config`: cargo-deny
+      # y prend `fuzz/Cargo.toml`, puis cherche `deny.toml` en partant du
+      # dossier de ce manifeste, et trouve `fuzz/deny.toml` avant celui de la
+      # racine. La place de `--config` a change avec cargo-deny 0.20.0 (avant
+      # la sous-commande, et non plus apres `check`), et l'action ci-dessus
+      # installe la derniere version: chacune des deux formes explicites est
+      # refusee par l'autre version, celle-ci tient sous les deux.
+      - name: Licences, sources, doublons et avis du harnais de fuzzing
+        working-directory: fuzz
+        run: cargo deny check
+
       # Le CRA impose un SBOM lisible par machine dans la documentation
       # technique (Annexe I partie II), et le document 07 le veut a chaque
       # build. C'est le premier pas: il est PRODUIT et depose. L'attacher aux
@@ -404,3 +419,49 @@ jobs:
           # qui cesserait d'ecrire ou qui changerait de nom de fichier
           # laisserait un job vert et un depot vide.
           if-no-files-found: error
+
+  fuzz:
+    name: fuzzing des parseurs (Linux)
+    if: github.event_name != 'workflow_dispatch' || !inputs.windows
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
+    # Une chaine nightly DATEE, pas `nightly`: le sanitizer d'adresses de
+    # libFuzzer en a besoin, et une nightly flottante changerait sous le harnais
+    # d'un run a l'autre. Elle fournit le rustc de la campagne initiale sur
+    # essai-linux (1.95.0-nightly c78a29473, du 22/02/2026).
+    env:
+      BIFROST_FUZZ_CHAINE: nightly-2026-02-23
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Chaine nightly
+        run: rustup toolchain install "$BIFROST_FUZZ_CHAINE" --profile minimal
+
+      # Compile depuis crates.io a une version fixe, avec son propre verrou.
+      # `taiki-e/install-action` ne connait pas cargo-fuzz et se replierait sur
+      # cargo-binstall, c'est-a-dire sur une provenance qu'on ne choisit pas.
+      - name: cargo-fuzz
+        run: cargo install --locked cargo-fuzz --version 0.13.1
+
+      # Avec la chaine du depot (`rust-toolchain.toml`), comme le format du
+      # workspace racine: `cargo fmt --all` ne descend pas dans un espace de
+      # travail separe.
+      - name: Format du harnais
+        run: cargo fmt --manifest-path fuzz/Cargo.toml --check
+
+      # Chaque graine de `fuzz/graines` est rejouee, puis chaque cible est
+      # fuzzee 30 secondes. Une panique, une erreur du sanitizer, plus de 2 Gio
+      # de memoire ou une entree de plus de 120 s font echouer l'etape.
+      - name: Relecture des graines, puis 30 s par cible
+        run: ./scripts/fuzz-linux.sh --duree 30
+
+      - name: Entrees qui font tomber une cible, en cas d'echec
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-artefacts
+          path: fuzz/target/artefacts/
+          if-no-files-found: ignore

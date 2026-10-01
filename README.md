@@ -387,8 +387,9 @@ preuve d'etancheite du VPN. Voir
 
 ### Quota de CI et validation Windows
 
-Les PR et les push sur `main` lancent les controles Linux, la suite de fuite
-et l'audit des dependances. Windows est **uniquement manuel**: aucune execution
+Les PR et les push sur `main` lancent les controles Linux, la suite de fuite,
+l'audit des dependances et le fuzzing des parseurs (graines rejouees, puis
+30 secondes par cible). Windows est **uniquement manuel**: aucune execution
 automatique sur une PR ou sa fusion. Une nouvelle revision annule le run
 automatique obsolete de la meme PR ou branche.
 
@@ -417,7 +418,10 @@ sudo ./scripts/packaging-linux.sh      # empaquetage, dans une racine jetable
 sudo ./scripts/resolveur-systemd-linux.sh   # le resolveur sous l'unite reelle
 sudo ./scripts/service-systemd-linux.sh     # connect complet par le service installe
 sudo ./scripts/mort-daemon-systemd-linux.sh # le daemon tue: le kill switch tient-il, sous l'unite reelle
+./scripts/fuzz-linux.sh                # rejoue les graines de fuzzing, puis fuzze chaque parseur 30 s
 ```
+
+`fuzz-linux.sh` demande une chaine nightly et `cargo-fuzz` (`cargo install --locked cargo-fuzz --version 0.13.1`), et ne tourne que sous Linux. Le harnais vit dans `fuzz/`, un espace de travail cargo separe du workspace racine : son verrou, ses graines (`fuzz/graines/<cible>`) et sa politique de dependances (`fuzz/deny.toml`) n'entrent dans aucun binaire livre. `--duree N` fixe le temps par cible, `--rejouer` s'arrete apres la relecture des graines, `--cible NOM` restreint a cette cible (option repetable). Les binaires suivent `CARGO_TARGET_DIR` comme cargo (defaut `fuzz/target`); corpus de travail et entrees qui font tomber une cible restent sous `fuzz/target/`. Les cibles, la frontiere de confiance de chaque parseur et ce qui n'est pas couvert sont dans `docs/07-programme-securite-produit.md`, section 2.3.
 
 Cote Windows, `.\scripts\packaging-windows.ps1` (en administrateur) eprouve l'installateur en detournant `%ProgramFiles%` et `%ProgramData%` vers un bac a sable : ce qui est mesure est exactement ce qui se produirait a l'installation, sans rien laisser sur la machine. Le service, lui, ne se detourne pas - le gestionnaire de services est unique - donc la recette l'installe pour de bon, relit dans le **registre** ce que le SCM a enregistre, puis le retire ; elle refuse de tourner si un service `BifrostDaemon` existe deja, pour ne jamais defaire une installation reelle. Elle verifie que les quatre fichiers sont deposes - les deux binaires du produit, le resolveur chiffre et `wireguard.dll` -, que le repertoire de donnees a l'heritage coupe et ne laisse de droits qu'a SYSTEM et aux administrateurs - jamais a `S-1-5-19` -, que son sous-repertoire `resolveur` existe et est ouvert en lecture heritable a `S-1-5-19` sans aucun bit d'ecriture (un `Modify` la serait un echec : la configuration deviendrait reinscriptible par le resolveur), que `resolveur\etat` est ouvert en ecriture heritable, et que rejouer l'installation ne fait grossir ni l'un ni l'autre compte d'ACE, que le service depend de `BFE`, qu'il n'est pas demarre, et que sa ligne **nomme le resolveur avec son chemin cite et le compte `LocalService`, cite lui aussi, apres le binaire**. Sans droits administrateur elle rend `SKIPPED` avec sa raison, apres avoir tout de meme fait analyser l'installateur.
 

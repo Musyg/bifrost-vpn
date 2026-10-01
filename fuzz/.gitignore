@@ -1,0 +1,6 @@
+# Ce que cargo-fuzz et `scripts/fuzz-linux.sh` produisent: rien ne se versionne.
+# Les graines versionnees vivent dans `graines/`.
+target/
+corpus/
+artifacts/
+coverage/

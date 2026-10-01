@@ -94,35 +94,101 @@ Cote Go (sing-box, Xray, go-rosenpass eventuel) : `gosec ./...` et `govulncheck 
 
 **2.3 Fuzzing** - Priorite : parseur de profils > parseur IPC > metadonnees de mise a jour > deserialisation. Outils : cargo-fuzz (libFuzzer) + `arbitrary` en premier choix ; AFL++/honggfuzz en complement (tous trois supportes par OSS-Fuzz/ClusterFuzz).
 
-Harnais type (`fuzz/fuzz_targets/profile_parser.rs`) :
-```rust
-#![no_main]
-use libfuzzer_sys::fuzz_target;
-use bifrost_core::profil::Profil;
-fuzz_target!(|data: &[u8]| {
-    if let Ok(s) = std::str::from_utf8(data) {
-        let _ = Profil::depuis_lien(s);
-    }
-});
-```
-Harnais avec `arbitrary` pour l'IPC :
-```rust
-#![no_main]
-use libfuzzer_sys::fuzz_target;
-use arbitrary::Arbitrary;
-// Illustratif: aucun module `ipc` de cette forme n'existe encore dans le
-// depot. Le nom reste fictif A DESSEIN - le renommer en `bifrost_core::ipc`
-// donnerait une reference precise a un symbole absent, ce qui se recopie sans
-// se verifier. A reecrire le jour ou le harnais est vraiment pose.
-use vpn_fictif::ipc::IpcMessage;
-fuzz_target!(|msg: IpcMessage| {
-    let _ = vpn_fictif::ipc::handle(&msg);
-});
-```
+**Ce qui est pose.** Le harnais vit dans `fuzz/` (cargo-fuzz 0.13, libFuzzer,
+sanitizer d'adresses). C'est un espace de travail cargo SEPARE: son
+`Cargo.lock` et sa politique de dependances (`fuzz/deny.toml`, celle de la
+racine plus une exception nominative pour `libfuzzer-sys`, sous licence NCSA)
+ne touchent ni le verrou ni les binaires du produit. Chaque cible appelle la
+fonction de PRODUCTION du parseur par son chemin public; aucune n'a demande
+d'exposer un symbole. Au-dela de l'absence de panique, chacune verifie une
+propriete: lecture deterministe, aller-retour par l'encodeur de production,
+ou issue exacte du cadrage.
 
-Le premier harnais, lui, vise des symboles qui EXISTENT
-(`bifrost_core::profil::Profil::depuis_lien`), verifies le 21/08/2026. Aucun
-repertoire `fuzz/` n'est encore pose dans le depot.
+| Cible | Parseur | Qui fournit l'octet, et qui le lit |
+|---|---|---|
+| `lien_colle` | `bifrost_amorce::colle::lire`, sans phrase | un lien colle, venu d'un inconnu; la CLI, avant toute signature |
+| `lien_colle_chiffre` | `colle::lire` avec phrase: en-tete age, scrypt, clair | le meme lien, chiffre; la CLI |
+| `moisson` | `bifrost_amorce::recuperer` | les canaux (miroirs HTTP, fichier, lien); la CLI |
+| `signature_profil` | `bifrost_coffre::signature::{lire_cle_de_confiance, verifier}` | fichier de cle, profil et signature d'un canal; la CLI |
+| `reponses_reseau` | `quic::lire_reponse`, `tls::decouper`, `coeurs::socks`, `coeurs::clash` | hotes distants et coeur tiers; le daemon (root) |
+| `lien_profil` | `bifrost_core::profil::Profil::depuis_lien` | lien `vless://` ou `hysteria2://` d'un tiers (aucun appelant de production a ce jour) |
+| `ipc_trame` | `IpcServer::accept` puis `Connection::recv`, sur un vrai socket Unix | tout client admis sur le socket; le daemon (root) |
+| `ipc_json` | `Request`, `Response`, `TunnelConfig::validate` | client admis (requete lue en root); daemon (reponse lue par la CLI) |
+| `profil_toml` | `toml::from_str::<TunnelConfig>` puis `validate` | profil du daemon (root), ou designe a `connect --config` |
+| `politique_nft` | `politique_nft::Politique::lire`, `reference` | intention de `prove nft --politique`, declaration du daemon; la CLI |
+| `politique_wfp` | `politique_wfp::PolitiqueWfp::lire`, `reference` | declaration du daemon; la CLI |
+| `instantane_wfp` | `instantane_wfp::{Sid::lire_texte, Sid::lire_octets, lire_dacl}` | moteur WFP; la CLI |
+
+Les graines (`fuzz/graines/<cible>`) viennent des recettes et des exemples du
+depot: litteraux recopies, ou produits par les encodeurs de production a
+partir des valeurs des recettes. Aucune n'est inventee, aucune ne porte de
+secret: les paires minisign qui les signent ont ete engendrees pour l'occasion
+et leur cle privee jetee.
+
+**Lancer** (Linux, chaine nightly et `cargo-fuzz`): `./scripts/fuzz-linux.sh`
+rejoue toutes les graines puis fuzze chaque cible 30 s; `--duree N` change le
+temps par cible, `--rejouer` s'arrete apres la relecture, `--cible NOM`
+restreint (option repetable). Les binaires sont construits la ou cargo les
+mettrait (`CARGO_TARGET_DIR`, sinon `fuzz/target/`) et lus au meme endroit; le
+corpus de travail et les entrees qui font tomber une cible restent sous
+`fuzz/target/`. La CI fait de meme a chaque PR (job `fuzz`, nightly datee) et
+passe `cargo deny` sur le verrou du harnais.
+
+**Campagne initiale**, le 01/10/2026 sur essai-linux (canal `nightly` de
+l'hote, rustc 1.95.0-nightly c78a29473 du 22/02/2026, une cible a la fois,
+2 Gio par processus): 5 a 15 minutes par cible, de 70 000 executions
+(`lien_colle_chiffre`, qui paie un scrypt par en-tete valide) a 155 millions
+(`instantane_wfp`). Une seule cible est tombee: `lien_profil`, en moins d'une
+seconde, sur une etiquette a caractere de controle venue de l'hote d'un lien
+sans fragment. La classe etait plus large que l'hote: brut ou encode
+(`%0A`), un caractere de controle du lien ressortait aussi dans la
+configuration du coeur (`sni`, `host`, `path`) et dans les messages d'erreur
+qui recitent le schema, le port ou un parametre refuse. `Profil::depuis_lien`
+refuse desormais tout caractere de controle (C0, DEL, C1) avant tout usage et
+sans le reciter, sauf dans la valeur de `obfs-password`, un secret jamais
+recite; U+00A0, premier caractere apres C1, reste admis (recettes
+`un_hote_a_caractere_de_controle_est_refuse`,
+`un_caractere_de_controle_du_lien_ne_ressort_nulle_part`,
+`del_et_c1_sont_refuses_comme_c0` et
+`le_premier_caractere_apres_c1_reste_hors_de_la_classe`). La cible verifie
+maintenant le refus et chaque champ en clair: sur le code qui ne corrigeait
+que l'hote, elle trouve la classe en 25 executions. Les entrees sont devenues
+des graines; une campagne de 15 minutes apres la correction de l'hote, puis
+de 10 minutes apres celle de la classe, n'ont plus rien trouve. En tout,
+2 h 09 de calcul pour les campagnes.
+
+**Ce que prouvent les plantages semes.** Chaque cible a ete eprouvee par une
+ligne `panic!` semee dans le parseur qu'elle vise, puis retiree. Les douze
+cibles sont tombees en moins d'une minute, chaque fois sur une entree mutee:
+aucune graine telle quelle ne remplissait la condition. Trois entrees
+etaient a une ou deux mutations d'une graine, neuf d'une entree que la
+campagne avait deja derivee. Cela prouve que chaque cible atteint le code de
+son parseur et que la mutation y produit des entrees voisines du corpus; pas
+que le fuzzing trouve une condition eloignee. Les egalites de chaine trouvees
+etaient a un chiffre d'une graine: `wg1` depuis le `wg0` des graines (un
+changement d'entier ASCII ou d'un bit), `S-1-5-18` depuis `S-1-5-19`. Une
+egalite sur `wg7` dans `profil_toml` n'a pas ete trouvee en 300 s (6,9
+millions d'executions), pas plus, en 300 s chacun, qu'un entier ecrit en
+decimal (`mtu == 1337`, une marque ou un LUID `4242`) ni deux longueurs a la
+fois. Une condition que l'on veut voir eprouvee demande une graine qui
+l'approche.
+
+**Ce qui manque.**
+- Les lecteurs de fichiers de la CLI (`prove nft --politique` par son lecteur
+  JSON strict, `prove routes --intention`, le comparateur nft hors ligne, le
+  lecteur de la declaration du daemon) vivent dans le binaire `bifrost-cli`,
+  sans bibliotheque: aucune cible ne les atteint sans exposer un module.
+  Leurs coeurs de bibliotheque (`Politique::lire`, `PolitiqueWfp::lire`,
+  `lire_dacl`) le sont.
+- Le pipe nomme de Windows, lu par LocalSystem, et tout ce qui ne compile que
+  sous Windows (DPAPI): le harnais ne tourne que sous Linux.
+- Le cadrage HTTP du canal web (ureq): une cible n'a pas acces au reseau.
+- Les lecteurs dont la source est le noyau ou le systeme (netlink, `/proc`,
+  PktMon) ou un fichier du daemon (carnet).
+- Aucune mesure de couverture par ligne (`cargo fuzz coverage` demande
+  `llvm-tools`); les compteurs de libFuzzer en tiennent lieu.
+- ClusterFuzzLite et OSS-Fuzz, ci-dessous.
+
 Integration continue : OSS-Fuzz est gratuit mais reserve aux projets critiques pour l'infrastructure mondiale (decision au cas par cas via PR, avec score de criticite) ; si refuse, deployer **ClusterFuzzLite** en CI (auto-heberge, base sur ClusterFuzz).
 
 **2.4 Durcissement compilation/execution** - Rust : ASLR/DEP/stack protector actifs par defaut ; activer explicitement CFG sur Windows (`-C control-flow-guard`), RELRO complet et PIE sur Linux (souvent defaut). Verification : winchecksec (Windows), checksec/hardening-check (Linux) en CI post-build. Cote Windows execution : `SetProcessMitigationPolicy` avec `ProcessDynamicCodePolicy` (ACG - `PROCESS_MITIGATION_DYNAMIC_CODE_POLICY.ProhibitDynamicCode = 1`), `ProcessSignaturePolicy` (bloque l'injection de DLL non signee Microsoft), `ProcessControlFlowGuardPolicy`, `ProcessImageLoadPolicy`. Le service Windows doit avoir une ACL restrictive et un SID de service dedie.
@@ -234,7 +300,7 @@ Consequence operationnelle : au lancement, pour un produit classe I, la voie Mod
 
 ### PARTIE 7 - PROGRAMME DE MISE EN OEUVRE
 
-**Indispensable au lancement :** modele de menace Threagile en CI ; CI securite (clippy/audit/deny/vet, gosec/govulncheck) ; fuzzing cargo-fuzz sur les 4 parseurs ; security.txt + politique CVD ; SBOM CycloneDX a chaque build ; durcissement compilation + verification winchecksec/checksec ; process interne Article 14.
+**Indispensable au lancement :** modele de menace Threagile en CI ; CI securite (clippy/audit/deny/vet, gosec/govulncheck) ; fuzzing cargo-fuzz des parseurs (pose: douze cibles, section 2.3; restent les lecteurs de fichiers de la CLI) ; security.txt + politique CVD ; SBOM CycloneDX a chaque build ; durcissement compilation + verification winchecksec/checksec ; process interne Article 14.
 **Ensuite :** audit externe (viser OTF/NLnet gratuit) ; VDP puis bug bounty prive ; ClusterFuzzLite continu ; audit crypto dedie ; ISO 27001/SOC 2 a envisager.
 
 **Calendrier :**

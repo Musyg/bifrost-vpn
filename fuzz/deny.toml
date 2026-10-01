@@ -1,0 +1,59 @@
+# La politique de `deny.toml` (racine), appliquee au verrou du harnais de
+# fuzzing par `cargo deny check` lance DEPUIS `fuzz/`, sans `--manifest-path`
+# ni `--config`. cargo-deny y prend `fuzz/Cargo.toml`, puis cherche
+# `deny.toml` en partant du dossier de ce manifeste: il lit ce fichier-ci
+# avant celui de la racine. Sans lui, il lirait celui de la racine, qui
+# refuse `libfuzzer-sys`.
+#
+# `fuzz/` est un espace de travail separe, avec son propre `Cargo.lock`: le
+# fichier racine ne le voit pas. Celui-ci en est la copie, raisons comprises
+# (elles sont ecrites a la racine et ne se repetent pas ici), plus UNE
+# exception nominative: `libfuzzer-sys`, sous `(MIT OR Apache-2.0) AND NCSA`.
+# NCSA est la licence de LLVM, dont libFuzzer fait partie. Elle est
+# permissive, approuvee OSI, et n'entre dans aucun binaire livre: le harnais ne
+# se construit que pour fuzzer, jamais pour distribuer. Elle reste hors de la
+# liste `allow` pour la meme raison que la LGPL a la racine: une autre
+# dependance sous NCSA doit etre regardee avant d'entrer.
+#
+# Tout changement de la politique racine se reporte ici.
+
+[advisories]
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "deny"
+unmaintained = "all"
+unsound = "all"
+unused-ignored-advisory = "deny"
+# Le meme avis qu'a la racine: `paste` arrive ici par la meme pile netlink,
+# sous `bifrost-daemon`.
+ignore = [
+    { id = "RUSTSEC-2024-0436", reason = "paste archive, proc-macro donc absent du binaire livre, transitif sous wireguard-control, aucune version corrigee" },
+]
+
+[licenses]
+allow = [
+    "MPL-2.0",
+    "Apache-2.0",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.9
+
+[[licenses.exceptions]]
+crate = "wireguard-control"
+allow = ["LGPL-2.1-or-later"]
+
+[[licenses.exceptions]]
+crate = "libfuzzer-sys"
+allow = ["NCSA"]
+
+[bans]
+multiple-versions = "warn"
+deny = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

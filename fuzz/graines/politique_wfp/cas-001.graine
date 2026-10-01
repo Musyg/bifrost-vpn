@@ -1,0 +1,13 @@
+{
+  "projection": "wfp",
+  "schema_version": 1,
+  "dns_resolver": "127.0.0.1",
+  "allow_lan": false,
+  "resolveur_embarque": false,
+  "resolveur_executable": null,
+  "resolveur_sid": null,
+  "coeur_executable": null,
+  "tunnel_luid": 81985529216486895,
+  "daemon_executable": "C:\\Bifrost\\bifrost-daemon.exe",
+  "identite": "S-1-5-80-1-2-3-4-5"
+}

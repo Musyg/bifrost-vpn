@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "tunnel_interface": "Bifrost",
+  "fwmark": 51820,
+  "dns_resolver": "::1",
+  "allow_lan": false,
+  "coeur_uid": 1001,
+  "resolveur_uid": 1002
+}

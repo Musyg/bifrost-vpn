@@ -656,6 +656,18 @@ struct Lien {
 
 impl Lien {
     fn decouper(lien: &str) -> Result<Self> {
+        // Un lien ne porte aucun caractere de controle en clair (RFC 3986), et
+        // tout ce qu'il porte peut ressortir: dans l'etiquette (l'hote en tient
+        // lieu quand le fragment manque), dans la configuration du coeur, ou
+        // recite par un message d'erreur, qui finit dans un journal. Refuse
+        // avant tout decoupage, et sans le reciter. Ce qui se decode
+        // (fragment, parametres) est controle apres decodage, plus bas.
+        if let Some(c) = lien.chars().find(|c| c.is_control()) {
+            return Err(Error::Config(format!(
+                "lien invalide: caractere de controle U+{:04X}",
+                c as u32
+            )));
+        }
         let (schema, reste) = lien
             .split_once("://")
             .ok_or_else(|| Error::Config("lien invalide: '://' absent".into()))?;
@@ -705,6 +717,24 @@ impl Lien {
 
         let mut parametres: Vec<(String, String)> = Vec::new();
         for (cle, valeur) in form_urlencoded::parse(requete.as_bytes()) {
+            // Decode, un parametre porte ce que le lien brut ne peut pas
+            // porter (`%0A`): meme controle. Seule la valeur de `obfs-password`
+            // reste libre: un secret, jamais recite, qu'aucun profil ne
+            // contraint davantage.
+            if let Some(c) = cle.chars().find(|c| c.is_control()) {
+                return Err(Error::Config(format!(
+                    "parametre invalide: caractere de controle U+{:04X} dans son nom",
+                    c as u32
+                )));
+            }
+            if cle != "obfs-password"
+                && let Some(c) = valeur.chars().find(|c| c.is_control())
+            {
+                return Err(Error::Config(format!(
+                    "parametre '{cle}' invalide: caractere de controle U+{:04X}",
+                    c as u32
+                )));
+            }
             // Une valeur vide vaut absente: les liens reels portent souvent un
             // `&sid=&spx=` que le panneau a laisse.
             if valeur.is_empty() {
@@ -1348,6 +1378,131 @@ mod tests {
         let lien = lien_reality().replace("#Sortie%20de%20secours", "");
         let p = Profil::depuis_lien(&lien).unwrap();
         assert_eq!(p.etiquette, "203.0.113.7:443");
+    }
+
+    /// Un hote a caractere de controle est refuse, comme le fragment.
+    ///
+    /// Trouve le 01/10/2026 par la cible `lien_profil` du harnais de fuzzing
+    /// (`fuzz/`); le premier lien est son entree minimisee, neuf octets dont
+    /// l'hote est un octet nul. Sans fragment, l'etiquette retombe sur
+    /// `serveur:port` (recette ci-dessus), et l'hote, lu tel quel, echappait
+    /// au controle que `decouper` applique au fragment: un lien fabriquait
+    /// une etiquette, donc une ligne de journal, a caractere de controle. Le
+    /// second lien porte une etiquette saine: le refus doit venir de l'hote
+    /// lui-meme, qui part aussi tel quel dans la configuration du coeur.
+    #[test]
+    fn un_hote_a_caractere_de_controle_est_refuse() {
+        for lien in [
+            "hy2://d@\0".to_owned(),
+            lien_reality().replace("@203.0.113.7:", "@203.0.113.7\u{1b}:"),
+        ] {
+            let e = Profil::depuis_lien(&lien).expect_err("un hote a caractere de controle");
+            assert!(e.to_string().contains("controle"), "{lien:?}: {e}");
+        }
+    }
+
+    /// Aucun caractere de controle venu d'un lien ne ressort, ni dans le
+    /// profil rendu, ni dans un message d'erreur.
+    ///
+    /// L'etiquette et l'hote (recette precedente) ne sont pas les seuls
+    /// endroits ou un lien ecrit du texte: `sni`, `host` et `path` partent
+    /// tels quels dans la configuration du coeur, et le schema, le port, la
+    /// suite d'une adresse IPv6 et les parametres refuses sont recites par le
+    /// message d'erreur, qui finit dans un journal. Brut ou encode (`%0A`), le
+    /// caractere est refuse avant tout usage, et le refus ne le recite pas.
+    /// Seule la valeur de `obfs-password` reste libre: c'est un secret, jamais
+    /// recite, et un mot de passe de profil n'a pas d'autre contrainte que de
+    /// ne pas etre vide.
+    #[test]
+    fn un_caractere_de_controle_du_lien_ne_ressort_nulle_part() {
+        let http = lien_httpupgrade();
+        let hy2 = "hysteria2://motdepasse@203.0.113.8:8443/?obfs=salamander&obfs-password=sel&sni=exemple.test#Rapide";
+        for lien in [
+            http.replace("path=%2Fw1s2x3", "path=%2Fx%0Aligne"),
+            http.replace("sni=cdn.exemple.test", "sni=cdn%0Aligne"),
+            http.replace("host=cdn.exemple.test", "host=cdn%1Bligne"),
+            http.replace("path=%2Fw1s2x3", "path=x%0Aligne"),
+            http.replace("&fp=chrome", "&fp=chrome&flow=x%0Aligne"),
+            http.replace("&fp=chrome", "&fp=chrome&x%0Aligne=1"),
+            http.replace("security=tls", "security=t%0Als"),
+            http.replace("vless://", "vl\u{1b}ess://"),
+            http.replace(":443?", ":44\n3?"),
+            http.replace("cdn.exemple.test:443", "[2001:db8::1]\u{1b}:443"),
+            hy2.replace("sni=exemple.test", "sni=exe%0Ample.test"),
+            hy2.replace("obfs=salamander", "obfs=sal%0Aamander"),
+        ] {
+            let e = Profil::depuis_lien(&lien).expect_err("un caractere de controle");
+            let texte = e.to_string();
+            assert!(texte.contains("controle"), "{lien:?}: {texte}");
+            assert!(!texte.chars().any(char::is_control), "{lien:?}: {texte:?}");
+        }
+        let p = Profil::depuis_lien(&hy2.replace("obfs-password=sel", "obfs-password=s%0Ael"))
+            .expect("le secret d'obfuscation reste libre");
+        assert!(
+            !format!("{p:?}").contains("s\\nel"),
+            "le secret ne ressort pas"
+        );
+    }
+
+    /// La classe est celle de `char::is_control`: C0, mais aussi DEL (0x7F)
+    /// et C1 (0x80 a 0x9F), qu'un terminal peut interpreter (0x9B ouvre une
+    /// sequence comme ESC [). Chaque forme est eprouvee brute dans l'hote, une
+    /// valeur et un nom de parametre (controle du lien brut), et encodee dans
+    /// une valeur, un nom et l'etiquette (controles apres decodage). L'hote ne
+    /// se decode pas: `%7F` y reste trois caracteres, et aucun caractere de
+    /// controle n'en ressort.
+    #[test]
+    fn del_et_c1_sont_refuses_comme_c0() {
+        let http = lien_httpupgrade();
+        for (brut, encode) in [
+            ('\u{7f}', "%7F"),
+            ('\u{85}', "%C2%85"),
+            ('\u{9f}', "%C2%9F"),
+        ] {
+            for lien in [
+                http.replace("@cdn.exemple.test:", &format!("@cdn{brut}x:")),
+                http.replace("sni=cdn.exemple.test", &format!("sni=cdn{brut}x")),
+                http.replace("&fp=chrome", &format!("&fp=chrome&x{brut}y=1")),
+                http.replace("sni=cdn.exemple.test", &format!("sni=cdn{encode}x")),
+                http.replace("&fp=chrome", &format!("&fp=chrome&x{encode}y=1")),
+                http.replace("#Repli%20CDN", &format!("#Repli{encode}CDN")),
+            ] {
+                let e = Profil::depuis_lien(&lien).expect_err("DEL ou C1");
+                let texte = e.to_string();
+                assert!(texte.contains("controle"), "{lien:?}: {texte}");
+                assert!(!texte.chars().any(char::is_control), "{lien:?}: {texte:?}");
+            }
+            let lien = http.replace("@cdn.exemple.test:", &format!("@cdn{encode}x:"));
+            let p = Profil::depuis_lien(&lien).expect("un hote ne se decode pas");
+            assert_eq!(p.serveur().0, format!("cdn{encode}x"), "{lien:?}");
+        }
+    }
+
+    /// La borne de la classe: U+00A0, premier caractere apres C1, n'est pas un
+    /// caractere de controle. Il reste admis la ou il l'etait: brut dans
+    /// l'hote, brut ou encode dans une valeur. Dans un nom de parametre, il
+    /// est refuse comme parametre inconnu, pas comme caractere de controle.
+    #[test]
+    fn le_premier_caractere_apres_c1_reste_hors_de_la_classe() {
+        let http = lien_httpupgrade();
+        for lien in [
+            http.replace("@cdn.exemple.test:", "@cdn\u{a0}x:"),
+            http.replace("sni=cdn.exemple.test", "sni=cdn\u{a0}x"),
+            http.replace("sni=cdn.exemple.test", "sni=cdn%C2%A0x"),
+        ] {
+            if let Err(e) = Profil::depuis_lien(&lien) {
+                panic!("{lien:?}: {e}");
+            }
+        }
+        for lien in [
+            http.replace("&fp=chrome", "&fp=chrome&x\u{a0}y=1"),
+            http.replace("&fp=chrome", "&fp=chrome&x%C2%A0y=1"),
+        ] {
+            let e = Profil::depuis_lien(&lien).expect_err("un parametre inconnu");
+            let texte = e.to_string();
+            assert!(texte.contains("non gere"), "{lien:?}: {texte}");
+            assert!(!texte.contains("controle"), "{lien:?}: {texte}");
+        }
     }
 
     #[test]
