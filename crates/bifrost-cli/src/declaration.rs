@@ -198,6 +198,11 @@ async fn connecter_et_demander(
                     IpcError::ServerIdentity(ServerIdentityError::Unreadable) => {
                         Refus::Identite("identite du serveur de la declaration illisible")
                     }
+                    // Le canal existe et n'a pris aucune connexion de plus: le
+                    // daemon n'a pas repondu dans le delai, il n'est pas absent.
+                    ref e if e.is_server_busy() => {
+                        Refus::Declaration("daemon sans reponse dans le delai")
+                    }
                     // Le socket existe et ses droits nous ecartent: ce n'est pas une
                     // absence de daemon, et le rapport ne doit pas le laisser croire.
                     IpcError::Io(e) if e.kind() == ErrorKind::PermissionDenied => {
@@ -745,6 +750,113 @@ mod tests {
             decide_pipe_owner(PipeOwner::Other, EXIGENCE_PREUVE),
             Err(ServerIdentityError::Refused)
         );
+    }
+
+    /// Un canal qui existe, et dont la seule place est tenue par un premier
+    /// client que personne n'accepte.
+    struct Occupe {
+        socket: String,
+        #[cfg(windows)]
+        _tenu: (
+            tokio::net::windows::named_pipe::NamedPipeServer,
+            tokio::net::windows::named_pipe::NamedPipeClient,
+        ),
+        #[cfg(unix)]
+        _tenu: (tokio::net::UnixListener, std::os::unix::net::UnixStream),
+        #[cfg(unix)]
+        dossier: std::path::PathBuf,
+    }
+
+    fn etiquette_unique(nom: &str) -> String {
+        static SUIVANT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        format!(
+            "bifrost-declaration-{}-{}-{nom}",
+            std::process::id(),
+            SUIVANT.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        )
+    }
+
+    /// Windows: un pipe a une seule instance, prise par le premier client.
+    #[cfg(windows)]
+    fn occupe(nom: &str) -> Occupe {
+        use tokio::net::windows::named_pipe::{ClientOptions, ServerOptions};
+        let socket = format!(r"\\.\pipe\{}", etiquette_unique(nom));
+        let serveur = ServerOptions::new()
+            .first_pipe_instance(true)
+            .reject_remote_clients(true)
+            .create(&socket)
+            .expect("pipe de recette");
+        let premier = ClientOptions::new().open(&socket).expect("premier client");
+        Occupe {
+            socket,
+            _tenu: (serveur, premier),
+        }
+    }
+
+    /// Linux: un socket d'ecoute dont la file d'attente a une longueur de
+    /// zero, remplie par le premier client.
+    #[cfg(unix)]
+    fn occupe(nom: &str) -> Occupe {
+        let dossier = std::env::temp_dir().join(etiquette_unique(nom));
+        let _ = std::fs::remove_dir_all(&dossier);
+        std::fs::create_dir_all(&dossier).expect("repertoire de la recette");
+        let chemin = dossier.join("d.sock");
+        let prise = tokio::net::UnixSocket::new_stream().expect("socket de recette");
+        prise.bind(&chemin).expect("bind");
+        let ecoute = prise.listen(0).expect("listen");
+        let premier = std::os::unix::net::UnixStream::connect(&chemin).expect("premier client");
+        Occupe {
+            socket: chemin.to_string_lossy().into_owned(),
+            _tenu: (ecoute, premier),
+            dossier,
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for Occupe {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dossier);
+        }
+    }
+
+    /// Un canal qui existe et ne prend aucune connexion de plus rend "daemon
+    /// sans reponse dans le delai", et non "daemon injoignable"; un canal
+    /// absent reste injoignable.
+    ///
+    /// Par `lire_avec`, sous la borne de l'echange des preuves (5 s). Windows:
+    /// le client attend une instance libre jusqu'a sa propre borne (2 s), puis
+    /// rend l'erreur du systeme; la raison vient donc de l'attente expiree et
+    /// non de la borne de l'echange, ce que la duree mesuree verifie. Linux:
+    /// `connect(2)` sur une file d'attente pleine rend `EAGAIN`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn un_canal_occupe_est_sans_reponse_dans_le_delai_un_canal_absent_injoignable() {
+        let canal = occupe("occupe");
+        let debut = std::time::Instant::now();
+        let pris = lire_avec(&canal.socket, DELAI, EXIGENCE_PREUVE)
+            .await
+            .map(|_| ());
+        let duree = debut.elapsed();
+        drop(canal);
+        #[cfg(unix)]
+        let absent = std::env::temp_dir()
+            .join(etiquette_unique("absent"))
+            .join("d.sock")
+            .to_string_lossy()
+            .into_owned();
+        #[cfg(windows)]
+        let absent = format!(r"\\.\pipe\{}", etiquette_unique("absent"));
+        let absent = lire_avec(&absent, DELAI, EXIGENCE_PREUVE).await.map(|_| ());
+        println!("mesure canal occupe: {pris:?} en {duree:?}; canal absent: {absent:?}");
+        assert_eq!(
+            pris,
+            Err(Refus::Declaration("daemon sans reponse dans le delai"))
+        );
+        #[cfg(windows)]
+        assert!(
+            duree >= Duration::from_secs(2) && duree < DELAI,
+            "la raison doit venir de l'attente expiree: {duree:?}"
+        );
+        assert_eq!(absent, Err(Refus::Declaration("daemon injoignable")));
     }
 
     /// La fin d'un litteral qui commence en `i` (chaine, chaine brute, octet,

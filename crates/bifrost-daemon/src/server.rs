@@ -37,6 +37,79 @@ pub async fn serve(
     }
 }
 
+/// Ouvre l'ecoute IPC sur `socket` et la sert jusqu'a l'arret, puis arrete le
+/// superviseur: la fin du daemon, une fois son superviseur lance.
+///
+/// `tx` va a `serve`, `signal` est l'attente du signal d'arret, `arret` le
+/// canal par lequel le superviseur recoit l'arret et `superviseur` son fil.
+///
+/// L'ouverture de l'ecoute fait partie du service: une erreur de `bind` prend
+/// le meme arret que le signal ou qu'une erreur de l'ecoute (voir
+/// [`servir_jusqu_a_l_arret`]), puis elle est rendue, et le daemon sort avec
+/// un code non nul. Une fois le superviseur lance, aucune erreur ne sort donc
+/// de `run` sans qu'il ait recu l'arret.
+pub async fn ecouter_et_servir<A>(
+    socket: &str,
+    policy: AuthPolicy,
+    profil: std::path::PathBuf,
+    tx: Sender<Cmd>,
+    signal: A,
+    arret: Sender<Cmd>,
+    superviseur: std::thread::JoinHandle<()>,
+) -> anyhow::Result<()>
+where
+    A: std::future::Future<Output = ()>,
+{
+    use anyhow::Context as _;
+    let service = async move {
+        let gid = policy.allowed_gid;
+        let ipc = IpcServer::bind(socket, policy, gid)
+            .await
+            .with_context(|| format!("ecoute sur {socket}"))?;
+        serve(ipc, tx, profil).await
+    };
+    servir_jusqu_a_l_arret(service, signal, arret, superviseur).await
+}
+
+/// Sert jusqu'a l'arret, puis arrete le superviseur, quelle que soit la cause
+/// de l'arret.
+///
+/// `service` ouvre l'ecoute puis la sert (`serve`), `signal` est l'attente du
+/// signal d'arret, `arret` le canal du superviseur et `superviseur` son fil.
+///
+/// Deux causes, un seul arret: le signal, ou l'issue du service, qui n'est
+/// jamais qu'une erreur (de `bind`, ou de l'ecoute, seule issue de `serve`).
+/// Dans les deux cas le superviseur recoit `Cmd::Shutdown` et son fil est
+/// joint; l'erreur n'est rendue qu'ENSUITE, et le daemon sort alors avec un
+/// code non nul, que `Restart=on-failure` relance. Rendre l'erreur avant
+/// laissait le processus sortir sans que le superviseur ait recu l'arret, ni
+/// fini ce qu'il faisait.
+///
+/// L'arret ordonne ne desarme rien: `on_shutdown` laisse le kill switch dans
+/// l'etat ou il est, comme la mort du processus.
+async fn servir_jusqu_a_l_arret<S, A>(
+    service: S,
+    signal: A,
+    arret: Sender<Cmd>,
+    superviseur: std::thread::JoinHandle<()>,
+) -> anyhow::Result<()>
+where
+    S: std::future::Future<Output = anyhow::Result<()>>,
+    A: std::future::Future<Output = ()>,
+{
+    let issue = tokio::select! {
+        issue = service => issue,
+        () = signal => {
+            tracing::info!("signal d'arret recu");
+            Ok(())
+        }
+    };
+
+    let _ = arret.send(Cmd::Shutdown);
+    let _ = superviseur.join();
+    issue
+}
+
 async fn handle(
     mut conn: Connection,
     tx: Sender<Cmd>,
@@ -364,6 +437,347 @@ upstream = ["10.2.0.1"]
         )
         .await;
         assert!(matches!(reponse, Response::Error { .. }), "{reponse:?}");
+    }
+
+    /// L'arret du service IPC: par le signal, par une ecoute qui ne s'ouvre
+    /// pas, ou par une erreur de l'ecoute.
+    ///
+    /// Le superviseur est simule par un fil qui attend une commande, la nomme,
+    /// puis met `LATENCE` a finir, comme un superviseur qui acheve ce qu'il
+    /// faisait. Ce qu'il a recu n'est ecrit qu'au dernier instant de son fil:
+    /// lu juste apres le retour de `ecouter_et_servir` ou de
+    /// `servir_jusqu_a_l_arret`, il n'est present que si ce fil a ete joint.
+    mod arret {
+        use super::*;
+        use std::sync::{Arc, Mutex};
+        use std::time::Duration;
+
+        const LATENCE: Duration = Duration::from_millis(300);
+
+        /// Ce que le faux superviseur a recu, ecrit quand son fil se termine.
+        type Recu = Arc<Mutex<Option<&'static str>>>;
+
+        fn faux_superviseur() -> (Sender<Cmd>, std::thread::JoinHandle<()>, Recu) {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let recu = Recu::default();
+            let ecrit = Arc::clone(&recu);
+            let fil = std::thread::spawn(move || {
+                let nom = match rx.recv() {
+                    Ok(Cmd::Shutdown) => "shutdown",
+                    Ok(_) => "une autre commande",
+                    Err(_) => "canal ferme sans shutdown",
+                };
+                std::thread::sleep(LATENCE);
+                *ecrit.lock().unwrap() = Some(nom);
+            });
+            (tx, fil, recu)
+        }
+
+        /// Le signal: le superviseur recoit `Shutdown`, il est joint avant le
+        /// retour, et l'arret rend `Ok`.
+        #[tokio::test]
+        async fn le_signal_arrete_le_superviseur_et_rend_ok() {
+            let (tx, fil, recu) = faux_superviseur();
+            let issue = servir_jusqu_a_l_arret(
+                std::future::pending::<anyhow::Result<()>>(),
+                std::future::ready(()),
+                tx,
+                fil,
+            )
+            .await;
+            let vu = *recu.lock().unwrap();
+            println!("mesure arret sur signal: issue={issue:?} superviseur={vu:?}");
+            assert_eq!(
+                vu,
+                Some("shutdown"),
+                "le superviseur doit avoir recu Shutdown et ete joint avant le retour"
+            );
+            assert!(issue.is_ok(), "{issue:?}");
+        }
+
+        /// Une erreur de l'ecoute: le meme arret que sur signal, PUIS l'erreur,
+        /// intacte, que le daemon rend en code de sortie non nul.
+        #[tokio::test]
+        async fn une_erreur_de_l_ecoute_arrete_le_superviseur_puis_est_rendue() {
+            let (tx, fil, recu) = faux_superviseur();
+            let issue = servir_jusqu_a_l_arret(
+                async { Err(anyhow::anyhow!("ecoute perdue")) },
+                std::future::pending(),
+                tx,
+                fil,
+            )
+            .await;
+            let vu = *recu.lock().unwrap();
+            println!("mesure arret sur erreur d'ecoute: issue={issue:?} superviseur={vu:?}");
+            assert_eq!(
+                vu,
+                Some("shutdown"),
+                "le superviseur doit avoir recu Shutdown et ete joint avant le retour"
+            );
+            let e = issue.expect_err("l'erreur de l'ecoute doit etre rendue");
+            assert_eq!(e.to_string(), "ecoute perdue");
+        }
+
+        /// La politique des recettes: le compte qui les lance.
+        fn politique_de_recette() -> AuthPolicy {
+            #[cfg(unix)]
+            let uids = {
+                // SAFETY: geteuid ne prend pas d'argument et ne touche aucune memoire.
+                let euid = unsafe { libc::geteuid() };
+                vec![0, euid]
+            };
+            #[cfg(not(unix))]
+            let uids = Vec::new();
+            AuthPolicy {
+                allowed_uids: uids,
+                allowed_gid: None,
+            }
+        }
+
+        /// Une ecoute qui ne s'ouvre pas, par `ecouter_et_servir` tel que le
+        /// daemon l'appelle, superviseur deja lance: le meme arret que sur
+        /// signal, PUIS l'erreur de `bind`, que le daemon rend en code de
+        /// sortie non nul. Linux: le parent du socket est un fichier ordinaire,
+        /// `bind(2)` rend `ENOTDIR`. Windows: le nom du pipe est deja tenu par
+        /// une premiere instance, que `bind` exige pour lui.
+        #[tokio::test]
+        async fn une_erreur_de_bind_arrete_le_superviseur_puis_est_rendue() {
+            #[cfg(unix)]
+            let (socket, _tenu) = {
+                let fichier = std::env::temp_dir()
+                    .join(format!("bifrost-arret-bind-{}-fichier", std::process::id()));
+                std::fs::write(&fichier, b"").expect("fichier de la recette");
+                let socket = fichier.join("d.sock").to_string_lossy().into_owned();
+                (socket, Fichier(fichier))
+            };
+            #[cfg(windows)]
+            let (socket, _tenu) = {
+                let socket = format!(r"\\.\pipe\bifrost-arret-bind-{}", std::process::id());
+                let premier = IpcServer::bind(&socket, politique_de_recette(), None)
+                    .await
+                    .expect("la premiere instance prend le nom");
+                (socket, premier)
+            };
+
+            let (tx, fil, recu) = faux_superviseur();
+            let issue = tokio::time::timeout(
+                Duration::from_secs(5),
+                ecouter_et_servir(
+                    &socket,
+                    politique_de_recette(),
+                    std::path::PathBuf::from("/inexistant"),
+                    tx.clone(),
+                    std::future::pending(),
+                    tx,
+                    fil,
+                ),
+            )
+            .await;
+            let vu = *recu.lock().unwrap();
+            println!("mesure arret sur erreur de bind: issue={issue:?} superviseur={vu:?}");
+            let issue = issue.expect("une ecoute qui ne s'ouvre pas doit rendre");
+            assert_eq!(
+                vu,
+                Some("shutdown"),
+                "le superviseur doit avoir recu Shutdown et ete joint avant le retour"
+            );
+            let e = issue.expect_err("l'erreur de bind doit etre rendue");
+            assert_eq!(e.to_string(), format!("ecoute sur {socket}"), "{e:#}");
+            assert!(
+                e.chain()
+                    .any(|c| matches!(c.downcast_ref::<IpcError>(), Some(IpcError::Io(_)))),
+                "l'erreur rendue doit etre celle de bind: {e:#}"
+            );
+        }
+
+        /// Un fichier de recette, retire a la fin.
+        #[cfg(unix)]
+        struct Fichier(std::path::PathBuf);
+
+        #[cfg(unix)]
+        impl Drop for Fichier {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+
+        /// Les descripteurs de ce processus lies a `chemin`: le socket d'ecoute
+        /// et chaque connexion qu'il a acceptee.
+        ///
+        /// Par `getsockname(2)` sur chaque descripteur ouvert: un socket Unix
+        /// lie, ou accepte sur un socket lie, rend son chemin; un client n'en
+        /// rend aucun.
+        #[cfg(target_os = "linux")]
+        fn lies_a(chemin: &std::path::Path) -> Vec<libc::c_int> {
+            use std::os::unix::ffi::OsStrExt;
+            let voulu = chemin.as_os_str().as_bytes();
+            let numeros: Vec<libc::c_int> = std::fs::read_dir("/proc/self/fd")
+                .expect("/proc/self/fd")
+                .filter_map(|e| e.ok()?.file_name().to_str()?.parse().ok())
+                .collect();
+            numeros
+                .into_iter()
+                .filter(|&fd| {
+                    // SAFETY: sockaddr_un est une structure C sans invariant,
+                    // valide toute a zero.
+                    let mut adresse: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+                    let mut taille = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
+                    // SAFETY: getsockname ecrit au plus `taille` octets dans une
+                    // structure locale vivante pendant l'appel; sur un numero
+                    // ferme ou qui n'est pas un socket, il rend -1 sans ecrire.
+                    let rc = unsafe {
+                        libc::getsockname(
+                            fd,
+                            (&mut adresse as *mut libc::sockaddr_un).cast(),
+                            &mut taille,
+                        )
+                    };
+                    rc == 0
+                        && adresse.sun_family == libc::AF_UNIX as libc::sa_family_t
+                        && adresse
+                            .sun_path
+                            .iter()
+                            .take_while(|&&c| c != 0)
+                            .map(|&c| c as u8)
+                            .eq(voulu.iter().copied())
+                })
+                .collect()
+        }
+
+        /// Parmi `lies`, le seul qui ecoute (`SO_ACCEPTCONN`).
+        #[cfg(target_os = "linux")]
+        fn celui_qui_ecoute(lies: &[libc::c_int]) -> libc::c_int {
+            let ecoutent: Vec<libc::c_int> = lies
+                .iter()
+                .copied()
+                .filter(|&fd| {
+                    let mut ecoute: libc::c_int = 0;
+                    let mut taille = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+                    // SAFETY: getsockopt ecrit au plus `taille` octets dans un
+                    // entier local vivant pendant l'appel.
+                    let rc = unsafe {
+                        libc::getsockopt(
+                            fd,
+                            libc::SOL_SOCKET,
+                            libc::SO_ACCEPTCONN,
+                            (&mut ecoute as *mut libc::c_int).cast(),
+                            &mut taille,
+                        )
+                    };
+                    rc == 0 && ecoute == 1
+                })
+                .collect();
+            assert_eq!(ecoutent.len(), 1, "un seul socket d'ecoute: {ecoutent:?}");
+            ecoutent[0]
+        }
+
+        /// Par le chemin de production: `ecouter_et_servir` tel que le daemon
+        /// l'appelle, qui ouvre l'ecoute (`IpcServer::bind`) puis la sert
+        /// (`serve`), sur le fil de la recette comme le daemon sur le sien:
+        /// l'arret, qui joint un fil, n'y occupe aucun fil du runtime dont
+        /// dependent les delais de la recette.
+        ///
+        /// Les clients sont dans un fil a eux. Un premier client est accepte,
+        /// preuve que `serve` tourne sur une ecoute inscrite. Puis l'ecoute est
+        /// perdue pour de vrai: son numero de descripteur designe `/dev/null`
+        /// (`dup2`), pendant qu'un double du socket le garde en vie et inscrit
+        /// aupres d'epoll, ou l'inscription suit le fichier et non le numero.
+        /// Un second client rend le socket lisible; tokio tente alors
+        /// `accept(2)` sur ce numero, qui rend `ENOTSOCK`, une erreur de
+        /// l'ecoute elle-meme, et `serve` rend.
+        #[cfg(target_os = "linux")]
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn une_ecoute_perdue_sous_serve_arrete_le_superviseur_puis_rend_son_erreur() {
+            use std::os::fd::AsRawFd;
+            use std::os::unix::fs::PermissionsExt;
+            use std::os::unix::net::UnixStream;
+
+            let dossier = std::env::temp_dir().join(format!(
+                "bifrost-serveur-ecoute-perdue-{}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dossier);
+            std::fs::create_dir_all(&dossier).expect("repertoire de la recette");
+            std::fs::set_permissions(&dossier, std::fs::Permissions::from_mode(0o755))
+                .expect("repertoire de la recette en 0755");
+            let chemin = dossier.join("d.sock");
+            let socket = chemin.to_string_lossy().into_owned();
+
+            let vers_le_socket = chemin.clone();
+            let clients = std::thread::spawn(move || {
+                let debut = std::time::Instant::now();
+                let attendre = |quoi: &str| {
+                    assert!(debut.elapsed() < Duration::from_secs(5), "{quoi}");
+                    std::thread::sleep(Duration::from_millis(5));
+                };
+                // Un premier client, accepte: l'ecoute et sa connexion portent
+                // le chemin.
+                let premier = loop {
+                    match UnixStream::connect(&vers_le_socket) {
+                        Ok(c) => break c,
+                        Err(_) => attendre("ecoute jamais ouverte"),
+                    }
+                };
+                let lies = loop {
+                    let lies = lies_a(&vers_le_socket);
+                    if lies.len() >= 2 {
+                        break lies;
+                    }
+                    attendre("premier client jamais accepte");
+                };
+                let ecoute = celui_qui_ecoute(&lies);
+                // SAFETY: dup ne lit ni n'ecrit aucune memoire; `ecoute` est un
+                // descripteur ouvert de ce processus.
+                let garde = unsafe { libc::dup(ecoute) };
+                assert!(garde >= 0, "dup: {}", std::io::Error::last_os_error());
+                let nul = std::fs::File::open("/dev/null").expect("/dev/null");
+                // SAFETY: dup2 ne lit ni n'ecrit aucune memoire; les deux
+                // numeros sont ouverts, et le socket reste tenu par `garde`.
+                let rc = unsafe { libc::dup2(nul.as_raw_fd(), ecoute) };
+                assert_eq!(rc, ecoute, "dup2: {}", std::io::Error::last_os_error());
+                let second = UnixStream::connect(&vers_le_socket).expect("second client");
+                drop(premier);
+                (garde, second)
+            });
+
+            let (tx, fil, recu) = faux_superviseur();
+            let issue = tokio::time::timeout(
+                Duration::from_secs(5),
+                ecouter_et_servir(
+                    &socket,
+                    politique_de_recette(),
+                    std::path::PathBuf::from("/inexistant"),
+                    tx.clone(),
+                    std::future::pending(),
+                    tx,
+                    fil,
+                ),
+            )
+            .await;
+            let vu = *recu.lock().unwrap();
+            let clients = clients.join();
+            if let Ok((garde, _second)) = &clients {
+                // SAFETY: `garde` vient de `dup` dans le fil des clients et
+                // n'est ferme qu'ici.
+                unsafe { libc::close(*garde) };
+            }
+            let _ = std::fs::remove_dir_all(&dossier);
+
+            println!("mesure ecoute perdue sous serve: issue={issue:?} superviseur={vu:?}");
+            clients.expect("fil des clients");
+            let issue = issue.expect("serve doit rendre sur une ecoute perdue");
+            assert_eq!(
+                vu,
+                Some("shutdown"),
+                "le superviseur doit avoir recu Shutdown et ete joint avant le retour"
+            );
+            let e = issue.expect_err("l'erreur de l'ecoute doit etre rendue");
+            let code = match e.downcast_ref::<IpcError>() {
+                Some(IpcError::Io(io)) => io.raw_os_error(),
+                _ => None,
+            };
+            assert_eq!(code, Some(libc::ENOTSOCK), "{e:#}");
+        }
     }
 
     /// Un repertoire a nous, avec un profil correctement range.

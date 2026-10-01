@@ -105,6 +105,11 @@ pub(crate) async fn ouvrir(socket: &str) -> anyhow::Result<IpcClient> {
     match joindre(socket).await {
         Ok(client) => Ok(client),
         Err(Echec::Refuse(refus)) => Err(refus.into()),
+        // Un serveur tient le canal: rien ne dit qu'il soit arrete.
+        Err(Echec::Canal(e)) if e.is_server_busy() => Err(anyhow::Error::new(e).context(format!(
+            "daemon sans reponse dans le delai sur {socket}: le canal existe, mais \
+             n'a pris aucune connexion de plus. Reessayer dans un instant."
+        ))),
         Err(Echec::Canal(e)) => Err(anyhow::Error::new(e).context(format!(
             "connexion au daemon sur {socket}. Est-il demarre, et avez-vous le droit \
              de le piloter ?"
@@ -419,6 +424,90 @@ mod tests {
         #[cfg(windows)]
         let absent = format!(r"\\.\pipe\{}", etiquette_unique("absent"));
         assert_eq!(presence(&absent).await, Presence::Personne);
+    }
+
+    /// Un canal qui existe, et dont la seule place est tenue par un premier
+    /// client que personne n'accepte. Windows: un pipe a une seule instance,
+    /// prise par ce client. Linux: un socket d'ecoute dont la file d'attente a
+    /// une longueur de zero, remplie par ce client.
+    struct Occupe {
+        socket: String,
+        #[cfg(windows)]
+        _tenu: (
+            tokio::net::windows::named_pipe::NamedPipeServer,
+            tokio::net::windows::named_pipe::NamedPipeClient,
+        ),
+        #[cfg(unix)]
+        _tenu: (tokio::net::UnixListener, std::os::unix::net::UnixStream),
+        #[cfg(unix)]
+        dossier: std::path::PathBuf,
+    }
+
+    #[cfg(windows)]
+    fn occupe(nom: &str) -> Occupe {
+        use tokio::net::windows::named_pipe::{ClientOptions, ServerOptions};
+        let socket = format!(r"\\.\pipe\{}", etiquette_unique(nom));
+        let serveur = ServerOptions::new()
+            .first_pipe_instance(true)
+            .reject_remote_clients(true)
+            .create(&socket)
+            .expect("pipe de recette");
+        let premier = ClientOptions::new().open(&socket).expect("premier client");
+        Occupe {
+            socket,
+            _tenu: (serveur, premier),
+        }
+    }
+
+    #[cfg(unix)]
+    fn occupe(nom: &str) -> Occupe {
+        let dossier = std::env::temp_dir().join(etiquette_unique(nom));
+        std::fs::create_dir_all(&dossier).expect("repertoire de la recette");
+        let chemin = dossier.join("d.sock");
+        let prise = tokio::net::UnixSocket::new_stream().expect("socket de recette");
+        prise.bind(&chemin).expect("bind");
+        let ecoute = prise.listen(0).expect("listen");
+        let premier = std::os::unix::net::UnixStream::connect(&chemin).expect("premier client");
+        Occupe {
+            socket: chemin.to_string_lossy().into_owned(),
+            _tenu: (ecoute, premier),
+            dossier,
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for Occupe {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dossier);
+        }
+    }
+
+    /// Le chemin commun des commandes: un canal qui existe et ne prend
+    /// aucune connexion de plus se dit "daemon sans reponse dans le delai",
+    /// sans le conseil qui suppose un daemon arrete; un canal absent garde ce
+    /// conseil. Windows: apres l'attente d'une instance libre (2 s). Linux:
+    /// `connect(2)` sur une file d'attente pleine rend `EAGAIN`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn un_canal_occupe_n_est_pas_dit_arrete() {
+        let canal = occupe("occupe");
+        let pris = ouvrir(&canal.socket).await.err().map(|e| format!("{e:#}"));
+        drop(canal);
+        #[cfg(unix)]
+        let absent = std::env::temp_dir()
+            .join(etiquette_unique("absent"))
+            .join("d.sock")
+            .to_string_lossy()
+            .into_owned();
+        #[cfg(windows)]
+        let absent = format!(r"\\.\pipe\{}", etiquette_unique("absent"));
+        let absent = ouvrir(&absent).await.err().map(|e| format!("{e:#}"));
+        println!("mesure canal occupe: {pris:?}; canal absent: {absent:?}");
+        let pris = pris.expect("un canal occupe ne s'ouvre pas");
+        assert!(pris.contains("daemon sans reponse dans le delai"), "{pris}");
+        assert!(!pris.contains("Est-il demarre"), "{pris}");
+        let absent = absent.expect("un canal absent ne s'ouvre pas");
+        assert!(absent.contains("Est-il demarre"), "{absent}");
+        assert!(!absent.contains("sans reponse dans le delai"), "{absent}");
     }
 
     /// Le message nomme le socket et la regle, rien d'autre: ni uid, ni pid,
