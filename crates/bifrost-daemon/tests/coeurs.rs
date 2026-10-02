@@ -834,3 +834,130 @@ fn l_atelier_publie_le_coeur_actif_et_le_retire_a_l_arret() {
     assert_eq!(apres.1, None, "l'arret devait retirer l'adresse");
     let _ = std::fs::remove_dir_all(&rep);
 }
+
+/// Attend que `chemin` n'existe plus; rend faux a l'echeance.
+fn attendre_absence(chemin: &std::path::Path, delai: Duration) -> bool {
+    let echeance = Instant::now() + delai;
+    while chemin.exists() {
+        if Instant::now() >= echeance {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    true
+}
+
+/// La configuration d'un coeur porte le secret de son API et ceux du profil:
+/// elle part avec le coeur qu'on arrete.
+#[tokio::test]
+async fn la_configuration_part_avec_le_coeur_arrete() {
+    let rep = repertoire_temporaire("configuration-arret");
+    let (issue, _) = demarrer_doublure(&rep, Coeur::SingBox, None, false).await;
+    let (en_cours, essai) = issue.expect("la doublure doit demarrer");
+    let configuration = essai.lancement.configuration.clone();
+    assert!(
+        configuration.is_file(),
+        "la configuration existe tant que le coeur tourne"
+    );
+    en_cours.arreter().await.expect("l'arret doit aboutir");
+    assert!(
+        !configuration.exists(),
+        "la configuration doit partir avec le coeur arrete"
+    );
+    let _ = std::fs::remove_dir_all(&rep);
+}
+
+/// Un lancement qui n'aboutit pas retire la configuration qu'on lui a
+/// donnee: binaire absent, ou coeur qui sort avant de repondre.
+#[tokio::test]
+async fn un_lancement_qui_echoue_retire_sa_configuration() {
+    let rep = repertoire_temporaire("configuration-echec");
+    let api_morte = port::port_sans_personne().unwrap();
+    let cas: [(&str, PathBuf, Vec<std::ffi::OsString>); 2] = [
+        (
+            "absent",
+            PathBuf::from("/opt/bifrost/coeurs/sing-box-qui-n-existe-pas"),
+            Vec::new(),
+        ),
+        ("sort", binaire_du_daemon(), vec!["--version".into()]),
+    ];
+    for (nom, programme, arguments) in cas {
+        let configuration = rep.join(format!("{nom}.json"));
+        std::fs::write(&configuration, "{}").unwrap();
+        let lancement = Lancement {
+            programme,
+            arguments,
+            configuration: configuration.clone(),
+            api_clash: Some(api_morte.port()),
+            utilisateur: None,
+        };
+        superviseur::demarrer(Coeur::SingBox, &lancement, "x")
+            .await
+            .expect_err("ce lancement doit echouer");
+        assert!(
+            !configuration.exists(),
+            "{nom}: la configuration d'un lancement qui echoue doit partir"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&rep);
+}
+
+/// Un coeur qui meurt de lui-meme emporte sa configuration, et l'atelier qui
+/// se ferme a la fin de la session emporte celle du coeur qu'il tenait.
+#[test]
+fn la_configuration_part_avec_le_coeur_mort_et_avec_l_atelier_ferme() {
+    let rep = repertoire_temporaire("configuration-mort");
+    let socks_tenu = socks_fictif();
+    let socks = socks_tenu.adresse();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (poignee, _coeur_actif, tache) = bifrost_daemon::coeurs::atelier::ouvrir();
+    runtime.spawn(tache);
+
+    let lancer = |rep: PathBuf, poignee: bifrost_daemon::coeurs::atelier::Poignee| {
+        std::thread::spawn(move || {
+            doublure::lancer_sauf_vol(&rep, &gabarit(), |e| {
+                poignee.lancer(Coeur::SingBox, e.lancement.clone(), &e.secret, socks)
+            })
+            .map(|(vivant, essai)| (vivant.pid.expect("un pid"), essai.lancement.configuration))
+            .expect("la doublure doit se lancer")
+        })
+        .join()
+        .expect("le fil ne doit pas paniquer")
+    };
+
+    for sous in ["mort", "fin"] {
+        std::fs::create_dir_all(rep.join(sous)).unwrap();
+    }
+
+    // Mort de lui-meme, par SIGKILL: aucun arret ordonne ne la retire.
+    let (pid, configuration) = lancer(rep.join("mort"), poignee.clone());
+    assert!(
+        configuration.is_file(),
+        "la configuration existe pendant le service"
+    );
+    tuer(pid);
+    assert!(
+        attendre_absence(&configuration, Duration::from_secs(10)),
+        "la configuration du coeur mort doit partir"
+    );
+
+    // L'atelier ferme: plus personne ne tient de poignee.
+    let (pid, configuration) = lancer(rep.join("fin"), poignee.clone());
+    assert!(
+        configuration.is_file(),
+        "la configuration existe pendant le service"
+    );
+    drop(poignee);
+    assert!(
+        attendre_absence(&configuration, Duration::from_secs(10)),
+        "la configuration doit partir avec l'atelier ferme"
+    );
+    assert!(
+        attendre_mort(pid, Duration::from_secs(5)),
+        "le coeur doit mourir avec l'atelier"
+    );
+    let _ = std::fs::remove_dir_all(&rep);
+}

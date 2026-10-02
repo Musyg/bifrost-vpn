@@ -15,14 +15,15 @@ use bifrost_core::{Error, Result, TunnelConfig};
 /// `LinuxTunnel::up` valide avant tout. Mais les commandes rendues ici
 /// s'executent en root, et une configuration peut arriver jusqu'ici sans etre
 /// passee par la validation: un appelant futur, un outil de banc, une
-/// validation affaiblie. Le refus est donc repete au seul endroit qui ecrit
-/// `table <T>`, pour la pose comme pour le demontage: aucune liste de
-/// commandes ne sort avec une table reservee. Le demontage ne vide plus de
-/// table (il retire ses routes une par une, etiquetees), mais une pose dans
-/// `main` (254) ou `local` (255) y melerait les routes du tunnel a celles du
+/// validation affaiblie. Le refus est donc repete au seul endroit qui rend le
+/// plan, pour la pose comme pour le demontage: aucune liste de commandes ne
+/// sort avec une table reservee. Le demontage ne vide plus de table (il
+/// retire ses routes une par une, etiquetees), mais une pose dans `main`
+/// (254) ou `local` (255) y melerait les routes du tunnel a celles du
 /// systeme. Refuser toute la liste plutot qu'en retirer les seules lignes
 /// fautives: une pose partielle monterait un tunnel sans sa route, et un
-/// demontage partiel laisserait croire que tout est retire.
+/// demontage partiel laisserait croire que tout est retire. Le journal des
+/// sessions refuse de meme une entree qui designe une table reservee.
 fn table_libre(wg: &WireguardParams, quoi: &str) -> Result<u32> {
     match bifrost_core::routage::table_reservee(wg.routing_table) {
         None => Ok(wg.routing_table),
@@ -74,8 +75,9 @@ impl Cmd {
 
     /// Une etape du retrait du plan: toleree en echec, comme tout demontage.
     /// Un echec y veut dire que l'objet designe n'est pas la; le retrait ne
-    /// designe que ce que le produit a pose, il ne retire donc rien d'autre a
-    /// la place.
+    /// designe que ce que la session a pose, il ne retire donc rien d'autre a
+    /// la place. Le retrait n'existe que sous Linux (`super::session`).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn ip_plan_tolere(args: Vec<String>) -> Self {
         Self {
             tolerate_failure: true,
@@ -172,51 +174,15 @@ pub fn plan(cfg: &TunnelConfig, quoi: &str) -> Result<Option<bifrost_core::routa
     )))
 }
 
-/// Le retrait des seules regles et routes que la pose a posees, sans
-/// l'interface: c'est lui qui retire le reste d'une session precedente avant
-/// une pose (voir `LinuxTunnel::up`).
-///
-/// Chaque commande est une commande de la pose, `add` devenu `del`, a l'octet
-/// pres, etiquette comprise (`Plan::arguments_retrait`): une regle ou une
-/// route d'un tiers n'y repond pas, meme identique, meme dans la meme table.
-/// Plus de `ip route flush table <T>`, qui vidait toute la table, et plus de
-/// retrait d'une regle par ressemblance, qui prenait la premiere regle
-/// identique, celle d'un tiers comprise. Toutes tolerent l'echec: un objet
-/// absent n'est pas une erreur de demontage.
-pub fn retrait_routage(cfg: &TunnelConfig) -> Result<Vec<Cmd>> {
-    let Some(plan) = plan(cfg, "demontage")? else {
-        return Ok(Vec::new());
-    };
-    Ok(plan
-        .arguments_retrait()
-        .into_iter()
-        .map(Cmd::ip_plan_tolere)
-        .collect())
-}
-
-/// Retrait des regles, des routes et de l'interface.
-///
-/// Toutes les commandes tolerent l'echec: le demontage doit aboutir a un
-/// systeme propre meme s'il est appele apres un demontage partiel ou un crash.
-/// Les regles et les routes sont celles de [`retrait_routage`], puis vient
-/// l'interface ([`retrait_lien`]); supprimer le lien retire aussi, cote noyau,
-/// les routes qui passent par lui (mesure le 30/09/2026 sur essai-linux, deux
-/// familles). L'interface est designee par son NOM: l'appelant ne lance cette
-/// liste que sur une interface qu'il sait etre celle du produit.
-///
-/// Refuse une table que le noyau se reserve, sans rendre aucune commande:
-/// voir [`table_libre`].
-pub fn teardown(cfg: &TunnelConfig) -> Result<Vec<Cmd>> {
-    // Ces commandes n'existent que pour WireGuard: voir `add_routing`.
-    if cfg.portage.wireguard().is_none() {
-        return Ok(Vec::new());
-    }
-    let mut cmds = retrait_routage(cfg)?;
-    cmds.push(retrait_lien(cfg));
-    Ok(cmds)
-}
-
 /// La suppression de l'interface du profil, par son nom, toleree en echec.
+/// L'appelant ne la lance que sur une interface qu'il sait etre celle du
+/// produit: celle que son montage vient de creer. Le retrait des regles et
+/// des routes, lui, est celui de la session qui les a posees
+/// (`super::session`), chaque commande la pose a l'octet pres, `add` devenu
+/// `del`, etiquette et priorite comprises (`Plan::arguments_retrait_presents`):
+/// plus de `ip route flush table <T>`, qui vidait toute la table, ni de
+/// retrait d'une regle par ressemblance, qui prenait la premiere regle
+/// identique, celle d'un tiers comprise.
 pub fn retrait_lien(cfg: &TunnelConfig) -> Cmd {
     Cmd::ip_lenient(&["link", "del", "dev", &cfg.interface])
 }
@@ -289,9 +255,16 @@ mod tests {
         add_routing(c).expect("une table libre doit se poser")
     }
 
-    /// Le demontage d'une configuration dont la table est libre.
-    fn retrait(c: &TunnelConfig) -> Vec<Cmd> {
-        teardown(c).expect("une table libre doit se retirer")
+    /// Le retrait de tout ce que la pose d'une configuration dont la table
+    /// est libre a pose, chaque regle a la priorite donnee, en lignes `ip`.
+    fn retrait(c: &TunnelConfig, priorites: [u32; 4]) -> Vec<String> {
+        plan(c, "demontage")
+            .expect("une table libre doit se retirer")
+            .expect("un portage WireGuard a un plan")
+            .arguments_retrait_presents(&priorites.map(Some), &[true, true])
+            .into_iter()
+            .map(|a| format!("ip {}", a.join(" ")))
+            .collect()
     }
 
     /// Les tables que le noyau se reserve (`rt_class_t`,
@@ -329,20 +302,17 @@ mod tests {
                 e.contains(&format!("table {table} ('{nom}')")) && e.contains("routing_table"),
                 "le refus de pose doit nommer la table et le champ: {e}"
             );
-            for e in [
-                teardown(&c).expect_err(&format!("demontage rendu pour la table {table}")),
-                retrait_routage(&c).expect_err(&format!("retrait rendu pour la table {table}")),
-            ] {
-                let e = e.to_string();
-                assert!(
-                    e.contains(&format!("table {table} ('{nom}')")) && e.contains("routing_table"),
-                    "le refus de demontage doit nommer la table et le champ: {e}"
-                );
-                assert!(
-                    e.contains("aucune commande n'est emise"),
-                    "et dire que rien n'est parti: {e}"
-                );
-            }
+            let e = plan(&c, "demontage")
+                .expect_err(&format!("demontage rendu pour la table {table}"))
+                .to_string();
+            assert!(
+                e.contains(&format!("table {table} ('{nom}')")) && e.contains("routing_table"),
+                "le refus de demontage doit nommer la table et le champ: {e}"
+            );
+            assert!(
+                e.contains("aucune commande n'est emise"),
+                "et dire que rien n'est parti: {e}"
+            );
         }
     }
 
@@ -357,7 +327,7 @@ mod tests {
             let up = lignes(&pose(&c));
             assert_eq!(up.len(), 6, "table {table}: {up:?}");
             assert!(up.iter().any(|l| l.contains(&format!(" table {t} "))));
-            let down = lignes(&retrait(&c));
+            let down = retrait(&c, [1, 2, 3, 4]);
             assert!(
                 down.contains(&format!(
                     "ip -4 route del 0.0.0.0/0 dev wg0 table {t} proto 177"
@@ -367,55 +337,47 @@ mod tests {
         }
     }
 
-    /// Le demontage, commande par commande et dans l'ordre, a l'octet pres.
-    ///
-    /// Jusqu'a la base `91d614f` il retirait les regles par ressemblance
-    /// (`rule del not fwmark M table T`, `rule del table main
-    /// suppress_prefixlength 0`: la premiere regle qui correspond, celle d'un
-    /// tiers comprise) et vidait la table (`route flush table T`). Mesure en
-    /// namespace jetable sur essai-linux, par `LinuxTunnel::up` et `down`: un
-    /// tiers pose dans la meme table y perdait sa route et ses regles. Chaque
-    /// commande est desormais celle de la pose, `add` devenu `del`, etiquette
-    /// comprise; l'ordre (regles, route, famille par famille, puis
-    /// l'interface) est celui d'avant.
+    /// Le demontage, commande par commande et dans l'ordre: chaque commande
+    /// est celle de la pose, `add` devenu `del`, etiquette comprise, et chaque
+    /// regle porte la priorite que le noyau lui a donnee; l'ordre (regles,
+    /// route, famille par famille) est celui d'avant. Jusqu'a la base
+    /// `91d614f` il retirait les regles par ressemblance et vidait la table
+    /// (`route flush table T`): un tiers pose dans la meme table y perdait sa
+    /// route et ses regles (mesure en namespace jetable sur essai-linux).
     #[test]
     fn le_demontage_wireguard_ne_designe_que_ce_que_la_pose_a_pose() {
         assert_eq!(
-            lignes(&retrait(&cfg())),
+            retrait(&cfg(), [32765, 32764, 32763, 32762]),
             [
-                "ip -4 rule del not fwmark 51820 table 51820 protocol 177",
-                "ip -4 rule del table main suppress_prefixlength 0 protocol 177",
+                "ip -4 rule del not fwmark 51820 table 51820 pref 32765 protocol 177",
+                "ip -4 rule del table main suppress_prefixlength 0 pref 32764 protocol 177",
                 "ip -4 route del 0.0.0.0/0 dev wg0 table 51820 proto 177",
-                "ip -6 rule del not fwmark 51820 table 51820 protocol 177",
-                "ip -6 rule del table main suppress_prefixlength 0 protocol 177",
+                "ip -6 rule del not fwmark 51820 table 51820 pref 32763 protocol 177",
+                "ip -6 rule del table main suppress_prefixlength 0 pref 32762 protocol 177",
                 "ip -6 route del ::/0 dev wg0 table 51820 proto 177",
-                "ip link del dev wg0",
             ]
         );
-        assert!(retrait(&cfg()).iter().all(|c| c.program == "ip"));
-        // Le retrait sans l'interface est le meme, moins sa derniere ligne.
-        let sans_lien = lignes(&retrait_routage(&cfg()).unwrap());
-        let tout = lignes(&retrait(&cfg()));
-        assert_eq!(sans_lien, tout[..tout.len() - 1]);
+        assert_eq!(retrait_lien(&cfg()).display(), "ip link del dev wg0");
+        assert!(retrait_lien(&cfg()).tolerate_failure);
     }
 
     /// Aucun demontage ne vide une table, et chaque regle ou route retiree
-    /// porte l'etiquette du produit: une table, une marque, une interface
-    /// quelconques.
+    /// porte l'etiquette du produit, chaque regle sa priorite: une table, une
+    /// marque, une interface quelconques.
     #[test]
     fn le_demontage_ne_vide_aucune_table_et_ne_retire_que_l_etiquete() {
         for (marque, table) in [(51820u32, 51820u32), (0x1f2e3d, 30303), (7, 252)] {
             let mut c = contournant_la_validation(table);
             c.interface = "bf-wg_9".into();
             wg(&mut c).fwmark = marque;
-            for cmd in retrait(&c) {
-                let l = cmd.display();
+            for l in retrait(&c, [11, 12, 13, 14]) {
                 assert!(!l.contains("flush"), "{l}");
-                if l.contains(" rule ") || l.contains(" route ") {
-                    assert!(
-                        l.ends_with(" protocol 177") || l.ends_with(" proto 177"),
-                        "retrait sans l'etiquette du produit: {l}"
-                    );
+                assert!(
+                    l.ends_with(" protocol 177") || l.ends_with(" proto 177"),
+                    "retrait sans l'etiquette du produit: {l}"
+                );
+                if l.contains(" rule ") {
+                    assert!(l.contains(" pref 1"), "regle retiree sans sa priorite: {l}");
                 }
             }
         }
@@ -432,7 +394,7 @@ mod tests {
                 .into(),
         ));
         assert!(add_routing(&c).unwrap().is_empty());
-        assert!(teardown(&c).unwrap().is_empty());
+        assert!(plan(&c, "demontage").unwrap().is_none());
     }
 
     /// Les litteraux de ces recettes sont ceux du noyau, lus DEHORS: dans libc,
@@ -551,39 +513,26 @@ mod tests {
         assert!(!l.contains("51820"));
     }
 
-    #[test]
-    fn le_demontage_tolere_l_absence_des_regles() {
-        let cmds = retrait(&cfg());
-        assert!(
-            cmds.iter().all(|c| c.tolerate_failure),
-            "le demontage doit aboutir meme partiellement applique"
-        );
-    }
-
-    #[test]
-    fn le_demontage_retire_regles_routes_et_interface() {
-        let l = lignes(&retrait(&cfg())).join("\n");
-        assert!(l.contains("rule del not fwmark 51820"));
-        assert!(l.contains("rule del table main suppress_prefixlength 0"));
-        assert!(l.contains("link del dev wg0"));
-        // v4 et v6 pour les regles.
-        assert_eq!(l.matches("rule del not fwmark").count(), 2);
-    }
-
     /// Le demontage doit annuler exactement ce que le montage a pose: chaque
-    /// pose a son inverse exact, et le demontage ne retire rien d'autre que
-    /// ces inverses et l'interface.
+    /// pose a son inverse exact (a la priorite pres, qu'il ajoute), et le
+    /// demontage ne retire rien d'autre que ces inverses.
     #[test]
     fn montage_et_demontage_sont_symetriques() {
         let c = cfg();
         let up = lignes(&pose(&c));
-        let down = lignes(&retrait(&c));
+        let down: Vec<String> = retrait(&c, [101, 102, 103, 104])
+            .into_iter()
+            .map(|l| {
+                ["101", "102", "103", "104"]
+                    .iter()
+                    .fold(l, |l, p| l.replace(&format!(" pref {p}"), ""))
+            })
+            .collect();
         for cmd in &up {
             let inverse = cmd.replacen(" add ", " del ", 1);
             assert!(down.contains(&inverse), "aucun inverse exact pour: {cmd}");
         }
-        assert_eq!(down.len(), up.len() + 1, "{down:?}");
-        assert_eq!(down.last().map(String::as_str), Some("ip link del dev wg0"));
+        assert_eq!(down.len(), up.len(), "{down:?}");
     }
 
     /// Le nom d'interface vient de la config, deja validee, mais on verifie

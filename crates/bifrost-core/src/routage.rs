@@ -23,11 +23,11 @@
 //! # Ne retirer que ce que le produit a pose
 //!
 //! Chaque regle et chaque route du plan porte l'etiquette du produit,
-//! [`PROTOCOLE_PRODUIT`], et le retrait ([`Plan::arguments_retrait`]) est le
-//! miroir exact de la pose: meme selecteur, meme table, meme priorite quand le
-//! plan en fixe une, meme interface pour une route, et la meme etiquette. Le
-//! noyau retire la PREMIERE regle qui correspond a ce que la requete precise,
-//! et tient pour joker tout ce qu'elle ne precise pas (`rule_find`,
+//! [`PROTOCOLE_PRODUIT`], et le retrait ([`Plan::arguments_retrait_presents`])
+//! est le miroir exact de la pose: meme selecteur, meme table, meme interface
+//! pour une route, la meme etiquette, et la priorite de chaque regle. Le noyau
+//! retire la PREMIERE regle qui correspond a ce que la requete precise, et
+//! tient pour joker tout ce qu'elle ne precise pas (`rule_find`,
 //! `net/core/fib_rules.c`, v7.0, lu le 30/09/2026): sans l'etiquette, ni le
 //! selecteur complet ni la priorite ne designent une regle a coup sur. Mesure
 //! le 30/09/2026 sur essai-linux (noyau 7.0, iproute2 6.1.0), en namespace
@@ -37,6 +37,15 @@
 //! produit part. Les routes se retirent une par une, par leur interface et
 //! leur etiquette, jamais par `ip route flush table`, qui vidait la table du
 //! tiers qui l'occupait aussi.
+//!
+//! L'etiquette dit qu'un objet a la forme d'un objet du produit, pas quelle
+//! session l'a pose, ni meme que le produit l'a pose: n'importe quel
+//! programme peut l'employer, et deux sessions du produit posent les memes
+//! formes. Ce qu'une session a pose se lit donc dans le journal des sessions
+//! que le daemon tient (`tunnel::session`), et [`Regle::designe`] et
+//! [`RouteParDefaut::designe`] disent si un objet lu dans le noyau est celui
+//! qu'une session enregistree a pose: meme forme, meme etiquette, et la
+//! priorite qu'elle a relevee.
 //!
 //! Avant la pose, [`Plan::occupation`] dit ce qu'un tiers occupe deja: une
 //! route dans la table du tunnel, une regle qui la consulte, ou (WireGuard)
@@ -207,12 +216,39 @@ pub struct Regle {
     pub consultation: Consultation,
 }
 
+impl Regle {
+    /// La regle lue dans le noyau est-elle celle-ci, posee par le produit:
+    /// meme famille, meme forme (selecteur et table consultee, rien de plus),
+    /// son etiquette, et sa priorite quand le plan la fixe ou que la pose l'a
+    /// relevee (`relevee`, pour une regle posee sans `pref`).
+    pub fn designe(&self, lue: &RegleLue, relevee: Option<u32>) -> bool {
+        lue.famille == self.famille
+            && lue.protocole == PROTOCOLE_PRODUIT
+            && lue.forme == Some((self.selecteur, self.consultation))
+            && self.priorite.or(relevee).is_none_or(|p| lue.priorite == p)
+    }
+}
+
 /// La route par defaut posee dans la table du tunnel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteParDefaut {
     pub famille: Famille,
     pub table: u32,
     pub interface: String,
+}
+
+impl RouteParDefaut {
+    /// La route lue dans le noyau est-elle celle-ci, posee par le produit:
+    /// route par defaut de sa famille, dans sa table, vers l'interface dont
+    /// `index` est le numero (une interface absente n'a plus de route), a son
+    /// etiquette.
+    pub fn designe(&self, lue: &RouteLue, index: Option<u32>) -> bool {
+        lue.famille == self.famille
+            && lue.protocole == PROTOCOLE_PRODUIT
+            && lue.table == self.table
+            && index.is_some()
+            && lue.par_defaut_vers == index
+    }
 }
 
 /// Une etape de la pose, dans l'ordre ou le produit l'execute.
@@ -381,38 +417,102 @@ impl Plan {
             .collect()
     }
 
-    /// Les arguments d'`ip` du retrait, dans l'ordre ou le produit les
-    /// execute: pour chaque famille, la regle qui envoie au tunnel d'abord,
-    /// puis les autres regles de la derniere posee a la premiere, puis la
-    /// route. C'est l'ordre que chaque chemin suivait avant.
+    /// Les regles du plan dans l'ordre de pose, les deux familles a la
+    /// suite. C'est l'ordre des priorites qu'une session du produit releve
+    /// et inscrit, et celui de [`Plan::arguments_retrait_presents`].
+    pub fn regles_posees(&self) -> Vec<Regle> {
+        self.etapes
+            .iter()
+            .filter_map(|e| match e {
+                Etape::Regle(r) => Some(*r),
+                Etape::Route(_) => None,
+            })
+            .collect()
+    }
+
+    /// Les routes du plan dans l'ordre de pose, les deux familles a la suite.
+    pub fn routes_posees(&self) -> Vec<RouteParDefaut> {
+        self.etapes
+            .iter()
+            .filter_map(|e| match e {
+                Etape::Route(r) => Some(r.clone()),
+                Etape::Regle(_) => None,
+            })
+            .collect()
+    }
+
+    /// Les arguments d'`ip` du retrait de ce que ce plan a pose et qui est
+    /// encore la, dans l'ordre ou le produit les execute: pour chaque
+    /// famille, la regle qui envoie au tunnel d'abord, puis les autres regles
+    /// de la derniere posee a la premiere, puis la route.
     ///
-    /// Chaque commande est la commande de pose, `add` devenu `del`, a l'octet
-    /// pres: meme selecteur, meme table, meme priorite quand le plan en fixe
-    /// une, meme interface pour la route, meme etiquette. Rien n'est retire par
-    /// table entiere ni par priorite seule. Voir l'en-tete du module pour ce
-    /// que le noyau fait d'une requete moins precise.
-    pub fn arguments_retrait(&self) -> Vec<Vec<String>> {
+    /// `regles[i]` dit ce qu'il en est de la i-eme regle de
+    /// [`Plan::regles_posees`]: `Some(p)` si elle est la, a la priorite `p`
+    /// lue dans le noyau; `None` (ou rien) si elle n'y est pas, et aucune
+    /// commande ne la vise. `routes[j]` dit de meme si la j-eme route de
+    /// [`Plan::routes_posees`] est la.
+    ///
+    /// Chaque commande est la commande de pose, `add` devenu `del`: meme
+    /// selecteur, meme table, meme interface pour la route, meme etiquette,
+    /// et chaque regle porte sa priorite (celle du plan quand il la fixe,
+    /// sinon celle qui a ete lue). Rien n'est retire par table entiere ni par
+    /// priorite seule, et aucune regle sans sa priorite.
+    pub fn arguments_retrait_presents(
+        &self,
+        regles: &[Option<u32>],
+        routes: &[bool],
+    ) -> Vec<Vec<String>> {
         let tunnel = self.table_du_tunnel();
+        // Le rang de chaque etape parmi les regles, ou parmi les routes, dans
+        // l'ordre de pose.
+        let mut rang = Vec::with_capacity(self.etapes.len());
+        let (mut nr, mut nt) = (0, 0);
+        for e in &self.etapes {
+            match e {
+                Etape::Regle(_) => {
+                    rang.push(nr);
+                    nr += 1;
+                }
+                Etape::Route(_) => {
+                    rang.push(nt);
+                    nt += 1;
+                }
+            }
+        }
         let mut sortie = Vec::new();
         for famille in Famille::TOUTES {
-            let mut regles: Vec<&Etape> = self
+            let mut a_retirer: Vec<(usize, &Etape)> = self
                 .etapes
                 .iter()
-                .filter(|e| matches!(e, Etape::Regle(r) if r.famille == famille))
+                .enumerate()
+                .filter(|(_, e)| matches!(e, Etape::Regle(r) if r.famille == famille))
                 .collect();
-            regles.reverse();
+            a_retirer.reverse();
             // Tri stable: la regle vers le tunnel passe devant, les autres
             // gardent l'ordre inverse de la pose.
-            regles.sort_by_key(
-                |e| !matches!(e, Etape::Regle(r) if r.consultation == Consultation::Table(tunnel)),
+            a_retirer.sort_by_key(|(_, e)| {
+                !matches!(e, Etape::Regle(r) if r.consultation == Consultation::Table(tunnel))
+            });
+            a_retirer.extend(
+                self.etapes
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .filter(|(_, e)| matches!(e, Etape::Route(r) if r.famille == famille)),
             );
-            let routes = self
-                .etapes
-                .iter()
-                .rev()
-                .filter(|e| matches!(e, Etape::Route(r) if r.famille == famille));
-            for etape in regles.into_iter().chain(routes) {
-                sortie.push(self.argv(etape, "del"));
+            for (i, etape) in a_retirer {
+                match etape {
+                    Etape::Regle(_) => {
+                        if let Some(p) = regles.get(rang[i]).copied().flatten() {
+                            sortie.push(self.argv_releve(etape, "del", Some(p)));
+                        }
+                    }
+                    Etape::Route(_) => {
+                        if routes.get(rang[i]).copied().unwrap_or(false) {
+                            sortie.push(self.argv(etape, "del"));
+                        }
+                    }
+                }
             }
         }
         sortie
@@ -420,6 +520,11 @@ impl Plan {
 
     /// Une etape, en arguments d'`ip`, pour le verbe donne (`add` ou `del`).
     fn argv(&self, etape: &Etape, verbe: &str) -> Vec<String> {
+        self.argv_releve(etape, verbe, None)
+    }
+
+    /// [`Plan::argv`], et la priorite relevee d'une regle posee sans `pref`.
+    fn argv_releve(&self, etape: &Etape, verbe: &str, relevee: Option<u32>) -> Vec<String> {
         let wg = matches!(self.chemin, Chemin::WireGuard { .. });
         let mot_table = if wg { "table" } else { "lookup" };
         let etiquette = PROTOCOLE_PRODUIT.to_string();
@@ -468,7 +573,7 @@ impl Plan {
                         "0".to_owned(),
                     ]),
                 }
-                if let Some(p) = r.priorite {
+                if let Some(p) = r.priorite.or(relevee) {
                     a.extend(["pref".to_owned(), p.to_string()]);
                 }
                 a.extend(["protocol".to_owned(), etiquette]);
@@ -480,9 +585,11 @@ impl Plan {
     /// Ce qu'un tiers occupe deja de ce que ce plan veut poser, lu dans le
     /// noyau avant la premiere commande. Vide: la voie est libre.
     ///
-    /// Ce qui porte l'etiquette du produit est au produit (un reste d'une
-    /// session precedente, que le montage retire d'abord) et n'occupe rien.
-    /// Pour le reste, trois cas, dans chaque famille:
+    /// Ce qui porte l'etiquette du produit n'est pas juge ici: le daemon le
+    /// confronte d'abord au journal de ses sessions (`tunnel::session`), qui
+    /// retire ce qu'une session morte a pose et refuse le montage devant tout
+    /// le reste; quand cette lecture-ci a lieu, il n'en reste plus. Pour ce
+    /// qui ne porte pas l'etiquette, trois cas, dans chaque famille:
     ///
     /// - une route dans la table du tunnel: la table est celle d'un autre;
     /// - une regle qui consulte la table du tunnel, dont une regle identique a
@@ -607,6 +714,11 @@ pub struct RegleLue {
     pub marque: Option<(u32, u32)>,
     /// FRA_PROTOCOL: qui l'a posee.
     pub protocole: u8,
+    /// La forme de la regle quand c'est une forme que le produit pose
+    /// (selecteur et table consultee), et que la regle ne porte RIEN d'autre;
+    /// `None` sinon. Une regle qui ajoute quoi que ce soit (une source, une
+    /// interface, un masque partiel, un saut) n'a pas de forme du produit.
+    pub forme: Option<(Selecteur, Consultation)>,
 }
 
 /// Une route telle que la lit la verification d'occupation.
@@ -616,6 +728,10 @@ pub struct RouteLue {
     pub table: u32,
     /// `rtm_protocol`: qui l'a posee.
     pub protocole: u8,
+    /// Le numero de l'interface quand la route est une route par defaut
+    /// directe (ni passerelle, ni chemins multiples, ni source) vers une
+    /// seule interface, la forme que le produit pose; `None` sinon.
+    pub par_defaut_vers: Option<u32>,
 }
 
 /// Ce qu'un tiers occupe deja de ce que le plan veut poser.
@@ -709,28 +825,44 @@ mod tests {
         );
     }
 
-    fn lignes_retrait(p: &Plan) -> Vec<String> {
-        p.arguments_retrait().iter().map(|a| a.join(" ")).collect()
+    /// Tout ce que le plan pose, present: chaque regle a la priorite donnee
+    /// dans l'ordre de pose, ou a celle que le plan fixe.
+    fn tout_present(p: &Plan, priorites: &[u32]) -> Vec<String> {
+        let regles: Vec<Option<u32>> = p
+            .regles_posees()
+            .iter()
+            .enumerate()
+            .map(|(i, r)| r.priorite.or(priorites.get(i).copied()))
+            .collect();
+        let routes = vec![true; p.routes_posees().len()];
+        p.arguments_retrait_presents(&regles, &routes)
+            .iter()
+            .map(|a| a.join(" "))
+            .collect()
     }
 
     /// Le retrait, commande par commande et dans l'ordre: celui que chaque
     /// chemin suivait (regle du tunnel, autres regles, route; IPv4 puis IPv6),
-    /// chaque commande la pose a l'octet pres, `add` devenu `del`.
+    /// chaque commande la pose, `add` devenu `del`, et la priorite de chaque
+    /// regle: celle qui a ete lue pour WireGuard, celle du plan pour le coeur.
     #[test]
     fn le_retrait_de_chaque_chemin_est_le_miroir_de_sa_pose() {
         assert_eq!(
-            lignes_retrait(&Plan::wireguard("wg0", 51820, 51820)),
+            tout_present(
+                &Plan::wireguard("wg0", 51820, 51820),
+                &[32765, 32764, 32763, 32762]
+            ),
             [
-                "-4 rule del not fwmark 51820 table 51820 protocol 177",
-                "-4 rule del table main suppress_prefixlength 0 protocol 177",
+                "-4 rule del not fwmark 51820 table 51820 pref 32765 protocol 177",
+                "-4 rule del table main suppress_prefixlength 0 pref 32764 protocol 177",
                 "-4 route del 0.0.0.0/0 dev wg0 table 51820 proto 177",
-                "-6 rule del not fwmark 51820 table 51820 protocol 177",
-                "-6 rule del table main suppress_prefixlength 0 protocol 177",
+                "-6 rule del not fwmark 51820 table 51820 pref 32763 protocol 177",
+                "-6 rule del table main suppress_prefixlength 0 pref 32762 protocol 177",
                 "-6 route del ::/0 dev wg0 table 51820 proto 177",
             ]
         );
         assert_eq!(
-            lignes_retrait(&Plan::coeur("bftun0", Some(4242))),
+            tout_present(&Plan::coeur("bftun0", Some(4242)), &[]),
             [
                 "-4 rule del lookup 2847 pref 9120 protocol 177",
                 "-4 rule del lookup main suppress_prefixlength 0 pref 9110 protocol 177",
@@ -744,10 +876,37 @@ mod tests {
         );
     }
 
-    /// Pour chaque plan, le retrait et la pose sont en bijection: chaque
-    /// commande de pose a exactement une commande de retrait qui ne differe
-    /// que par le verbe, et chaque commande porte l'etiquette. Aucune ne vide
-    /// une table ni ne designe une regle par sa seule priorite.
+    /// Ce qui n'est pas la n'est vise par aucune commande: une regle sans
+    /// priorite lue, une route absente.
+    #[test]
+    fn le_retrait_ne_vise_que_ce_qui_est_la() {
+        let wg = Plan::wireguard("wg0", 51820, 51820);
+        let l: Vec<String> = wg
+            .arguments_retrait_presents(&[None, Some(32764)], &[false, true])
+            .iter()
+            .map(|a| a.join(" "))
+            .collect();
+        assert_eq!(
+            l,
+            [
+                "-4 rule del table main suppress_prefixlength 0 pref 32764 protocol 177",
+                "-6 route del ::/0 dev wg0 table 51820 proto 177",
+            ]
+        );
+        assert!(wg.arguments_retrait_presents(&[], &[]).is_empty());
+        let coeur = Plan::coeur("bftun0", None);
+        assert!(
+            coeur
+                .arguments_retrait_presents(&[None, None, None, None], &[false, false])
+                .is_empty()
+        );
+    }
+
+    /// Pour chaque plan, tout present, le retrait et la pose sont en
+    /// bijection: chaque commande de pose a exactement une commande de
+    /// retrait qui n'en differe que par le verbe et la priorite, et chaque
+    /// commande porte l'etiquette. Aucune ne vide une table, chaque regle
+    /// porte sa priorite et sa forme, chaque route son interface.
     #[test]
     fn chaque_retrait_designe_exactement_une_pose() {
         for p in [
@@ -756,21 +915,36 @@ mod tests {
             Plan::coeur("bftun0", None),
             Plan::coeur("bftun0", Some(1000)),
         ] {
+            let priorites: Vec<u32> = (101..101 + 16).collect();
+            let regles: Vec<Option<u32>> = p
+                .regles_posees()
+                .iter()
+                .enumerate()
+                .map(|(i, r)| r.priorite.or(Some(priorites[i])))
+                .collect();
+            let routes = vec![true; p.routes_posees().len()];
+            let retrait = p.arguments_retrait_presents(&regles, &routes);
             let mut pose: Vec<Vec<String>> = p.arguments_ip();
-            let mut retrait: Vec<Vec<String>> = p
-                .arguments_retrait()
-                .into_iter()
+            let mut miroir: Vec<Vec<String>> = retrait
+                .iter()
+                .cloned()
                 .map(|mut a| {
                     assert_eq!(a[2], "del", "{a:?}");
                     a[2] = "add".to_owned();
+                    // La priorite lue d'une regle posee sans `pref`.
+                    if let Some(i) = a.iter().position(|m| m == "pref")
+                        && priorites.iter().any(|x| a[i + 1] == x.to_string())
+                    {
+                        a.drain(i..i + 2);
+                    }
                     a
                 })
                 .collect();
-            assert_eq!(pose.len(), retrait.len());
+            assert_eq!(pose.len(), miroir.len());
             pose.sort();
-            retrait.sort();
-            assert_eq!(pose, retrait);
-            for a in p.arguments_retrait() {
+            miroir.sort();
+            assert_eq!(pose, miroir);
+            for a in retrait {
                 assert!(!a.iter().any(|m| m == "flush"), "{a:?}");
                 let n = a.len();
                 assert_eq!(a[n - 1], "177", "{a:?}");
@@ -779,6 +953,10 @@ mod tests {
                     assert!(
                         a.iter().any(|m| m == "table" || m == "lookup"),
                         "une regle retiree par sa seule priorite: {a:?}"
+                    );
+                    assert!(
+                        a.iter().any(|m| m == "pref"),
+                        "une regle retiree sans sa priorite: {a:?}"
                     );
                 } else {
                     assert!(a.iter().any(|m| m == "dev"), "{a:?}");
@@ -794,7 +972,105 @@ mod tests {
             table,
             marque: None,
             protocole: 0,
+            forme: None,
         }
+    }
+
+    /// Une regle du produit se reconnait a sa famille, sa forme, son
+    /// etiquette, et a sa priorite quand elle est connue (fixee par le plan
+    /// ou relevee a la pose). Chaque difference la rend etrangere.
+    #[test]
+    fn une_regle_lue_est_designee_par_forme_etiquette_et_priorite() {
+        let wg = Plan::wireguard("wg0", 51820, 51820);
+        let lan = wg.regles_posees()[1];
+        let lue = RegleLue {
+            protocole: PROTOCOLE_PRODUIT,
+            forme: Some((Selecteur::Tout, Consultation::MainSansDefaut)),
+            ..regle_lue(Famille::Ipv4, 32764, Some(TABLE_MAIN))
+        };
+        assert!(lan.designe(&lue, Some(32764)));
+        assert!(
+            lan.designe(&lue, None),
+            "priorite inconnue: la forme suffit"
+        );
+        assert!(!lan.designe(&lue, Some(32763)), "autre priorite relevee");
+        assert!(!lan.designe(
+            &RegleLue {
+                protocole: 0,
+                ..lue
+            },
+            Some(32764)
+        ));
+        assert!(!lan.designe(&RegleLue { forme: None, ..lue }, Some(32764)));
+        assert!(!lan.designe(
+            &RegleLue {
+                famille: Famille::Ipv6,
+                ..lue
+            },
+            Some(32764)
+        ));
+        assert!(!wg.regles_posees()[0].designe(&lue, Some(32764)));
+        // Une priorite fixee par le plan l'emporte sur toute releve.
+        let coeur_lan = Plan::coeur("bftun0", None).regles_posees()[0];
+        assert_eq!(coeur_lan.priorite, Some(PREF_LAN));
+        let a_9110 = RegleLue {
+            priorite: PREF_LAN,
+            forme: Some((Selecteur::Tout, Consultation::MainSansDefaut)),
+            ..lue
+        };
+        assert!(coeur_lan.designe(&a_9110, None));
+        assert!(coeur_lan.designe(&a_9110, Some(1)));
+        assert!(!coeur_lan.designe(
+            &RegleLue {
+                priorite: 9111,
+                ..a_9110
+            },
+            None
+        ));
+    }
+
+    /// Une route du produit: route par defaut de sa famille, dans sa table,
+    /// vers l'interface donnee, a l'etiquette. Sans interface, aucune.
+    #[test]
+    fn une_route_lue_est_designee_par_table_interface_et_etiquette() {
+        let r = &Plan::wireguard("wg0", 51820, 51820).routes_posees()[0];
+        let lue = RouteLue {
+            famille: Famille::Ipv4,
+            table: 51820,
+            protocole: PROTOCOLE_PRODUIT,
+            par_defaut_vers: Some(7),
+        };
+        assert!(r.designe(&lue, Some(7)));
+        assert!(!r.designe(&lue, Some(8)));
+        assert!(!r.designe(&lue, None));
+        assert!(!r.designe(
+            &RouteLue {
+                protocole: 3,
+                ..lue
+            },
+            Some(7)
+        ));
+        assert!(!r.designe(
+            &RouteLue {
+                table: 51821,
+                ..lue
+            },
+            Some(7)
+        ));
+        assert!(!r.designe(
+            &RouteLue {
+                par_defaut_vers: None,
+                ..lue
+            },
+            Some(7)
+        ));
+        assert!(!r.designe(
+            &RouteLue {
+                famille: Famille::Ipv6,
+                ..lue
+            },
+            Some(7)
+        ));
     }
 
     /// Ce que le noyau pose de lui-meme, et un namespace ordinaire: rien
@@ -812,15 +1088,20 @@ mod tests {
         v
     }
 
+    fn route_lue(famille: Famille, table: u32, protocole: u8) -> RouteLue {
+        RouteLue {
+            famille,
+            table,
+            protocole,
+            par_defaut_vers: None,
+        }
+    }
+
     fn routes_ordinaires() -> Vec<RouteLue> {
         let mut v = Vec::new();
         for f in Famille::TOUTES {
             for (t, p) in [(254, 3), (254, 2), (255, 2)] {
-                v.push(RouteLue {
-                    famille: f,
-                    table: t,
-                    protocole: p,
-                });
+                v.push(route_lue(f, t, p));
             }
         }
         v
@@ -847,11 +1128,7 @@ mod tests {
             for f in Famille::TOUTES {
                 let mut routes = routes_ordinaires();
                 for _ in 0..2 {
-                    routes.push(RouteLue {
-                        famille: f,
-                        table: t,
-                        protocole: 0,
-                    });
+                    routes.push(route_lue(f, t, 0));
                 }
                 assert_eq!(
                     p.occupation(&regles_du_noyau(), &routes),
@@ -929,10 +1206,11 @@ mod tests {
         );
     }
 
-    /// Ce qui porte l'etiquette du produit est au produit: ni ses routes ni
-    /// ses regles n'occupent la voie.
+    /// Ce qui porte l'etiquette du produit n'est pas juge par l'occupation:
+    /// le journal des sessions en decide avant elle (`tunnel::session`, dans
+    /// le daemon).
     #[test]
-    fn ce_qui_porte_l_etiquette_du_produit_n_occupe_rien() {
+    fn ce_qui_porte_l_etiquette_du_produit_n_est_pas_juge_ici() {
         let wg = Plan::wireguard("wg0", 51820, 51820);
         let mut r = regles_du_noyau();
         let mut routes = routes_ordinaires();
@@ -942,11 +1220,7 @@ mod tests {
                 marque: Some((51820, u32::MAX)),
                 ..regle_lue(f, 32765, Some(51820))
             });
-            routes.push(RouteLue {
-                famille: f,
-                table: 51820,
-                protocole: PROTOCOLE_PRODUIT,
-            });
+            routes.push(route_lue(f, 51820, PROTOCOLE_PRODUIT));
         }
         assert_eq!(wg.occupation(&r, &routes), []);
     }

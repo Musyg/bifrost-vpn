@@ -100,8 +100,8 @@ pub struct Aiguillage {
     pub coeur_uid: Option<u32>,
 }
 
-/// Le plan de cet aiguillage: la source unique de la pose, du retrait et de
-/// la verification d'occupation.
+/// Le plan de cet aiguillage: la source unique de la pose, du retrait (par la
+/// session qui l'a pose) et de la verification d'occupation.
 pub fn plan(a: &Aiguillage) -> bifrost_core::routage::Plan {
     bifrost_core::routage::Plan::coeur(&a.interface, a.coeur_uid)
 }
@@ -122,27 +122,14 @@ pub fn poser(a: &Aiguillage) -> Vec<Cmd> {
         .collect()
 }
 
-/// Retire l'aiguillage, et rien d'autre.
-///
-/// Chaque commande est une commande de la pose, `add` devenu `del`, a l'octet
-/// pres: selecteur, table, priorite, interface et etiquette du produit
-/// (`Plan::arguments_retrait`). Jusqu'a la base `91d614f` il retirait
-/// `rule del pref P` (la premiere regle de cette priorite, quelle qu'elle
-/// soit) et `route flush table 2847` (toute la table): mesure en namespace
-/// jetable sur essai-linux, un tiers pose avant a la meme priorite perdait sa
-/// regle, et un tiers qui occupait la table ses routes.
-///
-/// Tout y est tolerant: le demontage suit aussi bien un montage complet qu'un
-/// montage interrompu au milieu, et une regle deja absente n'est pas une
-/// erreur. S'arreter a la premiere laisserait les suivantes en place - c'est-a-
-/// dire une table qui aiguille vers une interface disparue.
-pub fn retirer(a: &Aiguillage) -> Vec<Cmd> {
-    plan(a)
-        .arguments_retrait()
-        .into_iter()
-        .map(Cmd::ip_plan_tolere)
-        .collect()
-}
+// Le retrait n'est pas ici: c'est celui de la session qui a pose
+// l'aiguillage (`super::session`), qui ne retire que ce qu'elle a pose et qui
+// est encore la, chaque commande la pose a l'octet pres, `add` devenu `del`
+// (`Plan::arguments_retrait_presents`). Jusqu'a la base `91d614f` il retirait
+// `rule del pref P` (la premiere regle de cette priorite, quelle qu'elle soit)
+// et `route flush table 2847` (toute la table): mesure en namespace jetable
+// sur essai-linux, un tiers pose avant a la meme priorite perdait sa regle, et
+// un tiers qui occupait la table ses routes.
 
 #[cfg(test)]
 mod tests {
@@ -153,6 +140,16 @@ mod tests {
             interface: "bftun0".to_owned(),
             coeur_uid: Some(4242),
         }
+    }
+
+    /// Le retrait de tout ce que la pose a pose, chaque regle a sa priorite.
+    fn retirer(a: &Aiguillage) -> Vec<Cmd> {
+        let p = plan(a);
+        let regles: Vec<Option<u32>> = p.regles_posees().iter().map(|r| r.priorite).collect();
+        p.arguments_retrait_presents(&regles, &vec![true; p.routes_posees().len()])
+            .into_iter()
+            .map(Cmd::ip_plan_tolere)
+            .collect()
     }
 
     fn lignes(cmds: &[Cmd]) -> Vec<String> {
@@ -292,17 +289,6 @@ mod tests {
         );
     }
 
-    /// Le demontage suit aussi bien un montage complet qu'un montage
-    /// interrompu au milieu: s'arreter a la premiere absence laisserait les
-    /// suivantes en place.
-    #[test]
-    fn le_demontage_tolere_ce_qui_manque_deja() {
-        assert!(
-            retirer(&avec_coeur()).iter().all(|c| c.tolerate_failure),
-            "aucune etape de demontage ne doit interrompre les suivantes"
-        );
-    }
-
     /// Les valeurs de routage evitent ce que le noyau se reserve.
     ///
     /// L'ordre des prefs est deja verifie a la COMPILATION, mais une assertion
@@ -436,8 +422,8 @@ mod tests {
 
     /// Le test qui compte: le noyau aiguille-t-il comme la politique le dit.
     ///
-    /// Il execute la sortie REELLE de [`poser`] et [`retirer`], et non une
-    /// copie a la main: une liste recopiee dans un test ne prouve que la
+    /// Il execute la sortie REELLE de [`poser`] et du retrait du plan, et non
+    /// une copie a la main: une liste recopiee dans un test ne prouve que la
     /// copie.
     #[test]
     fn le_noyau_aiguille_comme_la_politique_le_dit() {

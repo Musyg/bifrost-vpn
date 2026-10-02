@@ -223,6 +223,10 @@ fn dans_l_espace_de_noms_le_chemin_par_coeur_porte_le_trafic() {
         uid: None,
     };
     let (publier, suivre) = tokio::sync::watch::channel(Some(coeur_publie));
+    // Le journal des sessions de routage de la recette, pas celui de la
+    // machine: `ip netns exec` ne change pas /run.
+    let journal = std::env::temp_dir().join(format!("bifrost-routage-{}", std::process::id()));
+    bifrost_daemon::tunnel::session::designer_le_journal(journal.clone());
     let mut device = CoeurTunnel::new(
         poignee,
         bifrost_daemon::coeurs::socks::Mandataire::nouveau(facade, compte()),
@@ -316,6 +320,13 @@ fn dans_l_espace_de_noms_le_chemin_par_coeur_porte_le_trafic() {
             "la regle {pref} survit au demontage: {regles}"
         );
     }
+    // La session est sortie du journal avec son demontage.
+    let restantes = std::fs::read_dir(&journal).map(|d| d.count()).unwrap_or(0);
+    assert_eq!(
+        restantes, 0,
+        "la session reste au journal apres le demontage"
+    );
+    let _ = std::fs::remove_dir_all(&journal);
 }
 
 /// Cree l'espace de noms et s'y relance.

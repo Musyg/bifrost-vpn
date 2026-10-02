@@ -495,6 +495,7 @@ ip netns exec "$NS_CLI" unshare --mount --propagation private sh -c '
     --resolveur-binaire "$FAUX_DNSCRYPT" \
     --resolveur-configuration "$WORK/resolveur/dnscrypt-proxy.toml" \
     --resolveur-etat "$WORK/resolveur-etat" \
+    --journal-routage "$WORK/routage" \
   >"$DAEMON_LOG" 2>&1 &
 PID_DAEMON=$!
 for _ in $(seq 1 40); do [ -S "$SOCKET" ] && break; sleep 0.25; done

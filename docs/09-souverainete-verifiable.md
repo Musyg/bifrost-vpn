@@ -480,7 +480,12 @@ change aucune decision de routage et la preuve ne la compare pas: une regle ou
 une route tierce identique a celle du plan, sans etiquette, passe donc pour
 celle du produit. L'etiquette sert au demontage, qui tire du meme plan le
 retrait exact de chaque commande de pose et ne retire rien qui ne la porte pas.
-Il n'y a pas de seconde implementation. Les regles de
+Depuis le 02/10/2026 l'etiquette seule ne designe plus rien: chaque session du
+produit s'inscrit, avant sa premiere commande, au journal des sessions du
+daemon, et le retrait ne vise que ce qu'une session inscrite a pose, par sa
+forme, la priorite que le noyau a donnee a chaque regle et son interface; un
+objet a l'etiquette qu'aucune session inscrite n'explique fait refuser le
+montage, sans rien retirer. Il n'y a pas de seconde implementation. Les regles de
 WireGuard sont posees sans priorite: le plan en deduit l'ordre d'evaluation,
 l'inverse de l'ordre de pose (`fib_default_rule_pref` du noyau), et le banc le
 mesure.

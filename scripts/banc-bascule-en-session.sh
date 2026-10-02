@@ -324,6 +324,7 @@ sudo ip netns exec "$NS_C" setsid "$DAEMON" \
   --coeurs-configurations "$BANC/configurations" \
   --facade 127.0.0.1:1081 \
   --coeur-utilisateur nobody \
+  --journal-routage "$BANC/routage" \
   >"$BANC/daemon.log" 2>&1 &
 echo $! > "$BANC/daemon.pid"
 for _ in $(seq 1 40); do

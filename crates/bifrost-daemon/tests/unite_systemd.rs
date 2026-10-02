@@ -1617,3 +1617,81 @@ fn une_pose_que_la_garde_ne_lit_pas_est_vue() {
         assert_eq!(scripts_nommes(ligne), attendus, "{ligne}");
     }
 }
+
+/// La valeur de `RuntimeDirectoryPreserve=` que systemd retient: la derniere
+/// affectation, dans l'unite puis dans ses drop-ins (systemd.unit(5)); une
+/// affectation vide rend le defaut, `no`. `None`: aucune affectation, le
+/// defaut aussi.
+fn conservation_avec(unite: &str, drop_ins: &[(String, String)]) -> Option<String> {
+    std::iter::once(unite)
+        .chain(drop_ins.iter().map(|(_, texte)| texte.as_str()))
+        .flat_map(directives)
+        .filter(|d| d.cle_abaissee() == "runtimedirectorypreserve")
+        .map(|d| d.valeur)
+        .next_back()
+}
+
+/// Le repertoire d'execution de l'unite survit a l'arret du service.
+///
+/// Il porte le journal des sessions de routage (`tunnel::session`): un daemon
+/// arrete ou tue laisse son routage en place, et le suivant ne retire ce qui
+/// reste que s'il le trouve au journal; sans lui, il refuse de monter. Par
+/// defaut systemd vide ce repertoire a chaque arret, redemarrage automatique
+/// compris (`no`, systemd.exec(5)); `restart` le viderait encore a l'arret
+/// ordonne. `yes` le garde jusqu'au redemarrage de la machine, /run etant un
+/// tmpfs.
+#[test]
+fn le_repertoire_d_execution_survit_a_l_arret_du_service() {
+    let source = unite();
+    let (drop_ins, unite_vue) = drop_ins_livres();
+    assert!(
+        unite_vue,
+        "le parcours de packaging/ n'a pas croise {UNITE_LIVREE}: il ne lit pas ce qu'il croit lire"
+    );
+    assert!(
+        directives(&source)
+            .iter()
+            .any(|d| d.cle == "RuntimeDirectory" && d.valeur == "bifrost"),
+        "l'unite {} ne declare plus /run/bifrost comme repertoire d'execution",
+        chemin_de_l_unite().display()
+    );
+    assert_eq!(
+        conservation_avec(&source, &drop_ins).as_deref(),
+        Some("yes"),
+        "l'unite {} ou un de ses drop-ins vide /run/bifrost a l'arret: le journal \
+         des sessions de routage disparaitrait avec lui",
+        chemin_de_l_unite().display()
+    );
+}
+
+/// La garde voit chaque forme qui rend le defaut: la ligne absente, vide,
+/// `restart`, ou remise a `no` par un drop-in; et une ligne citee en
+/// commentaire ne compte pas.
+#[test]
+fn chaque_forme_qui_vide_le_repertoire_d_execution_est_vue() {
+    let base = "[Service]\nRuntimeDirectory=bifrost\n";
+    let avec = |l: &str| format!("{base}{l}\n");
+    assert_eq!(
+        conservation_avec(&avec("RuntimeDirectoryPreserve=yes"), &[]).as_deref(),
+        Some("yes")
+    );
+    for (unite, drop_ins) in [
+        (base.to_owned(), vec![]),
+        (avec("RuntimeDirectoryPreserve="), vec![]),
+        (avec("RuntimeDirectoryPreserve=restart"), vec![]),
+        (avec("# RuntimeDirectoryPreserve=yes"), vec![]),
+        (
+            avec("RuntimeDirectoryPreserve=yes"),
+            vec![(
+                "packaging/x.service.d/y.conf".to_owned(),
+                "[Service]\nruntimedirectorypreserve = no\n".to_owned(),
+            )],
+        ),
+    ] {
+        assert_ne!(
+            conservation_avec(&unite, &drop_ins).as_deref(),
+            Some("yes"),
+            "{unite}{drop_ins:?}"
+        );
+    }
+}
