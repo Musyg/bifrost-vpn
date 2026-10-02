@@ -32,6 +32,11 @@ pub mod brut;
 /// partout; seul le chargement de la DLL est reserve a Windows.
 pub mod wgnt;
 
+/// Le message d'un chargement de DLL refuse, par code d'erreur. Pur et
+/// compile partout; ses deux appelants, les chargements de Wintun et de
+/// WireGuardNT, n'existent que sous Windows.
+pub mod refus_dll;
+
 #[cfg(target_os = "linux")]
 pub mod linux;
 

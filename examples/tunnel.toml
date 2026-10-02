@@ -59,14 +59,15 @@ persistent_keepalive = 25
 # son auteur n'a pas demande.
 #
 # Pour un coeur, retirer `private_key`, `fwmark`, `routing_table` et la section
-# [peer], puis decrire le serveur ici. Le plus simple est de partir d'un lien de
-# partage (`vless://...` ou `hysteria2://...`) tel que le rend un panneau
-# d'administration: `bifrost-cli` sait le lire et ecrire cette section.
+# [peer], puis decrire le serveur ici. La cle `transport` de la sous-section
+# [coeur.transport] nomme la technique; les autres cles sont celles de cette
+# technique.
 #
 # [coeur]
 # etiquette = "Suisse"
 #
-# [coeur.transport.hysteria2]
+# [coeur.transport]
+# transport = "hysteria2"
 # serveur = "203.0.113.8"
 # port = 8443
 # mot_de_passe = "..."

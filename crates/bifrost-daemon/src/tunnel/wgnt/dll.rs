@@ -113,10 +113,11 @@ impl WireGuardNt {
             )
         };
         if module.is_null() {
-            return Err(Error::Tunnel(format!(
-                "chargement de {} en echec: erreur Win32 {}",
-                path.display(),
-                last_error()
+            // Lu avant tout autre appel, qui pourrait l'ecraser.
+            let code = last_error();
+            let texte = std::io::Error::from_raw_os_error(code as i32).to_string();
+            return Err(Error::Tunnel(crate::tunnel::refus_dll::message(
+                path, code, &texte,
             )));
         }
 
@@ -236,6 +237,32 @@ mod tests {
             Err(e) => e.to_string(),
         };
         assert!(err.contains("WireGuardCreateAdapter"), "{err}");
+    }
+
+    /// Un refus de chargement rend le code que le systeme a donne, nomme, et
+    /// l'indice d'architecture seulement quand ce code est celui du format.
+    ///
+    /// Le meme fichier sert aux deux mesures: lu, il est refuse par son
+    /// format (193); tenu ouvert sans partage, il est refuse avant meme
+    /// d'etre lu (32), et ce refus-la ne dit rien de l'architecture.
+    #[test]
+    fn un_refus_de_chargement_nomme_son_code() {
+        use crate::tunnel::refus_dll::essai::PasUneImage;
+        let erreur = |chemin: &Path| match WireGuardNt::load_from(chemin) {
+            Ok(_) => panic!("un fichier qui n'est pas une image ne se charge pas"),
+            Err(e) => e.to_string(),
+        };
+        let fichier = PasUneImage::nouveau("wgnt");
+
+        let m = erreur(fichier.chemin());
+        assert!(m.contains("ERROR_BAD_EXE_FORMAT (193)"), "{m}");
+        assert!(m.contains("architecture"), "{m}");
+
+        let tenu = fichier.tenir();
+        let m = erreur(fichier.chemin());
+        drop(tenu);
+        assert!(m.contains("ERROR_SHARING_VIOLATION (32)"), "{m}");
+        assert!(!m.contains("architecture"), "{m}");
     }
 
     #[test]

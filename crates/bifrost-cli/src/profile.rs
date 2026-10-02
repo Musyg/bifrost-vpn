@@ -152,6 +152,60 @@ upstream = ["10.2.0.1"]
         load(f.path()).expect("un profil bien range doit se charger");
     }
 
+    /// L'exemple livre, decommente comme il le dit pour un coeur: la section
+    /// `[coeur]` decommentee, `private_key`, `fwmark`, `routing_table` et la
+    /// section `[peer]` retires. Lu par le chemin de la CLI, il doit se charger
+    /// et se valider: c'est le profil que suit qui part de cet exemple.
+    #[test]
+    fn la_variante_coeur_de_l_exemple_se_charge() {
+        let exemple = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/tunnel.toml");
+        let texte = std::fs::read_to_string(&exemple).expect("examples/tunnel.toml");
+        let decommente = decommenter_la_variante_coeur(&texte);
+        let mut profil: toml::Table = decommente
+            .parse()
+            .expect("l'exemple decommente doit rester du TOML");
+        for cle in ["private_key", "fwmark", "routing_table", "peer"] {
+            assert!(
+                profil.remove(cle).is_some(),
+                "l'exemple ne porte plus `{cle}`, que sa variante coeur dit de retirer"
+            );
+        }
+
+        let f = ecrire(&toml::to_string(&profil).unwrap());
+        let cfg = load(f.path())
+            .unwrap_or_else(|e| panic!("la variante coeur de l'exemple doit se charger: {e}"));
+        let profils = cfg.portage.coeurs().expect("un portage par coeur");
+        let hysteria2 = profils
+            .pour("hysteria2")
+            .expect("le profil hysteria2 de l'exemple");
+        assert_eq!(hysteria2.etiquette, "Suisse");
+    }
+
+    /// Le bloc commente qui commence a la ligne `# [coeur]`, decommente en
+    /// place: cette ligne et les lignes de commentaire qui la suivent, jusqu'a
+    /// la premiere qui n'en est pas une.
+    fn decommenter_la_variante_coeur(texte: &str) -> String {
+        let mut dedans = false;
+        let mut trouve = false;
+        let mut sortie = Vec::new();
+        for ligne in texte.lines() {
+            if ligne.trim_end() == "# [coeur]" {
+                dedans = true;
+                trouve = true;
+            }
+            if dedans {
+                if let Some(reste) = ligne.strip_prefix('#') {
+                    sortie.push(reste.strip_prefix(' ').unwrap_or(reste).to_owned());
+                    continue;
+                }
+                dedans = false;
+            }
+            sortie.push(ligne.to_owned());
+        }
+        assert!(trouve, "l'exemple ne porte plus de ligne `# [coeur]`");
+        sortie.join("\n")
+    }
+
     #[test]
     fn un_fichier_absent_donne_un_message_actionnable() {
         let err = load(Path::new("/nexiste/pas/tunnel.toml"))
