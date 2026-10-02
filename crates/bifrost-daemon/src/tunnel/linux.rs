@@ -21,6 +21,7 @@ use wireguard_control::{
 };
 
 use super::netcfg::{self, Cmd};
+use super::session::Session;
 
 #[derive(Default)]
 pub struct LinuxTunnel {
@@ -31,6 +32,11 @@ pub struct LinuxTunnel {
     /// egale par construction au plan dont les commandes sont tirees, pas une
     /// capture de ces commandes, ni un plan recalcule au moment de la lecture.
     routage: Option<Plan>,
+    /// La session de routage de la pose, inscrite au journal avant sa
+    /// premiere commande (`super::session`). Le demontage ne retire que ce
+    /// qu'elle a pose. `None` quand rien n'est monte, ou quand son demontage
+    /// a tout retire.
+    session: Option<Session>,
 }
 
 /// Ce qui porte deja le nom d'interface du profil.
@@ -44,8 +50,9 @@ pub struct LinuxTunnel {
 enum Occupant {
     /// Aucune interface de ce nom.
     Aucun,
-    /// Une interface WireGuard qui porte la cle du profil: le reste d'une
-    /// session du produit, a retirer avant de reposer.
+    /// Une interface WireGuard qui porte la cle du profil. Le reste d'une
+    /// session morte inscrite au journal est retire avant ce constat; celle-ci
+    /// n'est donc a aucune session que le produit connaisse.
     Produit,
     /// Autre chose, que le produit ne retire pas; le texte dit quoi.
     Tiers(&'static str),
@@ -70,9 +77,45 @@ fn occupant_wireguard(lue: Option<&Key>, du_profil: &Key) -> Occupant {
     }
 }
 
+/// La cle publique, en base64, de l'interface WireGuard de ce nom; `None` si
+/// aucune interface WireGuard ne le porte, si elle n'a pas de cle, ou si elle
+/// ne se lit pas. C'est ce qui designe l'interface d'une session du journal.
+pub(super) fn cle_de_l_interface(nom: &str) -> Option<String> {
+    let uevent = std::fs::read_to_string(format!("/sys/class/net/{nom}/uevent")).ok()?;
+    if !est_wireguard(&uevent) {
+        return None;
+    }
+    let iface: InterfaceName = nom.parse().ok()?;
+    Device::get(&iface, Backend::Kernel)
+        .ok()?
+        .public_key
+        .map(|k| k.to_base64())
+}
+
 impl LinuxTunnel {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// La cle publique du profil, en base64: celle que la session inscrit.
+    fn cle_du_profil(cfg: &TunnelConfig) -> Result<String> {
+        let wg = cfg.wireguard()?;
+        Ok(Key::from_base64(wg.private_key.as_str())
+            .map_err(|e| Error::Tunnel(format!("cle privee invalide: {e:?}")))?
+            .get_public()
+            .to_base64())
+    }
+
+    /// Retire ce que la session tenue a pose, si elle est encore la (un
+    /// demontage precedent qui n'a pas abouti). En erreur, elle reste tenue.
+    fn retirer_la_session(&mut self) -> Result<()> {
+        if let Some(s) = self.session.take()
+            && let Err(e) = s.retirer()
+        {
+            self.session = Some(s);
+            return Err(e);
+        }
+        Ok(())
     }
 
     fn iface(cfg: &TunnelConfig) -> Result<InterfaceName> {
@@ -186,14 +229,18 @@ impl LinuxTunnel {
 impl TunnelDevice for LinuxTunnel {
     fn up(&mut self, cfg: &TunnelConfig) -> Result<()> {
         cfg.validate()?;
-        // Les deux listes de routage sont rendues ICI, avant la premiere
-        // commande. `netcfg` refuse une table que le noyau se reserve, meme si
-        // la validation l'a laissee passer; refuse ici, rien n'a encore ete
-        // cree ni retire. Rendues plus bas, un refus de la pose laisserait une
-        // interface creee sans demontage possible.
+        // Le plan et sa pose sont rendus ICI, avant la premiere commande.
+        // `netcfg` refuse une table que le noyau se reserve, meme si la
+        // validation l'a laissee passer; refuse ici, rien n'a encore ete cree
+        // ni retire.
         let pose = netcfg::add_routing(cfg)?;
-        let demontage = netcfg::teardown(cfg)?;
-        let retrait_routage = netcfg::retrait_routage(cfg)?;
+        let plan = netcfg::plan(cfg, "pose du routage")?
+            .ok_or_else(|| Error::Tunnel("ce peripherique ne monte que du WireGuard".into()))?;
+        let cle = Self::cle_du_profil(cfg)?;
+
+        // Une session de ce peripherique que son demontage n'a pas pu retirer
+        // tient encore ce qu'elle a pose: la retirer d'abord.
+        self.retirer_la_session()?;
 
         if !std::path::Path::new("/sys/module/wireguard").exists()
             && !Self::link_exists(&cfg.interface)
@@ -204,20 +251,28 @@ impl TunnelDevice for LinuxTunnel {
             tracing::debug!("module wireguard pas encore charge");
         }
 
-        // Une interface residuelle d'une session precedente porterait des
-        // routes obsoletes: on repart d'un etat connu. Mais seulement si elle
-        // est au produit; celle d'un tiers qui porte le meme nom n'est ni
+        // Avant la premiere commande qui pose: lire les regles, les routes et
+        // le journal des sessions; refuser devant une autre session vivante ou
+        // devant un objet a l'etiquette du produit qu'aucune session inscrite
+        // n'explique; retirer ce que des sessions mortes ont pose, interface
+        // comprise, et cela seul; puis refuser une table ou une marque qu'un
+        // tiers emploie deja. Refuse ici, rien n'a ete pose.
+        super::session::preparer(&plan)?;
+
+        // L'interface qui porte le nom du profil n'est retiree que par la
+        // session morte qui l'a creee, juste avant. Celle qui reste n'est ni
         // retiree ni reprise.
         match Self::occupant(cfg)? {
             Occupant::Aucun => {}
             Occupant::Produit => {
-                tracing::warn!(
-                    interface = %cfg.interface,
-                    "interface residuelle detectee, demontage prealable"
-                );
-                for cmd in &demontage {
-                    Self::run(cmd)?;
-                }
+                return Err(Error::Tunnel(format!(
+                    "montage refuse: l'interface {nom} existe deja et porte la cle \
+                     du profil, mais aucune session du produit inscrite au journal \
+                     ne permet de la retirer. Rien n'est retire ni pose. Si elle \
+                     reste d'une session du produit dont le journal a disparu, la \
+                     retirer a la main (ip link del dev {nom})",
+                    nom = cfg.interface,
+                )));
             }
             Occupant::Tiers(quoi) => {
                 return Err(Error::Tunnel(format!(
@@ -231,24 +286,20 @@ impl TunnelDevice for LinuxTunnel {
             }
         }
 
-        // Avant la premiere commande qui pose: lire les regles et les routes,
-        // retirer ce qu'une session precedente du produit a laisse (seulement
-        // ce qui porte son etiquette), puis refuser une table ou une marque
-        // qu'un tiers emploie deja. Refuse ici, rien n'a ete pose.
-        if let Some(plan) = netcfg::plan(cfg, "pose du routage")? {
-            super::occupation::preparer(&plan, || {
-                for cmd in &retrait_routage {
-                    let _ = Self::run(cmd);
-                }
-            })?;
-        }
+        // Inscrite avant la premiere commande qui pose: une session
+        // interrompue a n'importe quel moment de la pose est connue du
+        // montage suivant.
+        let mut session = Session::ouvrir(&plan, Some(cle))?;
 
-        Self::run(&netcfg::create_link(cfg)).map_err(|e| {
-            Error::Tunnel(format!(
+        if let Err(e) = Self::run(&netcfg::create_link(cfg)) {
+            if let Err(r) = session.retirer() {
+                tracing::error!(error = %r, "session laissee au journal");
+            }
+            return Err(Error::Tunnel(format!(
                 "{e}. Le module noyau wireguard est-il disponible \
                  (modprobe wireguard) ?"
-            ))
-        })?;
+            )));
+        }
 
         // Si la suite echoue, l'interface reste orpheline: on nettoie avant de
         // remonter l'erreur, sinon la tentative suivante repart d'un etat sale.
@@ -265,11 +316,20 @@ impl TunnelDevice for LinuxTunnel {
 
         if let Err(e) = result {
             tracing::error!(error = %e, "montage incomplet, nettoyage");
-            for cmd in &demontage {
-                let _ = Self::run(cmd);
+            // Ce que la session a pose, et son interface si elle porte sa cle;
+            // puis l'interface que ce montage vient de creer, par son nom,
+            // meme si la cle n'a pas pu y etre posee.
+            let retrait = session.retirer();
+            let _ = Self::run(&netcfg::retrait_lien(cfg));
+            if let Err(r) = retrait {
+                tracing::error!(error = %r, "session laissee au journal");
             }
             return Err(e);
         }
+
+        // Les priorites que le noyau a donnees aux regles posees sans `pref`:
+        // le demontage designe chaque regle par la sienne.
+        session.relever();
 
         let wg = cfg.wireguard()?;
         tracing::info!(
@@ -284,31 +344,19 @@ impl TunnelDevice for LinuxTunnel {
         // au plan des commandes, ce n'est pas une capture des commandes. La
         // premiere evaluation a reussi, sur la meme entree: celle-ci aussi.
         self.routage = netcfg::plan(cfg, "declaration du routage")?;
+        self.session = Some(session);
         Ok(())
     }
 
     fn down(&mut self, cfg: &TunnelConfig) -> Result<()> {
         // Une table reservee est refusee sans qu'aucune commande parte: voir
-        // `netcfg::teardown`. Les regles et les routes retirees sont celles
-        // que le produit pose, et elles seules (`netcfg::retrait_routage`).
-        for cmd in netcfg::retrait_routage(cfg)? {
-            Self::run(&cmd)?;
-        }
-        // L'interface, seulement si elle est au produit: apres un montage
-        // refuse, celle qui porte le nom du profil peut etre d'un tiers.
-        if cfg.portage.wireguard().is_some() {
-            match Self::occupant(cfg)? {
-                Occupant::Aucun => {}
-                Occupant::Produit => Self::run(&netcfg::retrait_lien(cfg))?,
-                Occupant::Tiers(quoi) => {
-                    tracing::warn!(
-                        interface = %cfg.interface,
-                        quoi,
-                        "interface d'un tiers laissee en place"
-                    );
-                }
-            }
-        }
+        // `netcfg::plan`.
+        netcfg::plan(cfg, "demontage")?;
+        // Ce que la session de la pose a pose, et cela seul, son interface
+        // comprise; sans session (jamais monte, ou montage refuse), rien. En
+        // erreur, la session reste tenue et inscrite: un nouvel essai est
+        // possible.
+        self.retirer_la_session()?;
         // Plus rien de pose: la declaration ne doit plus rendre l'ancien plan.
         self.routage = None;
         tracing::info!(interface = %cfg.interface, "tunnel demonte");

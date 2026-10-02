@@ -939,6 +939,17 @@ impl Supervisor {
     }
 
     fn connect(&mut self, cfg: Box<TunnelConfig>) -> Result<()> {
+        // Avant tout le reste: une demande de connexion pendant qu'une autre
+        // tient le tunnel ne change rien a celle-ci, ni la demarche qu'elle
+        // suit, ni le peripherique en service, que sa deconnexion doit
+        // demonter.
+        if *self.machine.state() != State::Disconnected {
+            return Err(Error::Config(format!(
+                "deja en etat {}: deconnecter avant de reconnecter",
+                self.machine.state().name()
+            )));
+        }
+
         // ICI, et pas plus bas: la cle doit designer le reseau qu'on traverse,
         // pas le tunnel. Des que le tunnel est monte, la route par defaut est
         // la sienne et la cle changerait de sens sans changer de forme.
@@ -981,12 +992,6 @@ impl Supervisor {
             Portage::Coeur(_) => Voie::ParCoeur,
         })?;
         cfg.validate()?;
-        if *self.machine.state() != State::Disconnected {
-            return Err(Error::Config(format!(
-                "deja en etat {}: deconnecter avant de reconnecter",
-                self.machine.state().name()
-            )));
-        }
         self.last_error = None;
 
         self.push(Event::Connect(cfg));
@@ -1490,13 +1495,32 @@ impl Supervisor {
         }
         // Le prefixe `MARQUEUR_COEUR` n'est pas cosmetique: c'est ce que
         // `is_retryable` reconnait pour ne PAS retenter. Voir la ou il est lu.
+        //
+        // La configuration porte des secrets: ce lancement-ci l'ecrit sous un
+        // nom a lui (`lancement::chemin_configuration`), le coeur la retire en
+        // s'arretant (`superviseur::demarrer`), et un lancement qui n'aboutit
+        // pas la retire ici, l'atelier ne l'ayant peut-etre jamais recue.
+        let ecrite = prepare.configuration.clone();
+        let retirer = || match std::fs::remove_file(&ecrite) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => tracing::warn!(
+                erreur = %e,
+                configuration = %ecrite.display(),
+                "configuration d'un coeur non lance, non retiree"
+            ),
+        };
         configuration::ecrire(&prepare.configuration, &valeur).map_err(|e| {
+            retirer();
             Error::Tunnel(format!("{MARQUEUR_COEUR}: configuration non ecrite: {e}"))
         })?;
 
         let vivant = atelier
             .lancer(coeur, prepare, &l.secret, l.socks.adresse)
-            .map_err(|e| Error::Tunnel(format!("{MARQUEUR_COEUR}: {e}")))?;
+            .map_err(|e| {
+                retirer();
+                Error::Tunnel(format!("{MARQUEUR_COEUR}: {e}"))
+            })?;
         tracing::info!(
             coeur = coeur.executable(),
             pid = ?vivant.pid,
@@ -2144,6 +2168,15 @@ impl Supervisor {
     /// situation ou l'utilisateur croit etre protege. Les filtres restent en
     /// place jusqu'a un `disconnect` explicite ou un `--cleanup-firewall`.
     fn on_shutdown(&mut self) {
+        // Le coeur ne survit pas au daemon (PDEATHSIG, Job). L'arreter ici,
+        // pendant que l'atelier tourne encore, retire aussi sa configuration,
+        // qui porte des secrets, du repertoire d'execution que l'unite garde
+        // d'un demarrage du service au suivant.
+        if let Some(atelier) = &self.atelier
+            && let Err(raison) = atelier.arreter()
+        {
+            tracing::warn!(%raison, "coeur non arrete a l'arret du daemon");
+        }
         if self.machine.state().expects_kill_switch() {
             tracing::warn!(
                 "arret du daemon avec le kill switch arme: le trafic reste \
@@ -2942,7 +2975,29 @@ mod tests {
     ) -> (Result<()>, Vec<String>, Vec<FirewallPolicy>) {
         let vues = Arc::new(Mutex::new(Vec::new()));
         let politiques = Arc::new(Mutex::new(Vec::new()));
-        let mut sup = Supervisor::new(
+        let mut sup = a_deux_voies(
+            decision,
+            carnetier,
+            avec_chemin_coeur,
+            vues.clone(),
+            politiques.clone(),
+        );
+        let issue = sup.connect(configuration);
+        let montes = vues.lock().unwrap().clone();
+        let posees = politiques.lock().unwrap().clone();
+        (issue, montes, posees)
+    }
+
+    /// Un superviseur a deux voies, chacune un peripherique qui inscrit ses
+    /// montages et ses demontages dans `vues`.
+    fn a_deux_voies(
+        decision: Decision,
+        carnetier: Carnetier,
+        avec_chemin_coeur: bool,
+        vues: Arc<Mutex<Vec<String>>>,
+        politiques: Arc<Mutex<Vec<FirewallPolicy>>>,
+    ) -> Supervisor {
+        Supervisor::new(
             Box::new(FauxKillSwitch {
                 vues: politiques.clone(),
             }),
@@ -2986,11 +3041,64 @@ mod tests {
                     bascule: bascule_de_recette().0,
                 }),
             },
+        )
+    }
+
+    /// Une connexion demandee pendant qu'une autre tient le tunnel est
+    /// refusee sans rien changer a celle-ci: le peripherique en service reste
+    /// le sien, et la deconnexion demonte celui qui a ete monte.
+    #[test]
+    fn une_connexion_refusee_ne_change_pas_de_peripherique() {
+        let vues = Arc::new(Mutex::new(Vec::new()));
+        let politiques = Arc::new(Mutex::new(Vec::new()));
+        let mut sup = a_deux_voies(
+            Decision::default(),
+            carnetier_muet(),
+            true,
+            vues.clone(),
+            politiques,
         );
-        let issue = sup.connect(configuration);
-        let montes = vues.lock().unwrap().clone();
-        let posees = politiques.lock().unwrap().clone();
-        (issue, montes, posees)
+        sup.connect(cfg()).expect("un tunnel direct doit monter");
+        let e = sup
+            .connect(cfg_par_coeur())
+            .expect_err("une seconde connexion doit etre refusee");
+        assert!(e.to_string().contains("deja en etat"), "{e}");
+        // Le desarmement est la derniere action de la deconnexion, et le kill
+        // switch de doublure de ces recettes se dit encore arme apres coup:
+        // seule son erreur a lui est admise ici.
+        if let Err(e) = sup.disconnect() {
+            assert!(matches!(e, Error::Firewall(_)), "{e}");
+        }
+        assert_eq!(
+            *vues.lock().unwrap(),
+            vec!["up:direct", "down:direct"],
+            "le demontage doit viser le peripherique monte, et lui seul"
+        );
+    }
+
+    /// L'arret du daemon ne demonte pas le tunnel: le kill switch reste arme
+    /// et le routage pose reste en place, que le daemon suivant retrouve par
+    /// le journal des sessions de routage.
+    #[test]
+    fn l_arret_du_daemon_ne_demonte_pas_le_tunnel() {
+        let vues = Arc::new(Mutex::new(Vec::new()));
+        let politiques = Arc::new(Mutex::new(Vec::new()));
+        let mut sup = a_deux_voies(
+            Decision::default(),
+            carnetier_muet(),
+            true,
+            vues.clone(),
+            politiques,
+        );
+        sup.connect(cfg()).expect("un tunnel direct doit monter");
+        let (envoi, reception) = std::sync::mpsc::channel();
+        envoi.send(Cmd::Shutdown).unwrap();
+        sup.run(reception);
+        assert_eq!(
+            *vues.lock().unwrap(),
+            vec!["up:direct"],
+            "l'arret ne demonte rien"
+        );
     }
 
     /// Un profil WireGuard monte la voie directe, meme quand l'autre existe.

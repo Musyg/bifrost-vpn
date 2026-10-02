@@ -64,6 +64,19 @@ Restart=on-failure
 RestartSec=2
 RuntimeDirectory=bifrost
 RuntimeDirectoryMode=0755
+# /run/bifrost survit a l'arret du service, et ne survit pas au redemarrage de
+# la machine (/run est un tmpfs). Il porte le journal des sessions de routage
+# (/run/bifrost/routage): ce que chaque session a pose, que le montage suivant
+# retire, et cela seul. Un daemon arrete ou tue laisse son routage en place,
+# comme son kill switch (voir plus haut); sans son journal, le daemon suivant
+# refuserait de monter devant des regles qu'il ne saurait plus attribuer
+# (mesure en namespace jetable apres un arret ordonne). Par defaut, systemd vide
+# ce repertoire a chaque arret, redemarrage automatique compris
+# (RuntimeDirectoryPreserve=no, systemd.exec(5)). Les configurations des
+# coeurs, qui portent des secrets, n'y survivent pas a leur coeur, et le
+# daemon retire au demarrage celles d'un processus mort. Garde:
+# crates/bifrost-daemon/tests/unite_systemd.rs.
+RuntimeDirectoryPreserve=yes
 StateDirectory=bifrost
 
 # --- Durcissement ---

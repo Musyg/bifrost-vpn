@@ -174,6 +174,23 @@ struct Args {
     #[arg(long, value_name = "REP", default_value = CONFIGURATIONS_PAR_DEFAUT)]
     coeurs_configurations: std::path::PathBuf,
 
+    /// Ou tenir le journal des sessions de routage: ce que chaque session a
+    /// pose, inscrit avant sa premiere commande et efface quand son demontage
+    /// a tout retire.
+    ///
+    /// Un repertoire d'execution, efface au redemarrage de la machine comme
+    /// les regles et les routes qu'il decrit. Le montage ne retire un objet a
+    /// l'etiquette du produit que s'il est a une session morte de ce journal,
+    /// et refuse devant tout autre: un daemon lance sur un autre journal ne
+    /// reconnait pas les sessions de celui-ci.
+    #[cfg(target_os = "linux")]
+    #[arg(
+        long,
+        value_name = "REP",
+        default_value = bifrost_daemon::tunnel::session::JOURNAL_PAR_DEFAUT
+    )]
+    journal_routage: std::path::PathBuf,
+
     /// Port SOCKS local sur lequel le coeur ecoutera.
     ///
     /// Sur la boucle locale uniquement, ce que la configuration engendree
@@ -2434,6 +2451,28 @@ async fn run(args: Args) -> anyhow::Result<()> {
     #[cfg(windows)]
     bifrost_daemon::anti_orphelin::armer_pour_le_processus().context("garde anti-orphelin")?;
 
+    // Avant tout montage: le journal des sessions de routage.
+    #[cfg(target_os = "linux")]
+    bifrost_daemon::tunnel::session::designer_le_journal(args.journal_routage.clone());
+    // Avant tout lancement de coeur: les configurations que plus aucun
+    // processus ne tient. Elles portent des secrets, et leur repertoire
+    // survit a l'arret du service.
+    #[cfg(any(target_os = "linux", windows))]
+    match bifrost_daemon::coeurs::lancement::retirer_les_configurations_mortes(
+        &args.coeurs_configurations,
+    ) {
+        Ok(retirees) => {
+            for c in &retirees {
+                tracing::info!(configuration = %c.display(), "configuration d'un coeur arrete retiree");
+            }
+        }
+        Err(e) => tracing::warn!(
+            erreur = %e,
+            repertoire = %args.coeurs_configurations.display(),
+            "configurations des coeurs non relues au demarrage"
+        ),
+    }
+
     let firewall = bifrost_firewall::new().context("initialisation du kill switch")?;
     let tunnel = bifrost_daemon::tunnel::new().context("initialisation du device tunnel")?;
     let dns = bifrost_dns::new().context("initialisation du DNS")?;
@@ -3003,6 +3042,30 @@ mod tests {
         code.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
             .filter(|mot| *mot == nom)
             .count()
+    }
+
+    /// Le journal des sessions de routage est designe, et les configurations
+    /// des coeurs que plus aucun processus ne tient retirees, avant que le
+    /// superviseur existe: aucun montage ni aucun lancement ne les precede.
+    #[test]
+    fn run_prepare_le_journal_et_les_configurations_avant_le_superviseur() {
+        let source = include_str!("main.rs");
+        let debut = source
+            .find("\nasync fn run(args: Args)")
+            .expect("fn run dans main.rs");
+        let fin = debut + source[debut..].find("\n}\n").expect("fin de fn run");
+        let compact: String = code_seul(&source[debut..fin]).split_whitespace().collect();
+        let superviseur = compact
+            .find("Supervisor::new(")
+            .expect("le superviseur est construit dans run");
+        for appel in [
+            "bifrost_daemon::tunnel::session::designer_le_journal(args.journal_routage.clone());",
+            "bifrost_daemon::coeurs::lancement::retirer_les_configurations_mortes(&args.coeurs_configurations",
+        ] {
+            assert_eq!(compact.matches(appel).count(), 1, "{appel} dans run");
+            let ici = compact.find(appel).expect("present");
+            assert!(ici < superviseur, "{appel} doit preceder le superviseur");
+        }
     }
 
     /// Une fois le superviseur lance, `run` n'a plus qu'une issue:

@@ -2,10 +2,16 @@
 
 pub mod netcfg;
 
-/// Ce qu'un tiers occupe deja de ce que le produit va poser, lu dans le noyau
-/// avant la premiere commande. Sa lecture des trames est pure et compilee
-/// partout; le canal netlink n'existe que sous Linux.
+/// Les regles et les routes que le noyau porte deja, lues avant la premiere
+/// commande et autour de chaque retrait. Sa lecture des trames est pure et
+/// compilee partout; le canal netlink n'existe que sous Linux.
 mod occupation;
+
+/// Les sessions de routage du produit sous Linux: le journal de ce que
+/// chacune a pose, et ce qu'un montage ou un demontage en retire. Le
+/// jugement est pur et compile partout; le journal et le noyau n'existent
+/// que sous Linux.
+pub mod session;
 
 /// Qui entre dans le TUN et qui en sort, pour le chemin par coeur. Pur, comme
 /// `netcfg`: il rend des commandes, il n'execute rien.

@@ -13,6 +13,7 @@
 //! poignee du Job se ferme, ce que la mort du processus fait toujours.
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -277,6 +278,34 @@ fn dire(coeur: Coeur, ligne: &str, secret: &str) {
     );
 }
 
+/// La configuration d'un lancement, retiree du disque quand le coeur n'en a
+/// plus l'usage: a son arret, a sa mort, a l'echec de son lancement, et quand
+/// celui qui le tient disparait. Elle porte le secret de l'API de controle et
+/// ceux du profil, et vit dans un repertoire que l'arret du service ne vide
+/// pas.
+struct ConfigurationTenue(PathBuf);
+
+impl Drop for ConfigurationTenue {
+    fn drop(&mut self) {
+        // Un fichier ordinaire, et rien d'autre: c'est ce que le lancement a
+        // ecrit. Un chemin qui designe autre chose (un peripherique, un
+        // repertoire, un lien) n'est pas a retirer.
+        match std::fs::symlink_metadata(&self.0) {
+            Ok(m) if m.file_type().is_file() => {}
+            _ => return,
+        }
+        match std::fs::remove_file(&self.0) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => tracing::warn!(
+                erreur = %e,
+                configuration = %self.0.display(),
+                "configuration d'un coeur arrete non retiree"
+            ),
+        }
+    }
+}
+
 /// Un coeur en cours d'execution.
 ///
 /// Le `Debug` est ecrit a la main plus bas: le derive afficherait le secret de
@@ -296,6 +325,10 @@ pub struct CoeurEnCours {
     /// superviseur: c'est sa fermeture qui tue le coeur.
     #[cfg(windows)]
     _job: job::Job,
+    /// Declaree APRES l'enfant: les champs tombent dans l'ordre, le
+    /// processus est donc tue (`kill_on_drop`) avant que sa configuration
+    /// soit retiree.
+    _configuration: ConfigurationTenue,
 }
 
 impl std::fmt::Debug for CoeurEnCours {
@@ -464,6 +497,9 @@ pub async fn demarrer(
     lancement: &Lancement,
     secret: &str,
 ) -> anyhow::Result<CoeurEnCours> {
+    // Des maintenant: toute sortie de cette fonction sans coeur vivant retire
+    // la configuration, et le coeur lance l'emporte avec lui.
+    let configuration = ConfigurationTenue(lancement.configuration.clone());
     if !binaire_present(lancement) {
         anyhow::bail!(
             "{} introuvable a {}: installer le coeur ou corriger le repertoire",
@@ -559,6 +595,7 @@ pub async fn demarrer(
         uid: lancement.utilisateur.map(|u| u.uid),
         #[cfg(windows)]
         _job,
+        _configuration: configuration,
     };
 
     let resultat = match en_cours.api {

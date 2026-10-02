@@ -352,6 +352,11 @@ mod sous_unix {
             .unwrap();
         let (poignee, actif, tache) = bifrost_daemon::coeurs::atelier::ouvrir();
         runtime.spawn(tache);
+        // Une poignee de plus, tenue par la recette: l'atelier reste ouvert
+        // quand le superviseur s'en va, et ce que l'arret du daemon fait du
+        // coeur se mesure sans que la fermeture de l'atelier le fasse a sa
+        // place.
+        let _atelier_ouvert = poignee.clone();
 
         // La sonde de vitalite s'assemble ici comme dans `main.rs`: elle vit
         // sur le runtime, comme l'atelier. Elle n'est pas ce que cette recette
@@ -447,8 +452,21 @@ mod sous_unix {
             .expect("le superviseur doit repondre")
             .expect("la connexion par coeur doit aboutir");
 
-        // 1. La configuration a ete ECRITE, et elle porte le profil.
-        let ecrite = configurations.join("sing-box.json");
+        // 1. La configuration a ete ECRITE, une seule, et elle porte le profil.
+        let ecrites = configurations_ecrites(&configurations);
+        assert_eq!(
+            ecrites.len(),
+            1,
+            "une configuration par coeur lance: {ecrites:?}"
+        );
+        let ecrite = ecrites[0].clone();
+        assert!(
+            ecrite
+                .file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with("sing-box-")),
+            "{}",
+            ecrite.display()
+        );
         let texte = std::fs::read_to_string(&ecrite)
             .unwrap_or_else(|e| panic!("{} non lisible: {e}", ecrite.display()));
         assert!(
@@ -609,9 +627,18 @@ mod sous_unix {
                 montes.iter().all(|(_, arme)| *arme),
                 "le kill switch n'a pas ete baisse pendant la reprise: {montes:?}"
             );
+
+            // Le coeur mort a emporte sa configuration; celle du coeur relance
+            // est la seule.
+            let apres = configurations_ecrites(&configurations);
+            assert!(
+                !ecrite.exists(),
+                "la configuration du coeur mort doit partir"
+            );
+            assert_eq!(apres.len(), 1, "celle du coeur relance, seule: {apres:?}");
         }
 
-        // 7. La deconnexion le tue.
+        // 7. La deconnexion le tue, et sa configuration part avec lui.
         let (repondre, reponse) = tokio::sync::oneshot::channel();
         tx.send(Cmd::Disconnect(repondre)).unwrap();
         runtime
@@ -626,10 +653,169 @@ mod sous_unix {
                 "le coeur doit mourir avec la connexion"
             );
         }
+        assert_eq!(
+            configurations_ecrites(&configurations),
+            Vec::<PathBuf>::new(),
+            "aucune configuration ne survit a la deconnexion"
+        );
 
+        // 8. L'arret du daemon, connexion en cours: le coeur s'arrete et sa
+        //    configuration part avant que le daemon s'en aille.
+        let (repondre, reponse) = tokio::sync::oneshot::channel();
+        tx.send(Cmd::Connect(configuration_par_coeur(), repondre))
+            .unwrap();
+        runtime
+            .block_on(reponse)
+            .expect("le superviseur doit repondre")
+            .expect("la seconde connexion par coeur doit aboutir");
+        assert_eq!(
+            configurations_ecrites(&configurations).len(),
+            1,
+            "la configuration du coeur de la seconde connexion"
+        );
+        let second = pid_qui_ecoute(api).ok();
         let _ = tx.send(Cmd::Shutdown);
         let _ = fil.join();
+        assert_eq!(
+            configurations_ecrites(&configurations),
+            Vec::<PathBuf>::new(),
+            "aucune configuration ne survit a l'arret du daemon"
+        );
+        if let Some(pid) = second {
+            assert!(
+                attendre_mort(pid, Duration::from_secs(5)),
+                "le coeur doit mourir avec l'arret du daemon"
+            );
+        }
         let _ = std::fs::remove_dir_all(&rep);
+    }
+
+    /// Un lancement que l'atelier ne recoit pas ne laisse pas de configuration:
+    /// le superviseur l'a ecrite, l'atelier ferme ne l'a jamais eue, et c'est
+    /// le superviseur qui la retire.
+    #[test]
+    fn un_lancement_que_l_atelier_ne_recoit_pas_ne_laisse_aucune_configuration() {
+        let rep = repertoire_temporaire("atelier-ferme");
+        // Tenus jusqu'a la fin: aucun coeur ne sera lance, mais les adresses
+        // doivent rester a cette recette.
+        let reserve_api = bifrost_daemon::coeurs::port::reserver().unwrap();
+        let api = reserve_api.port();
+        let mandataire_mort = bifrost_daemon::coeurs::port::port_sans_personne().unwrap();
+        let socks = bifrost_daemon::coeurs::socks::Mandataire::nouveau(
+            mandataire_mort.adresse(),
+            bifrost_daemon::coeurs::socks::Identifiants::nouveaux("bifrost", "recette").unwrap(),
+        );
+        let secret = bifrost_daemon::coeurs::alea::secret().unwrap();
+        // L'enrobage n'est jamais execute: il est la pour que le binaire soit
+        // present et que le superviseur aille jusqu'a ecrire la configuration.
+        let binaires = poser_l_enrobage(&rep, api, &secret, &[]);
+        let configurations = rep.join("configurations");
+
+        // L'atelier est ferme avant le premier lancement: sa tache n'est
+        // jamais executee, et sa reception tombe avec elle.
+        let (poignee, actif, tache) = bifrost_daemon::coeurs::atelier::ouvrir();
+        drop(tache);
+        let adresse_du_coeur = bifrost_daemon::coeurs::vitalite::Adresse {
+            api: std::net::SocketAddr::from(([127, 0, 0, 1], api)),
+            secret: secret.clone(),
+            selecteur: bifrost_daemon::supervisor::SELECTEUR.to_owned(),
+        };
+        let (sonde, _veille) =
+            bifrost_daemon::coeurs::vitalite::ouvrir(adresse_du_coeur.clone(), actif.clone());
+        let (bascule, _conduite) =
+            bifrost_daemon::coeurs::bascule::ouvrir(adresse_du_coeur, actif.clone());
+
+        let vues = Arc::new(Mutex::new(Vec::new()));
+        let arme = Arc::new(Mutex::new(false));
+        let superviseur = Supervisor::new(
+            Box::new(KillSwitchTemoin {
+                posees: Arc::new(Mutex::new(Vec::new())),
+                arme: arme.clone(),
+            }),
+            Box::new(TunnelTemoin {
+                nom: "direct",
+                vues: vues.clone(),
+                arme: arme.clone(),
+                coeur_actif: actif.clone(),
+            }),
+            Box::new(DnsMuet),
+            IdentiteCoeur::default(),
+            Resolveur::default(),
+            Equipement {
+                decision: Decision::default(),
+                carnetier: Carnetier {
+                    cle: || Err("recette: reseau non identifie".to_owned()),
+                    noter: |_, _, _| Ok(()),
+                    souvenir: |_| Ok(bifrost_evasion::MemoireReseau::vierge()),
+                    aujourd_hui: || Ok(bifrost_evasion::Date::new(2026, 6, 1)),
+                },
+                atelier: Some(poignee),
+                chemin_coeur: Some(CheminCoeur {
+                    tunnel: Box::new(TunnelTemoin {
+                        nom: "coeur",
+                        vues: vues.clone(),
+                        arme,
+                        coeur_actif: actif,
+                    }),
+                    emplacements: bifrost_daemon::coeurs::lancement::Emplacements {
+                        binaires,
+                        configurations: configurations.clone(),
+                    },
+                    socks,
+                    api,
+                    secret,
+                    sonde,
+                    bascule,
+                }),
+            },
+        );
+
+        // Sur un fil systeme ordinaire, comme en production.
+        let (tx, rx) = mpsc::channel::<Cmd>();
+        let fil = std::thread::spawn(move || superviseur.run(rx));
+        let (repondre, reponse) = tokio::sync::oneshot::channel();
+        tx.send(Cmd::Connect(configuration_par_coeur(), repondre))
+            .unwrap();
+        let e = reponse
+            .blocking_recv()
+            .expect("le superviseur doit repondre")
+            .expect_err("un atelier ferme ne lance aucun coeur");
+        let _ = tx.send(Cmd::Shutdown);
+        let _ = fil.join();
+        assert!(e.to_string().contains("atelier"), "{e}");
+        // Le superviseur est alle jusqu'a l'ecriture: son repertoire existe.
+        assert!(
+            configurations.is_dir(),
+            "la configuration n'a pas ete ecrite: la recette ne mesure rien"
+        );
+        assert_eq!(
+            configurations_ecrites(&configurations),
+            Vec::<PathBuf>::new(),
+            "la configuration d'un lancement que l'atelier n'a pas recu doit partir"
+        );
+        assert!(
+            !vues
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(n, _)| n.starts_with("up:")),
+            "aucun peripherique ne monte sans coeur"
+        );
+        drop(reserve_api);
+        let _ = std::fs::remove_dir_all(&rep);
+    }
+
+    /// Les configurations de coeur presentes dans `rep`, triees.
+    fn configurations_ecrites(rep: &Path) -> Vec<PathBuf> {
+        let mut v: Vec<PathBuf> = match std::fs::read_dir(rep) {
+            Ok(l) => l
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| p.extension().is_some_and(|x| x == "json"))
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+        v.sort();
+        v
     }
 
     /// Tue un processus par son PID, jamais par un motif de nom.

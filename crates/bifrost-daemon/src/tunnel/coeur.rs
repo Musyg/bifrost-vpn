@@ -64,6 +64,8 @@ use super::aiguillage;
 #[cfg(target_os = "linux")]
 use super::netcfg::{self, Cmd};
 #[cfg(target_os = "linux")]
+use super::session::Session;
+#[cfg(target_os = "linux")]
 use bifrost_core::routage::Plan;
 #[cfg(target_os = "linux")]
 use std::process::{Command, Stdio};
@@ -107,6 +109,12 @@ pub struct CoeurTunnel {
     /// de ces commandes.
     #[cfg(target_os = "linux")]
     routage: Option<Plan>,
+    /// La session de routage de l'aiguillage, inscrite au journal avant sa
+    /// premiere commande (`super::session`). Le demontage ne retire que ce
+    /// qu'elle a pose. `None` quand rien n'est monte, ou quand son demontage a
+    /// tout retire.
+    #[cfg(target_os = "linux")]
+    session: Option<Session>,
     /// Sous Windows, le produit pose lui-meme les routes du coeur sur le TUN
     /// (`ipcfg::apply`, la route par defaut de chaque famille adressee);
     /// l'echappement du coeur, lui, passe par sa configuration (liaison de
@@ -140,6 +148,8 @@ impl CoeurTunnel {
             coeur_actif,
             monte: None,
             routage: None,
+            #[cfg(target_os = "linux")]
+            session: None,
         }
     }
 
@@ -184,17 +194,34 @@ impl CoeurTunnel {
     }
 }
 
-/// Avant la premiere commande du chemin par coeur: retire ce qu'une session
-/// precedente du produit a laisse (seulement ce qui porte son etiquette,
-/// par [`aiguillage::retirer`]), puis refuse une table 2847 qu'un tiers
-/// occupe, en le nommant. Rien n'est pose quand elle refuse.
+/// Avant la premiere commande du chemin par coeur: refuse devant une autre
+/// session du produit vivante ou devant un objet a l'etiquette du produit
+/// qu'aucune session inscrite au journal n'explique; retire ce que des
+/// sessions mortes ont pose, et cela seul; puis refuse une table 2847 qu'un
+/// tiers occupe, en le nommant (`super::session`). Rien n'est pose quand elle
+/// refuse.
 #[cfg(target_os = "linux")]
 pub fn preparer_aiguillage(a: &aiguillage::Aiguillage) -> Result<()> {
-    super::occupation::preparer(&aiguillage::plan(a), || {
-        for cmd in aiguillage::retirer(a) {
-            let _ = CoeurTunnel::run(&cmd);
+    super::session::preparer(&aiguillage::plan(a))
+}
+
+/// Pose l'aiguillage, sa session inscrite au journal avant la premiere
+/// commande. Au premier echec, ce que la session a deja pose est retire, et
+/// cela seul.
+#[cfg(target_os = "linux")]
+pub fn poser_aiguillage(a: &aiguillage::Aiguillage) -> Result<Session> {
+    let session = Session::ouvrir(&aiguillage::plan(a), None)?;
+    for cmd in aiguillage::poser(a) {
+        if let Err(e) = CoeurTunnel::run(&cmd) {
+            // L'aiguillage a moitie pose enverrait du trafic vers une
+            // interface qui va disparaitre avec le TUN abandonne.
+            if let Err(r) = session.retirer() {
+                tracing::error!(error = %r, "session laissee au journal");
+            }
+            return Err(e);
         }
-    })
+    }
+    Ok(session)
 }
 
 impl CoeurTunnel {
@@ -204,11 +231,28 @@ impl CoeurTunnel {
             .map_err(|_| Error::Config(format!("MTU hors de portee: {}", cfg.mtu)))
     }
 
+    /// Retire ce que la session tenue a pose, si elle est encore la (un
+    /// demontage precedent qui n'a pas abouti). En erreur, elle reste tenue.
+    #[cfg(target_os = "linux")]
+    fn retirer_la_session(&mut self) -> Result<()> {
+        if let Some(s) = self.session.take()
+            && let Err(e) = s.retirer()
+        {
+            self.session = Some(s);
+            return Err(e);
+        }
+        Ok(())
+    }
+
     #[cfg(target_os = "linux")]
     fn monter_ici(&mut self, cfg: &TunnelConfig) -> Result<()> {
-        // Avant tout, et avant meme le TUN: retirer ce qu'une session
-        // precedente du produit a laisse, puis refuser une table 2847 qu'un
-        // tiers occupe. Refuse ici, rien n'a ete cree ni pose.
+        // Une session de ce peripherique que son demontage n'a pas pu retirer
+        // tient encore ce qu'elle a pose: la retirer d'abord.
+        self.retirer_la_session()?;
+        // Avant tout, et avant meme le TUN: juger ce qui porte l'etiquette du
+        // produit, retirer ce que des sessions mortes ont pose, puis refuser
+        // une table 2847 qu'un tiers occupe. Refuse ici, rien n'a ete cree ni
+        // pose.
         let aiguillage = self.aiguillage(cfg);
         preparer_aiguillage(&aiguillage)?;
 
@@ -226,29 +270,29 @@ impl CoeurTunnel {
             Self::run(&cmd)?;
         }
 
-        for cmd in aiguillage::poser(&aiguillage) {
-            if let Err(e) = Self::run(&cmd) {
-                // L'aiguillage a moitie pose enverrait du trafic vers une
-                // interface qui va disparaitre avec le TUN abandonne.
-                for retour in aiguillage::retirer(&aiguillage) {
-                    let _ = Self::run(&retour);
-                }
-                return Err(e);
-            }
-        }
+        let session = poser_aiguillage(&aiguillage)?;
 
         // Le TUN passe de l'autre cote de la frontiere. A partir d'ici sa duree
         // de vie est celle du passage, et c'est sa fermeture qui fera
         // disparaitre l'interface.
-        let nom = self
-            .passage
-            .ouvrir_passage(tun, self.coeur.clone(), Self::mtu(cfg)?)
-            .map_err(|e| {
-                for retour in aiguillage::retirer(&aiguillage) {
-                    let _ = Self::run(&retour);
+        let mtu = match Self::mtu(cfg) {
+            Ok(m) => m,
+            Err(e) => {
+                if let Err(r) = session.retirer() {
+                    tracing::error!(error = %r, "session laissee au journal");
                 }
-                Error::Tunnel(e)
-            })?;
+                return Err(e);
+            }
+        };
+        let nom = match self.passage.ouvrir_passage(tun, self.coeur.clone(), mtu) {
+            Ok(nom) => nom,
+            Err(e) => {
+                if let Err(r) = session.retirer() {
+                    tracing::error!(error = %r, "session laissee au journal");
+                }
+                return Err(Error::Tunnel(e));
+            }
+        };
 
         // Retenir, apres la derniere etape reussie, le plan de la pose: une
         // seconde evaluation de la fonction pure dont `poser` a tire les
@@ -256,6 +300,7 @@ impl CoeurTunnel {
         // construction au plan des commandes, ce n'est pas une capture des
         // commandes.
         self.routage = Some(aiguillage::plan(&aiguillage));
+        self.session = Some(session);
         self.monte = Some(nom);
         Ok(())
     }
@@ -297,7 +342,7 @@ impl CoeurTunnel {
     }
 
     #[cfg(target_os = "linux")]
-    fn demonter_ici(&mut self, cfg: &TunnelConfig) -> Result<()> {
+    fn demonter_ici(&mut self, _cfg: &TunnelConfig) -> Result<()> {
         // Le passage d'abord: sa fermeture ferme le descripteur, donc fait
         // disparaitre l'interface. Retirer l'aiguillage avant laisserait, le
         // temps d'un souffle, un systeme qui route en clair alors que le TUN
@@ -306,15 +351,15 @@ impl CoeurTunnel {
 
         // L'aiguillage se retire meme si le passage a mal ferme: des regles
         // laissees en place aiguilleraient vers une interface morte, ce qui est
-        // pire que tout.
-        for cmd in aiguillage::retirer(&self.aiguillage(cfg)) {
-            let _ = Self::run(&cmd);
-        }
+        // pire que tout. Ce que la session a pose, et cela seul; en erreur,
+        // elle reste tenue et inscrite, et un nouvel essai est possible.
+        let retrait = self.retirer_la_session();
         self.monte = None;
         // Plus rien de pose: la declaration ne rend plus l'ancien plan.
         self.routage = None;
 
-        ferme.map_err(Error::Tunnel)
+        ferme.map_err(Error::Tunnel)?;
+        retrait
     }
 
     /// Fermer le passage suffit, et c'est mieux que de nettoyer.
