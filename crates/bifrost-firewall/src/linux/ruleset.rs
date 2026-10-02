@@ -53,6 +53,20 @@ fn famille_et_adresse(adresse: IpAddr) -> (&'static str, String) {
 const NDP_TYPES: &str = "nd-router-solicit, nd-router-advert, nd-neighbor-solicit, \
                          nd-neighbor-advert, nd-redirect";
 
+/// Destinations du client DHCPv6 (port 546 vers 547): ses deux groupes et le
+/// lien.
+///
+/// Un client emet tous ses messages vers `ff02::1:2`
+/// (All_DHCP_Relay_Agents_and_Servers, RFC 9915 sections 5 et 7.1), en regle
+/// generale depuis son adresse de lien; `ff05::1:3` (All_DHCP_Servers) est le
+/// groupe des serveurs du site, que `permit-dhcp-v6` ouvre aussi sous
+/// Windows, comme WireGuard for Windows. Le lien (`fe80::/10`) garde
+/// l'unicast vers un serveur ou un relais du lien. Aucune adresse globale ni
+/// unique-locale: l'unicast direct vers un serveur (option Server Unicast)
+/// est rendu obsolete par RFC 9915, et LAN ouvert l'acceptation du LAN
+/// couvre deja les unique-locales.
+const DHCPV6_DESTINATIONS: &str = "fe80::/10, ff02::1:2, ff05::1:3";
+
 /// Le ruleset complet, pret pour `nft -f -`.
 ///
 /// Le fichier commence par une creation puis une suppression de la table: c'est
@@ -117,10 +131,14 @@ fn render_output(s: &mut String, policy: &FirewallPolicy) {
         s.push_str(&format!("\t\toifname \"{iface}\" accept\n\n"));
     }
 
-    s.push_str("\t\t# client DHCPv4\n");
-    s.push_str("\t\tudp sport 68 udp dport 67 accept\n");
-    s.push_str("\t\t# client DHCPv6\n");
-    s.push_str("\t\tip6 daddr fe80::/10 udp sport 546 udp dport 547 accept\n");
+    s.push_str("\t\t# client DHCPv4, en IPv4 seulement: le protocole n'existe pas\n");
+    s.push_str("\t\t# en IPv6. Toute adresse IPv4: le renouvellement (RFC 2131)\n");
+    s.push_str("\t\t# vise le serveur en unicast, ou qu'il soit.\n");
+    s.push_str("\t\tmeta nfproto ipv4 udp sport 68 udp dport 67 accept\n");
+    s.push_str("\t\t# client DHCPv6: ses groupes ff02::1:2 et ff05::1:3, et le lien\n");
+    s.push_str(&format!(
+        "\t\tip6 daddr {{ {DHCPV6_DESTINATIONS} }} udp sport 546 udp dport 547 accept\n"
+    ));
     s.push_str("\t\t# NDP\n");
     s.push_str(&format!("\t\ticmpv6 type {{ {NDP_TYPES} }} accept\n\n"));
 
@@ -294,7 +312,13 @@ fn render_input(s: &mut String, policy: &FirewallPolicy) {
     if let Some(iface) = &policy.tunnel_interface {
         s.push_str(&format!("\t\tiifname \"{iface}\" accept\n"));
     }
-    s.push_str("\t\tudp sport 67 udp dport 68 accept\n");
+    // Les reponses DHCP. Celle d'un serveur DHCPv6 a une sollicitation vers
+    // un groupe ne s'y rattache pas par `ct state` (la sollicitation visait
+    // le groupe, la reponse vient d'une adresse): elle passe ici, vers le
+    // port 546 (RFC 9915 section 7.2), depuis l'adresse de lien du serveur ou
+    // du relais, celle que le noyau choisit pour joindre l'adresse de lien du
+    // client. Mesure le 02/10/2026 en namespaces jetables.
+    s.push_str("\t\tmeta nfproto ipv4 udp sport 67 udp dport 68 accept\n");
     s.push_str("\t\tip6 saddr fe80::/10 udp sport 547 udp dport 546 accept\n");
     s.push_str(&format!("\t\ticmpv6 type {{ {NDP_TYPES} }} accept\n"));
     if policy.allow_lan {
@@ -616,6 +640,139 @@ mod tests {
         assert!(r.contains("nd-router-advert"));
         assert!(r.contains("udp sport 68 udp dport 67 accept"));
         assert!(r.contains("udp sport 546 udp dport 547 accept"));
+    }
+
+    /// Le texte d'une chaine du rendu, de sa declaration a son accolade
+    /// fermante. Une regle d'acceptation dit son SENS par la chaine qui la
+    /// porte: la meme regle posee dans `input` au lieu d'`output` ouvrirait
+    /// l'autre sens et laisserait celui-ci a la policy drop.
+    fn chaine<'a>(r: &'a str, nom: &str) -> &'a str {
+        let debut = r
+            .find(&format!("\tchain {nom} {{\n"))
+            .unwrap_or_else(|| panic!("chaine {nom} absente\n{r}"));
+        let longueur = r[debut..]
+            .find("\n\t}\n")
+            .unwrap_or_else(|| panic!("chaine {nom} sans fin\n{r}"));
+        &r[debut..debut + longueur]
+    }
+
+    /// Les politiques sur lesquelles le DHCP se verifie: tunnel, marque,
+    /// coeur, resolveur embarque, LAN ouvert ou ferme, resolveur de boucle
+    /// locale v4 ou v6 (64), plus un resolveur declare sur le lien, en IPv4
+    /// puis en IPv6, LAN ferme puis ouvert (4).
+    fn matrice_dhcp() -> Vec<FirewallPolicy> {
+        let mut v: Vec<FirewallPolicy> = (0u8..64)
+            .map(|n| FirewallPolicy {
+                tunnel_interface: (n & 1 == 1).then(|| "wg0".into()),
+                fwmark: (n & 2 == 2).then_some(0xca6c),
+                coeur_uid: (n & 4 == 4).then_some(977),
+                resolveur_uid: (n & 8 == 8).then_some(981),
+                resolveur_embarque: n & 8 == 8,
+                allow_lan: n & 16 == 16,
+                dns_resolver: if n & 32 == 32 {
+                    IpAddr::V6(Ipv6Addr::LOCALHOST)
+                } else {
+                    IpAddr::V4(Ipv4Addr::LOCALHOST)
+                },
+                ..policy()
+            })
+            .collect();
+        for resolveur in ["192.168.1.1", "fd00::53"] {
+            for allow_lan in [false, true] {
+                v.push(FirewallPolicy {
+                    dns_resolver: resolveur.parse().unwrap(),
+                    allow_lan,
+                    ..policy()
+                });
+            }
+        }
+        v
+    }
+
+    /// Le client DHCPv6 sort vers ses deux groupes et le lien, et la reponse
+    /// du serveur ou du relais revient de son adresse de lien, dans TOUTE
+    /// politique: le DHCP n'est pas le LAN, il passe LAN ferme comme ouvert.
+    ///
+    /// Le defaut que la regle de sortie ferme: le sortant 546 -> 547 n'etait
+    /// ouvert que vers `fe80::/10`. Mesure avant correction le 02/10/2026 sur
+    /// essai-linux, ruleset rendu par ce code dans des namespaces jetables:
+    /// une sollicitation vers `ff02::1:2` (la destination de tout message
+    /// d'un client, RFC 9915) et un envoi vers `ff05::1:3` tombaient, LAN
+    /// ouvert comme ferme. Apres: les deux passent et la reponse du serveur du
+    /// lien revient.
+    ///
+    /// Regles entieres, ecrites ici en toutes lettres et non tirees de la
+    /// constante du rendu, chacune dans la chaine de son sens; et aucune autre
+    /// regle ne nomme les ports du DHCPv6.
+    #[test]
+    fn le_client_dhcpv6_sort_vers_ses_groupes_et_sa_reponse_revient_du_lien() {
+        let sortie =
+            "ip6 daddr { fe80::/10, ff02::1:2, ff05::1:3 } udp sport 546 udp dport 547 accept";
+        let entree = "ip6 saddr fe80::/10 udp sport 547 udp dport 546 accept";
+        for p in matrice_dhcp() {
+            let r = render(&p);
+            assert_eq!(
+                regles_nft::compte(chaine(&r, "output"), sortie),
+                1,
+                "sortie du client DHCPv6 absente ou doublee: {p:?}\n{r}"
+            );
+            assert_eq!(
+                regles_nft::compte(chaine(&r, "input"), entree),
+                1,
+                "reponse du serveur DHCPv6 absente ou doublee: {p:?}\n{r}"
+            );
+            let dhcpv6: Vec<String> = regles_nft::lignes_normalisees(&r)
+                .into_iter()
+                .filter(|l| l.contains("546") || l.contains("547"))
+                .collect();
+            assert_eq!(
+                dhcpv6.len(),
+                2,
+                "une autre regle nomme le DHCPv6: {dhcpv6:?}\n{r}"
+            );
+        }
+    }
+
+    /// Le DHCPv4 ne vaut qu'en IPv4, dans les deux sens.
+    ///
+    /// La table est `inet`: une regle sans famille y vaut pour IPv4 ET IPv6.
+    /// `udp sport 68 udp dport 67 accept` admettait donc aussi un datagramme
+    /// IPv6 de 68 vers 67, vers toute adresse, et son entree, 67 vers 68,
+    /// depuis toute source IPv6. Mesure avant correction le 02/10/2026 sur
+    /// essai-linux, en namespaces jetables: un envoi IPv6 68 -> 67 vers une
+    /// adresse globale arrivait, comme une entree IPv6 67 -> 68 depuis une
+    /// adresse globale. Le DHCPv4 n'existe pas en IPv6. La largeur IPv4 est
+    /// voulue et ne change pas: toute adresse IPv4, pour le renouvellement
+    /// unicast vers le serveur (RFC 2131).
+    #[test]
+    fn le_dhcpv4_ne_vaut_qu_en_ipv4() {
+        let sortie = "meta nfproto ipv4 udp sport 68 udp dport 67 accept";
+        let entree = "meta nfproto ipv4 udp sport 67 udp dport 68 accept";
+        for p in matrice_dhcp() {
+            let r = render(&p);
+            assert_eq!(
+                regles_nft::compte(chaine(&r, "output"), sortie),
+                1,
+                "sortie du client DHCPv4 absente ou doublee: {p:?}\n{r}"
+            );
+            assert_eq!(
+                regles_nft::compte(chaine(&r, "input"), entree),
+                1,
+                "reponse du serveur DHCPv4 absente ou doublee: {p:?}\n{r}"
+            );
+            // Toute REGLE qui nomme un port du DHCPv4 porte la famille:
+            // absence par le filet le plus large, mot a mot.
+            for l in regles_nft::lignes_normalisees(&r) {
+                let mots: Vec<&str> = l.split_whitespace().collect();
+                let nomme = mots.windows(2).any(|w| {
+                    (w[0] == "sport" || w[0] == "dport") && (w[1] == "67" || w[1] == "68")
+                });
+                assert!(
+                    !nomme || l.starts_with("meta nfproto ipv4 "),
+                    "regle du DHCPv4 sans sa famille: {l}\n{r}"
+                );
+            }
+        }
     }
 
     /// mDNS, LLMNR, NetBIOS et SSDP ne sont jamais autorises: ils tombent dans

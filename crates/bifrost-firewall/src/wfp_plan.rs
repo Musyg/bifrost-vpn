@@ -2050,9 +2050,15 @@ mod tests {
     struct Flux {
         adresse: IpAddr,
         port: u16,
+        /// Le port local de l'emetteur: celui du client DHCP (68, 546), ou un
+        /// port ephemere.
+        port_local: u16,
         protocole: u8,
         interface: u64,
     }
+
+    /// Un port ephemere, celui d'une application qui ne se lie a aucun port.
+    const PORT_EPHEMERE: u16 = 49152;
 
     /// Une condition traduite matche-t-elle ce flux?
     fn condition_matche(c: &ConditionWfp, flux: &Flux) -> bool {
@@ -2071,7 +2077,7 @@ mod tests {
                 IpAddr::V4(_) => false,
             },
             (Champ::PortDistant, Valeur::U16(p)) => flux.port == *p,
-            (Champ::PortLocal, Valeur::U16(_)) => false,
+            (Champ::PortLocal, Valeur::U16(p)) => flux.port_local == *p,
             (Champ::Protocole, Valeur::U8(p)) => flux.protocole == *p,
             (Champ::InterfaceLocale, Valeur::U64(l)) => flux.interface == *l,
             (Champ::Drapeaux, Valeur::U32(b)) => {
@@ -2179,6 +2185,7 @@ mod tests {
                     let flux = Flux {
                         adresse: adresse.parse().unwrap(),
                         port,
+                        port_local: PORT_EPHEMERE,
                         protocole,
                         interface,
                     };
@@ -2188,6 +2195,75 @@ mod tests {
                         "resolveur {resolveur}, allow_lan {allow_lan}: {adresse}:{port} \
                          proto {protocole} interface {interface} tranche par {nom}"
                     );
+                }
+            }
+        }
+    }
+
+    /// Le DHCP du client mesure sur l'arbitrage du plan traduit, LAN ouvert
+    /// comme ferme: la sollicitation DHCPv6 sort vers ses deux groupes
+    /// (`ff02::1:2`, la destination de tout message d'un client selon RFC
+    /// 9915, et `ff05::1:3`), par `permit-dhcp-v6`, depuis le port 546 et en
+    /// UDP seulement; le DHCPv4 sort vers la diffusion par `permit-dhcp-v4`,
+    /// qui ne vit que sur la couche IPv4. Rien d'autre ne s'ouvre: le meme
+    /// groupe depuis un autre port ou en TCP, le groupe de tous les noeuds,
+    /// une adresse globale, et un 68 -> 67 en IPv6 tombent au block-all.
+    ///
+    /// La reponse du serveur n'est pas simulee ici: la recette porte sur
+    /// l'emission.
+    #[test]
+    fn l_arbitrage_laisse_sortir_le_client_dhcp_et_rien_d_autre() {
+        const PHYSIQUE: u64 = 3;
+        const TUNNEL: u64 = 7;
+        let udp = IPPROTO_UDP;
+        let tcp = IPPROTO_TCP;
+        for resolveur in [
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+        ] {
+            for allow_lan in [true, false] {
+                let politique = FirewallPolicy {
+                    dns_resolver: resolveur,
+                    allow_lan,
+                    coeur_executable: Some(PathBuf::from(r"C:\Bifrost\coeurs\sing-box.exe")),
+                    ..policy_avec_resolveur()
+                };
+                let filtres =
+                    filtres_wfp(&plan(&politique, PathBuf::from("x.exe"), Some(TUNNEL))).unwrap();
+                let cas: [(&str, u16, u16, u8, Option<&str>); 9] = [
+                    ("ff02::1:2", 547, 546, udp, Some("permit-dhcp-v6")),
+                    ("ff05::1:3", 547, 546, udp, Some("permit-dhcp-v6")),
+                    ("255.255.255.255", 67, 68, udp, Some("permit-dhcp-v4")),
+                    ("ff02::1:2", 547, PORT_EPHEMERE, udp, None),
+                    ("ff02::1:2", 547, 546, tcp, None),
+                    ("ff02::1", 547, 546, udp, None),
+                    ("2001:db8::67", 547, 546, udp, None),
+                    ("2001:db8::67", 67, 68, udp, None),
+                    ("ff02::1:2", 67, 68, udp, None),
+                ];
+                for (adresse, port, port_local, protocole, permis) in cas {
+                    let flux = Flux {
+                        adresse: adresse.parse().unwrap(),
+                        port,
+                        port_local,
+                        protocole,
+                        interface: PHYSIQUE,
+                    };
+                    let (action, nom) = arbitrage(&filtres, &flux);
+                    let contexte = format!(
+                        "resolveur {resolveur}, allow_lan {allow_lan}: {adresse}:{port} depuis \
+                         {port_local}, proto {protocole}, tranche par {nom}"
+                    );
+                    match permis {
+                        Some(filtre) => {
+                            assert_eq!(action, Action::Permit, "{contexte}");
+                            assert!(nom.starts_with(&format!("{filtre} (")), "{contexte}");
+                        }
+                        None => {
+                            assert_eq!(action, Action::Block, "{contexte}");
+                            assert!(nom.starts_with("block-all ("), "{contexte}");
+                        }
+                    }
                 }
             }
         }
