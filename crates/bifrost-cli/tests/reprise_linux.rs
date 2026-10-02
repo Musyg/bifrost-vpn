@@ -49,12 +49,9 @@ fn euid() -> u32 {
 /// Un repertoire a nous, TRAVERSABLE quoi qu'il arrive.
 ///
 /// Le mode est pose explicitement, et ce n'est pas une precaution de style:
-/// `IpcServer::bind` pose un `umask(0o117)` le temps de se lier, et l'umask est
-/// PROCESSUS-WIDE. Ces recettes tournent en parallele dans un seul binaire,
-/// donc un `create_dir_all` d'ici peut tomber pendant le bind d'a cote et
-/// naitre en 0o660 - sans bit d'execution, c'est-a-dire non traversable, et le
-/// bind suivant echoue en `EACCES`. Constate le 23/08/2026 sur essai-linux: une
-/// recette sur cinq en echec, au hasard de l'ordonnancement.
+/// ces recettes tournent en parallele dans un seul binaire, sous l'umask que
+/// le lanceur choisit, et un repertoire ne sans bit d'execution ne se
+/// traverserait pas: le bind suivant echouerait en `EACCES`.
 fn atelier(nom: &str) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let rep = std::env::temp_dir().join(format!("bifrost-reprise-{}-{nom}", std::process::id()));

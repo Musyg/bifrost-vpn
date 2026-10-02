@@ -226,43 +226,83 @@ impl LinuxTunnel {
     }
 }
 
-impl TunnelDevice for LinuxTunnel {
-    fn up(&mut self, cfg: &TunnelConfig) -> Result<()> {
-        cfg.validate()?;
-        // Le plan et sa pose sont rendus ICI, avant la premiere commande.
-        // `netcfg` refuse une table que le noyau se reserve, meme si la
-        // validation l'a laissee passer; refuse ici, rien n'a encore ete cree
-        // ni retire.
-        let pose = netcfg::add_routing(cfg)?;
-        let plan = netcfg::plan(cfg, "pose du routage")?
-            .ok_or_else(|| Error::Tunnel("ce peripherique ne monte que du WireGuard".into()))?;
-        let cle = Self::cle_du_profil(cfg)?;
+/// Ce que le montage fait au systeme, dans l'ordre ou il le demande: le
+/// journal des sessions, le noyau et le peripherique. Le daemon passe par
+/// [`Systeme`]; une recette y substitue un monde qui note chaque effet, et
+/// ce que le journal des sessions porte a cet instant.
+trait Effets {
+    /// Avant la premiere commande: [`super::session::preparer`].
+    fn preparer(&mut self, plan: &Plan) -> Result<()>;
+    /// A qui est l'interface qui porte le nom du profil.
+    fn occupant(&mut self, cfg: &TunnelConfig) -> Result<Occupant>;
+    /// Inscrit la session du plan au journal.
+    fn inscrire(&mut self, plan: &Plan, cle: String) -> Result<Session>;
+    /// Une commande `ip` de la pose.
+    fn executer(&mut self, cmd: &Cmd) -> Result<()>;
+    /// Cles, marque et pair du peripherique, par netlink.
+    fn configurer(&mut self, cfg: &TunnelConfig) -> Result<()>;
+    /// Retire ce que la session a pose, et cela seul.
+    fn retirer(&mut self, session: &Session) -> Result<()>;
+    /// Releve les priorites que le noyau a donnees aux regles posees.
+    fn relever(&mut self, session: &mut Session);
+}
 
-        // Une session de ce peripherique que son demontage n'a pas pu retirer
-        // tient encore ce qu'elle a pose: la retirer d'abord.
-        self.retirer_la_session()?;
+/// Le monde du daemon: le vrai journal, le vrai noyau.
+struct Systeme;
 
-        if !std::path::Path::new("/sys/module/wireguard").exists()
-            && !Self::link_exists(&cfg.interface)
-        {
-            // Le module se charge a la creation de la premiere interface: son
-            // absence ici n'est pas fatale, mais elle explique l'erreur si la
-            // creation echoue juste apres.
-            tracing::debug!("module wireguard pas encore charge");
-        }
+impl Effets for Systeme {
+    fn preparer(&mut self, plan: &Plan) -> Result<()> {
+        super::session::preparer(plan)
+    }
 
+    fn occupant(&mut self, cfg: &TunnelConfig) -> Result<Occupant> {
+        LinuxTunnel::occupant(cfg)
+    }
+
+    fn inscrire(&mut self, plan: &Plan, cle: String) -> Result<Session> {
+        Session::ouvrir(plan, Some(cle))
+    }
+
+    fn executer(&mut self, cmd: &Cmd) -> Result<()> {
+        LinuxTunnel::run(cmd)
+    }
+
+    fn configurer(&mut self, cfg: &TunnelConfig) -> Result<()> {
+        LinuxTunnel::apply_device(cfg)
+    }
+
+    fn retirer(&mut self, session: &Session) -> Result<()> {
+        session.retirer()
+    }
+
+    fn relever(&mut self, session: &mut Session) {
+        session.relever();
+    }
+}
+
+impl LinuxTunnel {
+    /// La pose, de la preparation a la releve des priorites: rend la session
+    /// inscrite, qui tient ce qui a ete pose. `pose` et `plan` sont ceux de
+    /// `cfg`, `cle` la cle publique de son profil.
+    fn monter(
+        cfg: &TunnelConfig,
+        pose: &[Cmd],
+        plan: &Plan,
+        cle: String,
+        e: &mut impl Effets,
+    ) -> Result<Session> {
         // Avant la premiere commande qui pose: lire les regles, les routes et
         // le journal des sessions; refuser devant une autre session vivante ou
         // devant un objet a l'etiquette du produit qu'aucune session inscrite
         // n'explique; retirer ce que des sessions mortes ont pose, interface
         // comprise, et cela seul; puis refuser une table ou une marque qu'un
         // tiers emploie deja. Refuse ici, rien n'a ete pose.
-        super::session::preparer(&plan)?;
+        e.preparer(plan)?;
 
         // L'interface qui porte le nom du profil n'est retiree que par la
         // session morte qui l'a creee, juste avant. Celle qui reste n'est ni
         // retiree ni reprise.
-        match Self::occupant(cfg)? {
+        match e.occupant(cfg)? {
             Occupant::Aucun => {}
             Occupant::Produit => {
                 return Err(Error::Tunnel(format!(
@@ -289,14 +329,14 @@ impl TunnelDevice for LinuxTunnel {
         // Inscrite avant la premiere commande qui pose: une session
         // interrompue a n'importe quel moment de la pose est connue du
         // montage suivant.
-        let mut session = Session::ouvrir(&plan, Some(cle))?;
+        let mut session = e.inscrire(plan, cle)?;
 
-        if let Err(e) = Self::run(&netcfg::create_link(cfg)) {
-            if let Err(r) = session.retirer() {
+        if let Err(erreur) = e.executer(&netcfg::create_link(cfg)) {
+            if let Err(r) = e.retirer(&session) {
                 tracing::error!(error = %r, "session laissee au journal");
             }
             return Err(Error::Tunnel(format!(
-                "{e}. Le module noyau wireguard est-il disponible \
+                "{erreur}. Le module noyau wireguard est-il disponible \
                  (modprobe wireguard) ?"
             )));
         }
@@ -304,32 +344,62 @@ impl TunnelDevice for LinuxTunnel {
         // Si la suite echoue, l'interface reste orpheline: on nettoie avant de
         // remonter l'erreur, sinon la tentative suivante repart d'un etat sale.
         let result = (|| -> Result<()> {
-            Self::apply_device(cfg)?;
+            e.configurer(cfg)?;
             for cmd in netcfg::configure_link(cfg) {
-                Self::run(&cmd)?;
+                e.executer(&cmd)?;
             }
-            for cmd in &pose {
-                Self::run(cmd)?;
+            for cmd in pose {
+                e.executer(cmd)?;
             }
             Ok(())
         })();
 
-        if let Err(e) = result {
-            tracing::error!(error = %e, "montage incomplet, nettoyage");
+        if let Err(erreur) = result {
+            tracing::error!(error = %erreur, "montage incomplet, nettoyage");
             // Ce que la session a pose, et son interface si elle porte sa cle;
             // puis l'interface que ce montage vient de creer, par son nom,
             // meme si la cle n'a pas pu y etre posee.
-            let retrait = session.retirer();
-            let _ = Self::run(&netcfg::retrait_lien(cfg));
+            let retrait = e.retirer(&session);
+            let _ = e.executer(&netcfg::retrait_lien(cfg));
             if let Err(r) = retrait {
                 tracing::error!(error = %r, "session laissee au journal");
             }
-            return Err(e);
+            return Err(erreur);
         }
 
         // Les priorites que le noyau a donnees aux regles posees sans `pref`:
         // le demontage designe chaque regle par la sienne.
-        session.relever();
+        e.relever(&mut session);
+        Ok(session)
+    }
+}
+
+impl TunnelDevice for LinuxTunnel {
+    fn up(&mut self, cfg: &TunnelConfig) -> Result<()> {
+        cfg.validate()?;
+        // Le plan et sa pose sont rendus ICI, avant la premiere commande.
+        // `netcfg` refuse une table que le noyau se reserve, meme si la
+        // validation l'a laissee passer; refuse ici, rien n'a encore ete cree
+        // ni retire.
+        let pose = netcfg::add_routing(cfg)?;
+        let plan = netcfg::plan(cfg, "pose du routage")?
+            .ok_or_else(|| Error::Tunnel("ce peripherique ne monte que du WireGuard".into()))?;
+        let cle = Self::cle_du_profil(cfg)?;
+
+        // Une session de ce peripherique que son demontage n'a pas pu retirer
+        // tient encore ce qu'elle a pose: la retirer d'abord.
+        self.retirer_la_session()?;
+
+        if !std::path::Path::new("/sys/module/wireguard").exists()
+            && !Self::link_exists(&cfg.interface)
+        {
+            // Le module se charge a la creation de la premiere interface: son
+            // absence ici n'est pas fatale, mais elle explique l'erreur si la
+            // creation echoue juste apres.
+            tracing::debug!("module wireguard pas encore charge");
+        }
+
+        let session = Self::monter(cfg, &pose, &plan, cle, &mut Systeme)?;
 
         let wg = cfg.wireguard()?;
         tracing::info!(
@@ -513,6 +583,131 @@ mod tests {
             occupant_wireguard(None, &du_profil),
             Occupant::Tiers(_)
         ));
+    }
+
+    /// Le journal des effets d'un montage, dans l'ordre ou `monter` les
+    /// demande, et ce que le journal des sessions de la recette porte au
+    /// moment de chacun. Aucune commande n'est lancee, rien n'est lu du noyau.
+    struct Temoin {
+        /// Le journal des sessions de la recette.
+        rep: std::path::PathBuf,
+        reseau: String,
+        interface: String,
+        cle: String,
+        /// Chaque effet, et si la session du montage etait alors inscrite.
+        effets: Vec<(String, bool)>,
+    }
+
+    impl Temoin {
+        /// Note l'effet, apres avoir lu le journal comme le montage suivant
+        /// le lirait (`session::entrees`).
+        fn noter(&mut self, effet: String) {
+            let inscrite = super::super::session::entrees(&self.rep, &self.reseau)
+                .expect("journal de la recette lisible")
+                .iter()
+                .any(|(_, e)| {
+                    e.interface == self.interface && e.cle.as_deref() == Some(self.cle.as_str())
+                });
+            self.effets.push((effet, inscrite));
+        }
+    }
+
+    impl Effets for Temoin {
+        fn preparer(&mut self, _: &Plan) -> Result<()> {
+            self.noter("preparation".into());
+            Ok(())
+        }
+
+        fn occupant(&mut self, _: &TunnelConfig) -> Result<Occupant> {
+            self.noter("occupant".into());
+            Ok(Occupant::Aucun)
+        }
+
+        fn inscrire(&mut self, plan: &Plan, cle: String) -> Result<Session> {
+            let s = Session::ouvrir_dans(&self.rep, plan, Some(cle))?;
+            self.noter("inscription".into());
+            Ok(s)
+        }
+
+        fn executer(&mut self, cmd: &Cmd) -> Result<()> {
+            self.noter(cmd.display());
+            Ok(())
+        }
+
+        fn configurer(&mut self, _: &TunnelConfig) -> Result<()> {
+            self.noter("configuration du peripherique".into());
+            Ok(())
+        }
+
+        fn retirer(&mut self, _: &Session) -> Result<()> {
+            self.noter("retrait de la session".into());
+            Ok(())
+        }
+
+        fn relever(&mut self, _: &mut Session) {
+            self.noter("releve".into());
+        }
+    }
+
+    /// La session est au journal avant la premiere commande qui pose, et y
+    /// reste jusqu'a la derniere: une pose interrompue a n'importe quel
+    /// moment est connue du montage suivant, qui lit ce journal. Par
+    /// `monter`, le corps de `up`, dans un monde qui note chaque effet et lit
+    /// le journal des sessions (celui de la recette, en 0700 pose
+    /// explicitement) a l'instant ou l'effet part. Sans privilege.
+    #[test]
+    fn la_session_est_au_journal_avant_la_premiere_commande_qui_pose() {
+        use std::os::unix::fs::PermissionsExt;
+        let cfg = configuration(51820);
+        let pose = netcfg::add_routing(&cfg).expect("pose");
+        let plan = netcfg::plan(&cfg, "recette")
+            .expect("plan")
+            .expect("plan WireGuard");
+        let cle = LinuxTunnel::cle_du_profil(&cfg).expect("cle du profil");
+        let rep = std::env::temp_dir().join(format!("bifrost-montage-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&rep);
+        std::fs::create_dir(&rep).expect("journal de la recette");
+        std::fs::set_permissions(&rep, std::fs::Permissions::from_mode(0o700))
+            .expect("journal de la recette en 0700");
+        let mut t = Temoin {
+            rep: rep.clone(),
+            reseau: super::super::session::reseau_courant().expect("namespace reseau"),
+            interface: cfg.interface.clone(),
+            cle: cle.clone(),
+            effets: Vec::new(),
+        };
+        let monte = LinuxTunnel::monter(&cfg, &pose, &plan, cle, &mut t).map(drop);
+        let _ = std::fs::remove_dir_all(&rep);
+        let effets = t.effets;
+        monte.unwrap_or_else(|e| panic!("montage: {e}; {effets:#?}"));
+
+        let rang = |quoi: &str| {
+            effets
+                .iter()
+                .position(|(e, _)| e == quoi)
+                .unwrap_or_else(|| panic!("{quoi} absent: {effets:#?}"))
+        };
+        assert_eq!(
+            effets.iter().filter(|(e, _)| e == "inscription").count(),
+            1,
+            "{effets:#?}"
+        );
+        assert!(rang("preparation") < rang("inscription"), "{effets:#?}");
+        for attendu in ["ip link add", "route add", "rule add"] {
+            assert!(
+                effets.iter().any(|(e, _)| e.contains(attendu)),
+                "{attendu} absent de la pose: {effets:#?}"
+            );
+        }
+        for (e, inscrite) in &effets {
+            if e.starts_with("ip ") || e == "configuration du peripherique" {
+                assert!(
+                    *inscrite,
+                    "`{e}` part sans que la session soit au journal: {effets:#?}"
+                );
+            }
+        }
+        assert_eq!(effets.last().map(|e| e.0.as_str()), Some("releve"));
     }
 
     /// Sur le vrai sysfs, en lecture seule et sans privilege: un nom absent

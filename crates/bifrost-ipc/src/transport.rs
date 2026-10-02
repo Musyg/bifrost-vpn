@@ -382,18 +382,44 @@ mod imp {
         e.raw_os_error() == Some(libc::EAGAIN)
     }
 
+    /// Les etapes de [`IpcServer::bind`] apres lesquelles une recette observe
+    /// le fichier du socket. Le daemon n'en fait rien.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(super) enum Liaison {
+        /// Lie a son chemin et a l'ecoute, dans le mode de son descripteur.
+        Ecoute,
+        /// Le groupe demande est pose.
+        Groupe,
+        /// Le mode final est pose.
+        Mode,
+    }
+
     impl IpcServer {
         /// Cree le socket, restreint ses permissions, puis ecoute.
         ///
-        /// L'ordre compte: le socket est cree avec un umask restrictif AVANT
-        /// d'etre expose, sinon il existe un instant ou n'importe qui peut s'y
-        /// connecter.
+        /// L'ordre compte: le socket nait ferme a tout autre que son
+        /// proprietaire, recoit son groupe, et ne s'ouvre au groupe qu'ensuite.
+        /// Sinon il existe un instant ou un compte que la politique refuse peut
+        /// s'y connecter. Rien ici ne touche a l'umask du processus, qui vaut
+        /// pour tous ses fils: voir [`ecouter`].
         pub async fn bind(
             path: impl AsRef<Path>,
             policy: AuthPolicy,
             group: Option<u32>,
         ) -> Result<Self> {
-            let path = path.as_ref().to_path_buf();
+            Self::lier(path.as_ref(), policy, group, |_, _| {})
+        }
+
+        /// Le corps de [`IpcServer::bind`]. `temoin` est appele apres chaque
+        /// etape qui change le fichier du socket, avec son chemin: les
+        /// recettes y observent l'ordre, le daemon n'y met rien.
+        pub(super) fn lier(
+            path: &Path,
+            policy: AuthPolicy,
+            group: Option<u32>,
+            mut temoin: impl FnMut(Liaison, &Path),
+        ) -> Result<Self> {
+            let path = path.to_path_buf();
             // On ne cree et ne durcit le repertoire que s'il n'existe pas
             // encore. Changer les permissions d'un repertoire deja la, c'est
             // au mieux modifier /run sans raison, au pire echouer sur /tmp
@@ -410,20 +436,18 @@ mod imp {
                 std::fs::remove_file(&path)?;
             }
 
-            // umask le temps du bind: le socket nait en 0o660 au lieu de 0o777.
-            // SAFETY: umask ne prend qu'un masque entier et ne touche aucune memoire; la
-            // valeur precedente est restauree juste apres le bind.
-            let previous = unsafe { libc::umask(0o117) };
-            let listener = UnixListener::bind(&path);
-            // SAFETY: umask ne prend qu'un masque entier et ne touche aucune memoire;
-            // restaure la valeur precedente relevee ci-dessus.
-            unsafe { libc::umask(previous) };
-            let listener = listener?;
-
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o660))?;
+            // Ne en 0600 au plus: seul le proprietaire peut s'y connecter.
+            let listener = ecouter(&path)?;
+            temoin(Liaison::Ecoute, &path);
+            // Le groupe AVANT le mode qui l'ouvre: dans l'ordre inverse, le
+            // groupe du daemon (root) serait admis le temps du chown.
             if let Some(gid) = group {
                 chown_group(&path, gid)?;
+                temoin(Liaison::Groupe, &path);
             }
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o660))?;
+            temoin(Liaison::Mode, &path);
+            let listener = UnixListener::from_std(listener)?;
 
             tracing::info!(path = %path.display(), gid = ?group, "IPC en ecoute");
             Ok(Self {
@@ -546,6 +570,86 @@ mod imp {
         fn drop(&mut self) {
             let _ = std::fs::remove_file(&self.path);
         }
+    }
+
+    /// Lie un socket d'ecoute a `path`, ne en 0600 au plus.
+    ///
+    /// Le mode du fichier que `bind(2)` cree ne vient pas d'un umask pose
+    /// pour l'occasion: l'umask est un attribut du PROCESSUS, et tout fichier
+    /// qu'un autre fil creerait dans la fenetre en heriterait. Il vient du
+    /// descripteur. Linux cree le fichier avec le mode de l'inode du socket,
+    /// moins l'umask (`unix_bind_bsd`, net/unix/af_unix.c, Linux 7.0); cet
+    /// inode nait en 0777 (`sock_alloc`, net/socket.c), et `fchmod(2)` sur le
+    /// descripteur le change (`sockfs_setattr`). Le poser a 0600 avant
+    /// `bind(2)` fait donc naitre le fichier en 0600 ou moins, quel que soit
+    /// l'umask. POSIX laisse `fchmod` sur un socket non specifie (fchmod,
+    /// Issue 8, lue le 02/10/2026), et unix(7) ne le decrit pas: c'est un
+    /// comportement de Linux, la seule plateforme Unix du produit, et une
+    /// recette le mesure (`tests_liaison`).
+    ///
+    /// Le reste est celui de tokio (mio 1.2): la validation du chemin par la
+    /// bibliotheque standard, un socket non bloquant ferme a l'`exec`, et
+    /// l'arriere-plan d'ecoute -1, que Linux ramene a `somaxconn`.
+    fn ecouter(path: &Path) -> std::io::Result<std::os::unix::net::UnixListener> {
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+        use std::os::unix::ffi::OsStrExt;
+
+        // Aucun octet nul, et un chemin plus court que `sun_path`: les refus
+        // et les messages de la bibliotheque standard. Un chemin vide ne
+        // designe aucun fichier, donc aucun fichier a restreindre.
+        std::os::unix::net::SocketAddr::from_pathname(path)?;
+        let octets = path.as_os_str().as_bytes();
+        if octets.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "chemin de socket vide",
+            ));
+        }
+        // SAFETY: `sockaddr_un` n'est fait que d'entiers et d'un tableau
+        // d'entiers, pour lesquels zero est une valeur valide.
+        let mut adresse: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        adresse.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        for (d, s) in adresse.sun_path.iter_mut().zip(octets) {
+            *d = *s as libc::c_char;
+        }
+        // Le chemin et son octet nul final, que le tableau mis a zero porte:
+        // `from_pathname` a verifie que le chemin laisse la place.
+        let longueur = std::mem::offset_of!(libc::sockaddr_un, sun_path) + octets.len() + 1;
+
+        // SAFETY: socket ne prend que des entiers et ne touche aucune memoire.
+        let brut = unsafe {
+            libc::socket(
+                libc::AF_UNIX,
+                libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
+                0,
+            )
+        };
+        if brut < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: `brut` vient d'etre ouvert et n'appartient a rien d'autre.
+        let fd = unsafe { OwnedFd::from_raw_fd(brut) };
+        // SAFETY: fchmod ne prend qu'un descripteur valide et un mode entier.
+        if unsafe { libc::fchmod(fd.as_raw_fd(), 0o600) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: `adresse` vit jusqu'a la fin de l'appel, et `longueur` ne
+        // depasse pas sa taille (`from_pathname` borne le chemin).
+        let lie = unsafe {
+            libc::bind(
+                fd.as_raw_fd(),
+                (&raw const adresse).cast(),
+                longueur as libc::socklen_t,
+            )
+        };
+        if lie != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: listen ne prend qu'un descripteur valide et un entier.
+        if unsafe { libc::listen(fd.as_raw_fd(), -1) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(std::os::unix::net::UnixListener::from(fd))
     }
 
     fn chown_group(path: &Path, gid: u32) -> Result<()> {
@@ -1976,10 +2080,9 @@ mod tests_clients_concurrents {
         ));
         let _ = std::fs::remove_dir_all(&dossier);
         std::fs::create_dir_all(&dossier).expect("repertoire de la recette");
-        // Mode pose explicitement: `bind` pose un `umask(0o117)`, valable pour
-        // tout le processus, le temps de se lier; un repertoire cree pendant
-        // le bind d'une recette voisine naitrait sans bit d'execution, donc
-        // intraversable, et ce bind-ci echouerait en `EACCES`.
+        // Mode pose explicitement, pas laisse a l'umask du processus de
+        // recettes, que le lanceur choisit: le repertoire doit rester
+        // traversable et inscriptible pour ce compte quel qu'il soit.
         std::fs::set_permissions(&dossier, std::fs::Permissions::from_mode(0o755))
             .expect("repertoire de la recette en 0755");
         let chemin = dossier.join("d.sock");
@@ -2337,8 +2440,8 @@ mod tests_acceptation {
         ));
         let _ = std::fs::remove_dir_all(&dossier);
         std::fs::create_dir_all(&dossier).expect("repertoire de la recette");
-        // Mode pose explicitement: le `umask` que `bind` pose le temps de se
-        // lier vaut pour tout le processus (voir tests_clients_concurrents).
+        // Mode pose explicitement, pas laisse a l'umask du processus de
+        // recettes (voir tests_clients_concurrents).
         std::fs::set_permissions(&dossier, std::fs::Permissions::from_mode(0o755))
             .expect("repertoire de la recette en 0755");
         let chemin = dossier.join("d.sock");
@@ -2988,5 +3091,286 @@ mod tests_classement {
         ] {
             assert!(!autre.is_server_busy(), "{autre}");
         }
+    }
+}
+
+/// Ce que `bind` fait du fichier du socket, etape par etape, et ce qu'il ne
+/// fait pas a l'umask du processus. Par `lier`, le corps de `bind`, dont le
+/// temoin lit le fichier lui-meme apres chaque etape.
+///
+/// Ces recettes dependent de l'umask du processus de recettes, et le disent:
+/// elles le relisent dans `/proc/self/status` (jamais par `umask(2)`, qui le
+/// changerait pour tous les fils de ce binaire), et leur repertoire recoit un
+/// mode explicite. Sous un umask de recettes qui couvre deja 0177, ou qui vaut
+/// 0117, les modes compares ne distinguent plus le defaut vise, qui y est
+/// alors sans effet: elles le mesurent la ou il en a un.
+#[cfg(all(test, target_os = "linux"))]
+mod tests_liaison {
+    use super::*;
+    use imp::Liaison;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::path::{Path, PathBuf};
+
+    /// Un champ de `/proc/self/status`, lu sans rien changer.
+    fn champ(nom: &str) -> String {
+        std::fs::read_to_string("/proc/self/status")
+            .expect("/proc/self/status lisible")
+            .lines()
+            .find_map(|l| l.strip_prefix(nom).map(str::trim).map(str::to_owned))
+            .unwrap_or_else(|| panic!("{nom} absent de /proc/self/status"))
+    }
+
+    fn umask_du_processus() -> u32 {
+        u32::from_str_radix(&champ("Umask:"), 8).expect("umask octal")
+    }
+
+    /// Le groupe effectif, et un groupe que ce compte peut donner a son
+    /// fichier sans privilege: un groupe supplementaire distinct du groupe
+    /// effectif s'il en a un, sinon le groupe effectif lui-meme.
+    fn groupes() -> (u32, u32) {
+        let gid = champ("Gid:");
+        let effectif: u32 = gid
+            .split_whitespace()
+            .nth(1)
+            .and_then(|g| g.parse().ok())
+            .expect("groupe effectif");
+        let autre = champ("Groups:")
+            .split_whitespace()
+            .filter_map(|g| g.parse::<u32>().ok())
+            .find(|g| *g != effectif)
+            .unwrap_or(effectif);
+        (effectif, autre)
+    }
+
+    fn mode(p: &Path) -> u32 {
+        std::fs::symlink_metadata(p)
+            .expect("le fichier existe")
+            .mode()
+            & 0o7777
+    }
+
+    /// Le repertoire de la recette, en 0755 pose explicitement.
+    fn dossier(nom: &str) -> PathBuf {
+        let rep =
+            std::env::temp_dir().join(format!("bifrost-ipc-liaison-{}-{nom}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&rep);
+        std::fs::create_dir(&rep).expect("repertoire de la recette");
+        std::fs::set_permissions(&rep, std::fs::Permissions::from_mode(0o755))
+            .expect("repertoire de la recette en 0755");
+        rep
+    }
+
+    fn politique() -> AuthPolicy {
+        AuthPolicy {
+            allowed_uids: vec![0],
+            allowed_gid: None,
+        }
+    }
+
+    /// Le socket ne s'ouvre a un autre que son proprietaire qu'une fois son
+    /// groupe et son mode definitifs: ne du mode de son descripteur (0600,
+    /// moins l'umask), il recoit son groupe ferme, et ce n'est qu'ensuite que
+    /// le groupe, deja le sien, y gagne lecture et ecriture. Linux exige
+    /// l'ecriture sur le fichier pour s'y connecter (unix(7)): avant la
+    /// derniere etape, aucun compte autre que le proprietaire ne le peut.
+    #[tokio::test]
+    async fn le_socket_ne_s_ouvre_qu_une_fois_son_groupe_et_son_mode_poses() {
+        let umask = umask_du_processus();
+        let (_, groupe) = groupes();
+        let rep = dossier("ordre");
+        let mut vu = Vec::new();
+        let serveur = IpcServer::lier(&rep.join("d.sock"), politique(), Some(groupe), |e, p| {
+            let m = std::fs::symlink_metadata(p).expect("le socket existe a chaque etape");
+            vu.push((e, m.mode() & 0o7777, m.gid()));
+        })
+        .expect("lier");
+        drop(serveur);
+        let _ = std::fs::remove_dir_all(&rep);
+
+        let etapes: Vec<Liaison> = vu.iter().map(|v| v.0).collect();
+        assert_eq!(
+            etapes,
+            [Liaison::Ecoute, Liaison::Groupe, Liaison::Mode],
+            "{vu:?}"
+        );
+        assert_eq!(
+            vu[0].1,
+            0o600 & !umask,
+            "a l'ecoute, le socket doit etre ne du mode de son descripteur \
+             (umask {umask:04o}): {vu:?}"
+        );
+        assert_eq!(
+            (vu[1].1 & 0o077, vu[1].2),
+            (0, groupe),
+            "le groupe pose, le socket doit rester ferme au groupe: {vu:?}"
+        );
+        assert_eq!(
+            (vu[2].1, vu[2].2),
+            (0o660, groupe),
+            "le mode final ne s'ouvre qu'au groupe demande: {vu:?}"
+        );
+    }
+
+    /// Present dans l'environnement de l'enfant, et la seulement.
+    const SEULE: &str = "BIFROST_RECETTE_LIAISON_SEULE";
+
+    /// Rejoue la recette `nom` seule dans un processus enfant (ce binaire,
+    /// cette recette, un seul fil de recettes) et exige qu'elle y ait passe,
+    /// elle et elle seule, et que sa sortie porte `marque`: une ligne que
+    /// seul le corps de la recette imprime, apres ses assertions, et non une
+    /// autre recette que l'enfant aurait jouee a sa place.
+    fn seule_dans_un_processus(nom: &str, marque: &str) {
+        let sortie =
+            std::process::Command::new(std::env::current_exe().expect("binaire de la recette"))
+                .args(["--exact", nom, "--nocapture", "--test-threads=1"])
+                .env(SEULE, "1")
+                .stdin(std::process::Stdio::null())
+                .output()
+                .expect("lancement de l'enfant");
+        let texte = String::from_utf8_lossy(&sortie.stdout);
+        assert!(
+            sortie.status.success()
+                && texte.contains(&format!("test {nom} ... "))
+                && texte.contains(marque)
+                && texte.contains("test result: ok. 1 passed;"),
+            "l'enfant ({}):\n{texte}\n{}",
+            sortie.status,
+            String::from_utf8_lossy(&sortie.stderr)
+        );
+    }
+
+    /// Leve par le gestionnaire de SIGSYS de l'enfant: le filtre a intercepte
+    /// un appel a `umask(2)`.
+    static UMASK_APPELE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    extern "C" fn sur_sigsys(_: libc::c_int, _: *mut libc::siginfo_t, _: *mut libc::c_void) {
+        // Une ecriture atomique, sure dans un gestionnaire de signal.
+        UMASK_APPELE.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Dans l'enfant seulement, juste avant `lier`: un appel a `umask(2)` par
+    /// ce fil, ou par un fil qu'il cree ensuite, n'est pas execute. Le noyau
+    /// envoie SIGSYS au fil appelant, dont le gestionnaire leve
+    /// `UMASK_APPELE`; l'umask du processus reste celui d'avant, et la recette
+    /// lit le drapeau. Ni le processus ni le noyau n'en gardent de trace hors
+    /// de l'enfant (pas de `SECCOMP_FILTER_FLAG_LOG`). Le filtre compare le
+    /// numero d'appel de l'ABI native, celle de ce binaire.
+    fn interdire_umask() {
+        let gestionnaire: extern "C" fn(libc::c_int, *mut libc::siginfo_t, *mut libc::c_void) =
+            sur_sigsys;
+        // SAFETY: `sigaction` n'est fait que d'entiers, d'un masque et de
+        // pointeurs facultatifs, pour lesquels zero est une valeur valide.
+        let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+        action.sa_sigaction = gestionnaire as libc::sighandler_t;
+        action.sa_flags = libc::SA_SIGINFO;
+        // SAFETY: `action` est valide et vit jusqu'au retour; l'ancien
+        // gestionnaire n'est pas demande.
+        let r = unsafe { libc::sigaction(libc::SIGSYS, &action, std::ptr::null_mut()) };
+        assert_eq!(r, 0, "sigaction: {}", std::io::Error::last_os_error());
+        let instruction = |code: u32, jt: u8, jf: u8, k: u32| libc::sock_filter {
+            code: code as u16,
+            jt,
+            jf,
+            k,
+        };
+        // `seccomp_data` commence par le numero de l'appel (u32, offset 0).
+        let filtre = [
+            instruction(libc::BPF_LD | libc::BPF_W | libc::BPF_ABS, 0, 0, 0),
+            instruction(
+                libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K,
+                0,
+                1,
+                libc::SYS_umask as u32,
+            ),
+            instruction(libc::BPF_RET | libc::BPF_K, 0, 0, libc::SECCOMP_RET_TRAP),
+            instruction(libc::BPF_RET | libc::BPF_K, 0, 0, libc::SECCOMP_RET_ALLOW),
+        ];
+        let programme = libc::sock_fprog {
+            len: filtre.len() as u16,
+            filter: filtre.as_ptr().cast_mut(),
+        };
+        let (zero, un): (libc::c_ulong, libc::c_ulong) = (0, 1);
+        // SAFETY: prctl ne recoit que des entiers, tous de la largeur que le
+        // noyau lit.
+        let r = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, un, zero, zero, zero) };
+        assert_eq!(
+            r,
+            0,
+            "PR_SET_NO_NEW_PRIVS: {}",
+            std::io::Error::last_os_error()
+        );
+        // SAFETY: `programme` designe `filtre`, tous deux vivants jusqu'au
+        // retour; le noyau copie le filtre avant de rendre la main.
+        let r = unsafe {
+            libc::prctl(
+                libc::PR_SET_SECCOMP,
+                libc::SECCOMP_MODE_FILTER as libc::c_ulong,
+                &programme as *const libc::sock_fprog as libc::c_ulong,
+                zero,
+                zero,
+            )
+        };
+        assert_eq!(r, 0, "PR_SET_SECCOMP: {}", std::io::Error::last_os_error());
+    }
+
+    /// `bind` n'appelle jamais `umask(2)`, et pendant `bind` un AUTRE fil cree
+    /// un fichier et un repertoire apres chaque etape: ils naissent de l'umask
+    /// du processus, inchange.
+    ///
+    /// Jouee seule dans un processus enfant, pour deux raisons. L'umask est
+    /// commun a tous les fils d'un processus: si `bind` le changeait, une
+    /// recette voisine qui lie un socket au meme moment le changerait aussi
+    /// avant que celle-ci ne releve sa reference, et la garde comparerait le
+    /// defaut a lui-meme (vu en falsification, dans le binaire partage). Et le
+    /// filtre qui interdit `umask(2)` ne se retire pas: il ne doit valoir que
+    /// pour cette recette. Le filtre voit un umask change puis restaure entre
+    /// deux etapes, que le temoin ne voit pas.
+    #[tokio::test]
+    async fn lier_ne_touche_pas_a_l_umask_du_processus() {
+        const MARQUE: &str = "liaison sans umask, mesuree seule:";
+        if std::env::var_os(SEULE).is_none() {
+            return seule_dans_un_processus(
+                "transport::tests_liaison::lier_ne_touche_pas_a_l_umask_du_processus",
+                MARQUE,
+            );
+        }
+        let avant = umask_du_processus();
+        let rep = dossier("umask");
+        let mut vu = Vec::new();
+        interdire_umask();
+        let serveur = IpcServer::lier(&rep.join("d.sock"), politique(), None, |e, _| {
+            let (r, n) = (rep.clone(), vu.len());
+            let (u, f, d) = std::thread::spawn(move || {
+                let (f, d) = (r.join(format!("f{n}")), r.join(format!("r{n}")));
+                std::fs::File::create(&f).expect("fichier de l'autre fil");
+                std::fs::create_dir(&d).expect("repertoire de l'autre fil");
+                (umask_du_processus(), mode(&f), mode(&d))
+            })
+            .join()
+            .expect("l'autre fil");
+            vu.push((e, u, f, d));
+        })
+        .expect("lier");
+        drop(serveur);
+        let _ = std::fs::remove_dir_all(&rep);
+
+        assert!(
+            !UMASK_APPELE.load(std::sync::atomic::Ordering::SeqCst),
+            "lier a appele umask(2), intercepte par le filtre: {vu:?}"
+        );
+        assert_eq!(
+            vu.iter().map(|v| v.0).collect::<Vec<_>>(),
+            [Liaison::Ecoute, Liaison::Mode],
+            "{vu:?}"
+        );
+        for (e, u, f, d) in &vu {
+            assert_eq!(
+                (*u, *f, *d),
+                (avant, 0o666 & !avant, 0o777 & !avant),
+                "{e:?}: umask, fichier et repertoire de l'autre fil (umask \
+                 du processus {avant:04o})"
+            );
+        }
+        println!("{MARQUE} umask {avant:04o}, {vu:?}");
     }
 }

@@ -557,23 +557,78 @@ pub fn xray(p: &Parametres) -> Value {
 ///
 /// Le fichier de sing-box porte le secret de l'API de controle: le laisser
 /// lisible par tous rendrait inutile le fait d'avoir un secret.
+///
+/// Sous Unix, le fichier NAIT en 0600 au plus: le mode est donne a `open(2)`
+/// qui le cree, et non par un `chmod` apres l'ecriture, ce qui laisserait le
+/// secret, le temps d'un appel, au mode que l'umask du lanceur donne. Il est
+/// cree, jamais repris (`O_CREAT|O_EXCL`): le nom est propre au lancement
+/// (`lancement::chemin_configuration`), et un fichier deja la sous ce nom
+/// n'est pas le sien. `O_EXCL` refuse aussi un lien symbolique final, ou
+/// qu'il pointe; `O_NOFOLLOW` le dit une seconde fois.
 pub fn ecrire(chemin: &Path, valeur: &Value) -> anyhow::Result<()> {
     if let Some(parent) = chemin.parent() {
-        std::fs::create_dir_all(parent)?;
+        creer_le_repertoire(parent)?;
     }
     let texte = serde_json::to_string_pretty(valeur)?;
-    std::fs::write(chemin, texte)?;
 
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(chemin, std::fs::Permissions::from_mode(0o600))?;
+        use std::io::Write as _;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut fichier = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(chemin)?;
+        // La creation donne 0600 moins l'umask: jamais plus, mais moins sous
+        // un umask qui retirerait au proprietaire la lecture, et le coeur, a
+        // qui le fichier est ensuite donne, ne le lirait plus. 0600 exact, par
+        // le descripteur, ne rend rien a personne d'autre: le groupe et les
+        // autres n'ont jamais rien eu.
+        fichier.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        fichier.write_all(texte.as_bytes())?;
     }
+    #[cfg(not(unix))]
+    std::fs::write(chemin, texte)?;
     // Sous Windows, le fichier herite de l'ACL de son repertoire. Le
     // superviseur ecrit sous %ProgramData%\Bifrost, dont l'ACL est posee a
     // l'installation. Ce n'est pas equivalent a un 0600 pose ici, et c'est
     // note comme tel plutot que passe sous silence.
     Ok(())
+}
+
+/// Cree le repertoire des configurations s'il manque.
+///
+/// Sous Unix, ce repertoire-la nait en 0700, pose explicitement et non
+/// laisse a l'umask du processus: ni la liste des configurations ni leur
+/// traversee n'appartiennent a un autre compte. Un coeur lance sous un compte
+/// dedie n'y recoit que la traversee, par son groupe, au lancement
+/// (`superviseur::ouvrir_la_traversee`). Ses parents manquants sont crees
+/// comme avant, et un repertoire deja la n'est pas touche ici.
+fn creer_le_repertoire(rep: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        if rep.as_os_str().is_empty() || rep.is_dir() {
+            return Ok(());
+        }
+        if let Some(haut) = rep.parent().filter(|h| !h.as_os_str().is_empty()) {
+            std::fs::create_dir_all(haut)?;
+        }
+        match std::fs::DirBuilder::new().mode(0o700).create(rep) {
+            // Ne en 0700 moins l'umask; pose a 0700 pour que le daemon y
+            // ait toujours ses droits de proprietaire.
+            Ok(()) => std::fs::set_permissions(rep, std::fs::Permissions::from_mode(0o700)),
+            // Cree entre-temps par un autre: il est la, c'est ce qui compte.
+            Err(_) if rep.is_dir() => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(rep)
+    }
 }
 
 #[cfg(test)]
@@ -1225,6 +1280,280 @@ TUlJQlBBU1VOVlJBSUNFUlQ=
             "le fichier au secret est lisible par d'autres"
         );
         let _ = std::fs::remove_dir_all(chemin.parent().unwrap());
+    }
+
+    /// Le repertoire que `ecrire` cree nait en 0700, quel que soit l'umask
+    /// du processus de recettes (pose explicitement, pas laisse a l'umask);
+    /// un repertoire deja la n'est pas touche. Le mode du parent de la
+    /// recette est pose explicitement lui aussi.
+    #[cfg(unix)]
+    #[test]
+    fn le_repertoire_cree_nait_ferme_a_tous_sauf_au_daemon() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o7777;
+        let base = std::env::temp_dir().join(format!("bifrost-config-rep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir(&base).unwrap();
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let neuf = base.join("coeurs");
+        ecrire(&neuf.join("sing-box.json"), &sing_box(&parametres())).unwrap();
+        let ne = mode(&neuf);
+
+        let deja = base.join("deja");
+        std::fs::create_dir(&deja).unwrap();
+        std::fs::set_permissions(&deja, std::fs::Permissions::from_mode(0o750)).unwrap();
+        ecrire(&deja.join("sing-box.json"), &sing_box(&parametres())).unwrap();
+        let laisse = mode(&deja);
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert_eq!(ne, 0o700, "repertoire cree par ecrire: {ne:04o}");
+        assert_eq!(laisse, 0o750, "repertoire deja la: {laisse:04o}");
+    }
+
+    /// Un lien symbolique a la place du fichier n'est pas suivi, et un fichier
+    /// deja la sous ce nom n'est ni ouvert ni ecrase: `ecrire` refuse, et ni
+    /// la cible du lien ni l'ancien fichier ne changent.
+    #[cfg(unix)]
+    #[test]
+    fn un_lien_ou_un_fichier_deja_la_n_est_ni_suivi_ni_ecrase() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::env::temp_dir().join(format!("bifrost-config-deja-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir(&base).unwrap();
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let cible = base.join("cible");
+        std::fs::write(&cible, "cible intacte").unwrap();
+        let lien = base.join("lien.json");
+        std::os::unix::fs::symlink(&cible, &lien).unwrap();
+        let ancien = base.join("ancien.json");
+        std::fs::write(&ancien, "ancien intact").unwrap();
+
+        let par_le_lien = ecrire(&lien, &sing_box(&parametres()));
+        let sur_l_ancien = ecrire(&ancien, &sing_box(&parametres()));
+        let (c, a) = (
+            std::fs::read_to_string(&cible).unwrap(),
+            std::fs::read_to_string(&ancien).unwrap(),
+        );
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert!(
+            par_le_lien.is_err() && c == "cible intacte",
+            "par le lien: {c:?}"
+        );
+        assert!(
+            sur_l_ancien.is_err() && a == "ancien intact",
+            "sur l'ancien: {a:?}"
+        );
+    }
+
+    /// Present dans l'environnement de l'enfant, et la seulement.
+    #[cfg(target_os = "linux")]
+    const SEUL: &str = "BIFROST_RECETTE_CONFIGURATION_SEULE";
+
+    /// Rejoue la recette `nom` seule dans un processus enfant (ce binaire,
+    /// cette recette, un seul fil de recettes) et exige qu'elle y ait passe,
+    /// et que sa sortie porte `marque`, que seul son corps imprime apres ses
+    /// assertions.
+    #[cfg(target_os = "linux")]
+    fn seule_dans_un_processus(nom: &str, marque: &str) {
+        let sortie =
+            std::process::Command::new(std::env::current_exe().expect("binaire de la recette"))
+                .args(["--exact", nom, "--nocapture", "--test-threads=1"])
+                .env(SEUL, "1")
+                .stdin(std::process::Stdio::null())
+                .output()
+                .expect("lancement de l'enfant");
+        let texte = String::from_utf8_lossy(&sortie.stdout);
+        assert!(
+            sortie.status.success()
+                && texte.contains(&format!("test {nom} ... "))
+                && texte.contains(marque)
+                && texte.contains("test result: ok. 1 passed;"),
+            "l'enfant ({}):\n{texte}\n{}",
+            sortie.status,
+            String::from_utf8_lossy(&sortie.stderr)
+        );
+    }
+
+    /// Changements de mode neutralises par le filtre de l'enfant.
+    #[cfg(target_os = "linux")]
+    static CHMOD_NEUTRALISES: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+
+    #[cfg(target_os = "linux")]
+    extern "C" fn sur_sigsys(_: libc::c_int, _: *mut libc::siginfo_t, _: *mut libc::c_void) {
+        // Une addition atomique, sure dans un gestionnaire de signal.
+        CHMOD_NEUTRALISES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Dans l'enfant seulement: tout changement de mode (`chmod`, `fchmod`,
+    /// `fchmodat`, `fchmodat2`) par ce fil, ou par un fil qu'il cree ensuite,
+    /// n'est pas execute; le noyau envoie SIGSYS, dont le gestionnaire compte
+    /// l'appel. Un fichier garde donc le mode de sa naissance. Pas de
+    /// `SECCOMP_FILTER_FLAG_LOG`: aucune trace hors de l'enfant. Le filtre
+    /// compare les numeros d'appel de l'ABI native, celle de ce binaire.
+    #[cfg(target_os = "linux")]
+    fn neutraliser_les_changements_de_mode() {
+        let gestionnaire: extern "C" fn(libc::c_int, *mut libc::siginfo_t, *mut libc::c_void) =
+            sur_sigsys;
+        // SAFETY: `sigaction` n'est fait que d'entiers, d'un masque et de
+        // pointeurs facultatifs, pour lesquels zero est une valeur valide.
+        let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+        action.sa_sigaction = gestionnaire as libc::sighandler_t;
+        action.sa_flags = libc::SA_SIGINFO;
+        // SAFETY: `action` est valide et vit jusqu'au retour; l'ancien
+        // gestionnaire n'est pas demande.
+        let r = unsafe { libc::sigaction(libc::SIGSYS, &action, std::ptr::null_mut()) };
+        assert_eq!(r, 0, "sigaction: {}", std::io::Error::last_os_error());
+
+        let mut appels = vec![libc::SYS_fchmod, libc::SYS_fchmodat];
+        #[cfg(target_arch = "x86_64")]
+        appels.extend([libc::SYS_chmod, libc::SYS_fchmodat2]);
+        let instruction = |code: u32, jt: u8, jf: u8, k: u32| libc::sock_filter {
+            code: code as u16,
+            jt,
+            jf,
+            k,
+        };
+        // `seccomp_data` commence par le numero de l'appel (u32, offset 0).
+        let mut filtre = vec![instruction(
+            libc::BPF_LD | libc::BPF_W | libc::BPF_ABS,
+            0,
+            0,
+            0,
+        )];
+        for appel in appels {
+            filtre.push(instruction(
+                libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K,
+                0,
+                1,
+                appel as u32,
+            ));
+            filtre.push(instruction(
+                libc::BPF_RET | libc::BPF_K,
+                0,
+                0,
+                libc::SECCOMP_RET_TRAP,
+            ));
+        }
+        filtre.push(instruction(
+            libc::BPF_RET | libc::BPF_K,
+            0,
+            0,
+            libc::SECCOMP_RET_ALLOW,
+        ));
+        let programme = libc::sock_fprog {
+            len: filtre.len() as u16,
+            filter: filtre.as_mut_ptr(),
+        };
+        let (zero, un): (libc::c_ulong, libc::c_ulong) = (0, 1);
+        // SAFETY: prctl ne recoit que des entiers, tous de la largeur que le
+        // noyau lit.
+        let r = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, un, zero, zero, zero) };
+        assert_eq!(
+            r,
+            0,
+            "PR_SET_NO_NEW_PRIVS: {}",
+            std::io::Error::last_os_error()
+        );
+        // SAFETY: `programme` designe `filtre`, tous deux vivants jusqu'au
+        // retour; le noyau copie le filtre avant de rendre la main.
+        let r = unsafe {
+            libc::prctl(
+                libc::PR_SET_SECCOMP,
+                libc::SECCOMP_MODE_FILTER as libc::c_ulong,
+                &programme as *const libc::sock_fprog as libc::c_ulong,
+                zero,
+                zero,
+            )
+        };
+        assert_eq!(r, 0, "PR_SET_SECCOMP: {}", std::io::Error::last_os_error());
+    }
+
+    /// Le fichier d'une configuration NAIT en 0600, sans fenetre, quel que
+    /// soit l'umask du lanceur: son mode vient de sa creation, et non d'un
+    /// `chmod` apres l'ecriture.
+    ///
+    /// Jouee seule dans un processus enfant, qui pose l'umask le plus large
+    /// (000): la recette ne depend ainsi pas de celui du lanceur, et l'umask
+    /// d'un processus qui ne porte qu'elle ne touche aucune autre recette.
+    /// Puis tout changement de mode y est neutralise (filtre seccomp): le mode
+    /// lu apres `ecrire` est donc celui de la naissance du fichier.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn le_fichier_nait_en_0600_sans_attendre_un_chmod() {
+        use std::os::unix::fs::PermissionsExt;
+        const MARQUE: &str = "configuration nee seule:";
+        if std::env::var_os(SEUL).is_none() {
+            return seule_dans_un_processus(
+                "coeurs::configuration::tests::le_fichier_nait_en_0600_sans_attendre_un_chmod",
+                MARQUE,
+            );
+        }
+        // SAFETY: umask ne prend qu'un masque entier; ce processus enfant ne
+        // porte que cette recette.
+        unsafe { libc::umask(0) };
+        let base =
+            std::env::temp_dir().join(format!("bifrost-config-naissance-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir(&base).unwrap();
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let chemin = base.join("coeurs").join("sing-box.json");
+
+        neutraliser_les_changements_de_mode();
+        let ecrit = ecrire(&chemin, &sing_box(&parametres()));
+        let mode = std::fs::metadata(&chemin).map(|m| m.permissions().mode() & 0o7777);
+        let neutralises = CHMOD_NEUTRALISES.load(std::sync::atomic::Ordering::SeqCst);
+        let _ = std::fs::remove_dir_all(&base);
+
+        ecrit.expect("ecrire");
+        let mode = mode.expect("le fichier existe");
+        assert_eq!(
+            mode, 0o600,
+            "ne en {mode:04o} sous l'umask 000 ({neutralises} changement(s) de mode neutralise(s))"
+        );
+        println!("{MARQUE} 0600, {neutralises} changement(s) de mode neutralise(s)");
+    }
+
+    /// Sous un umask qui retire au proprietaire la lecture (0477 ici), la
+    /// creation seule donnerait un fichier en 0200, que le coeur, a qui il est
+    /// ensuite donne, ne lirait pas: `ecrire` le pose en 0600 exact, par son
+    /// descripteur, avant d'y ecrire.
+    ///
+    /// Jouee seule dans un processus enfant, pour la meme raison que la
+    /// recette de la naissance: l'umask est celui de tout le processus.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn sous_un_umask_qui_retire_la_lecture_le_fichier_reste_en_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        const MARQUE: &str = "configuration lisible seule:";
+        if std::env::var_os(SEUL).is_none() {
+            return seule_dans_un_processus(
+                "coeurs::configuration::tests::sous_un_umask_qui_retire_la_lecture_le_fichier_reste_en_0600",
+                MARQUE,
+            );
+        }
+        // SAFETY: umask ne prend qu'un masque entier; ce processus enfant ne
+        // porte que cette recette.
+        unsafe { libc::umask(0o477) };
+        let base =
+            std::env::temp_dir().join(format!("bifrost-config-lisible-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir(&base).unwrap();
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let chemin = base.join("coeurs").join("sing-box.json");
+
+        let ecrit = ecrire(&chemin, &sing_box(&parametres()));
+        let mode = std::fs::metadata(&chemin).map(|m| m.permissions().mode() & 0o7777);
+        let lu = std::fs::read_to_string(&chemin).map(|t| t.len());
+        let _ = std::fs::remove_dir_all(&base);
+
+        ecrit.expect("ecrire");
+        let mode = mode.expect("le fichier existe");
+        assert_eq!(mode, 0o600, "pose en {mode:04o} sous l'umask 0477");
+        let lu = lu.expect("le proprietaire relit sa configuration");
+        println!("{MARQUE} 0600, {lu} octets relus");
     }
 
     /// Cle de DOCUMENTATION: 43 caracteres de l'alphabet base64url, la forme

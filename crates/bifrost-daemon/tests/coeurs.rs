@@ -437,6 +437,108 @@ fn la_garde_anti_orphelin_survit_a_la_baisse_de_privilege() {
     );
 }
 
+/// Un coeur lance sous son compte dedie lit la configuration que le produit a
+/// ecrite pour lui, et un compte tiers ne traverse meme pas son repertoire.
+///
+/// Root requis pour baisser l'UID, sinon SKIPPED. Des comptes deja presents
+/// sur une machine Linux, aucun n'est cree: `nobody` (65534:65534) tient le
+/// role du compte du coeur, `daemon` (1:1) celui d'un compte tiers. Le coeur
+/// est un TEMOIN, nomme comme tel: `/bin/sh`, lance par `superviseur::demarrer`
+/// sous le compte du coeur, lit le fichier de configuration puis reste en vie;
+/// aucun coeur reel n'est installe sur les machines de recette.
+///
+/// Deux repertoires de configurations, pour ne pas dependre de l'umask du
+/// processus de recettes:
+/// - pose ici en 0700: l'etat que l'unite (`UMask=0077`) donnait au
+///   repertoire cree par une version precedente, et que
+///   `RuntimeDirectoryPreserve=yes` garde d'un demarrage a l'autre;
+/// - absent, cree par `configuration::ecrire`.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn un_coeur_sous_son_compte_lit_sa_configuration_et_lui_seul_traverse() {
+    use bifrost_daemon::coeurs::configuration;
+    use bifrost_daemon::coeurs::lancement::Utilisateur;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::os::unix::process::CommandExt;
+
+    const COEUR: Utilisateur = Utilisateur {
+        uid: 65534,
+        gid: 65534,
+    };
+    const TIERS: (u32, u32) = (1, 1);
+
+    // SAFETY: geteuid ne prend aucun argument et ne peut pas echouer.
+    let euid = unsafe { libc::geteuid() };
+    if euid != 0 {
+        println!(
+            "SKIPPED un_coeur_sous_son_compte_lit_sa_configuration_et_lui_seul_traverse: \
+             baisser l'UID demande root, or ce test tourne sous l'uid {euid}"
+        );
+        return;
+    }
+
+    let base = repertoire_temporaire("compte-du-coeur");
+    // Les deux comptes doivent atteindre le repertoire des configurations: le
+    // mode de la base de la recette est pose, pas laisse a l'umask.
+    std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut constats = Vec::new();
+    for (cas, pose_en_0700) in [("pose-en-0700", true), ("cree-par-ecrire", false)] {
+        let rep = base.join(cas);
+        if pose_en_0700 {
+            std::fs::create_dir(&rep).unwrap();
+            std::fs::set_permissions(&rep, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let chemin = rep.join("temoin.json");
+        configuration::ecrire(&chemin, &serde_json::json!({ "temoin": cas })).unwrap();
+        let mut arguments: Vec<std::ffi::OsString> =
+            ["-c", "cat -- \"$1\" > /dev/null && exec sleep 30", "temoin"]
+                .iter()
+                .map(std::ffi::OsString::from)
+                .collect();
+        arguments.push(chemin.clone().into_os_string());
+        let lancement = Lancement {
+            programme: PathBuf::from("/bin/sh"),
+            arguments,
+            configuration: chemin.clone(),
+            api_clash: None,
+            utilisateur: Some(COEUR),
+        };
+        let issue = superviseur::demarrer(Coeur::SingBox, &lancement, "secret-du-temoin").await;
+        let m = std::fs::metadata(&rep).unwrap();
+        let tiers_voit = std::process::Command::new("/bin/sh")
+            .args(["-c", "test -e \"$1\"", "tiers"])
+            .arg(&chemin)
+            .uid(TIERS.0)
+            .gid(TIERS.1)
+            .status()
+            .unwrap()
+            .success();
+        let lu = match issue {
+            Ok(en_cours) => {
+                en_cours.arreter().await.expect("arret du temoin");
+                Ok(())
+            }
+            Err(e) => Err(format!("{e:#}")),
+        };
+        constats.push((cas, lu, m.mode() & 0o7777, m.gid(), tiers_voit));
+    }
+    let _ = std::fs::remove_dir_all(&base);
+    for (cas, lu, mode, gid, tiers_voit) in &constats {
+        println!(
+            "mesure compte du coeur: {cas}: lu={lu:?} repertoire={mode:04o} groupe={gid} \
+             tiers_traverse={tiers_voit}"
+        );
+    }
+    for (cas, lu, mode, gid, tiers_voit) in &constats {
+        assert!(
+            lu.is_ok(),
+            "{cas}: le coeur sous son compte ne lit pas sa configuration: {lu:?}"
+        );
+        assert_eq!((*mode, *gid), (0o710, COEUR.gid), "{cas}: {mode:04o}");
+        assert!(!tiers_voit, "{cas}: un compte tiers traverse le repertoire");
+    }
+}
+
 /// Combien de temps le temoin laisse a l'orphelin pour REPONDRE.
 ///
 /// Le budget du demarrage, et non trois secondes de survie: ce qui est attendu

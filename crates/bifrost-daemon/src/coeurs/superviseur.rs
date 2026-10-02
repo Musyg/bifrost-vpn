@@ -526,8 +526,10 @@ pub async fn demarrer(
     // La configuration porte des secrets et vit en 0600. Un coeur qui tourne
     // sous un autre compte ne peut donc plus la lire: on lui en donne la
     // PROPRIETE plutot que d'elargir le mode, ce qui la rendrait lisible par
-    // toute la machine. C'est fait ici, et pas au moment de l'ecriture, pour
-    // qu'aucun appelant ne puisse l'oublier: qui pose un compte donne l'acces.
+    // toute la machine, et la seule TRAVERSEE de son repertoire (voir
+    // `ouvrir_la_traversee`). C'est fait ici, et pas au moment de l'ecriture,
+    // pour qu'aucun appelant ne puisse l'oublier: qui pose un compte donne
+    // l'acces.
     #[cfg(unix)]
     if let Some(u) = lancement.utilisateur {
         std::os::unix::fs::chown(&lancement.configuration, Some(u.uid), Some(u.gid)).map_err(
@@ -540,6 +542,25 @@ pub async fn demarrer(
                 )
             },
         )?;
+        if let Some(rep) = lancement
+            .configuration
+            .parent()
+            .filter(|r| !r.as_os_str().is_empty())
+        {
+            let ouverte = ouvrir_la_traversee(rep, u.gid).map_err(|e| {
+                anyhow::anyhow!(
+                    "donner au groupe {} la traversee de {}: {e}",
+                    u.gid,
+                    rep.display()
+                )
+            })?;
+            if !ouverte {
+                tracing::debug!(
+                    repertoire = %rep.display(),
+                    "repertoire des configurations laisse tel quel: il n'est pas ferme au seul daemon"
+                );
+            }
+        }
         commande.gid(u.gid).uid(u.uid);
     }
 
@@ -609,6 +630,81 @@ pub async fn demarrer(
             d => Err(anyhow::anyhow!("{e}; {d}")),
         },
     }
+}
+
+/// Donne au groupe `gid`, celui du compte d'un coeur, la seule TRAVERSEE du
+/// repertoire de sa configuration. Rend `true` si le repertoire est desormais
+/// en 0710 a ce groupe, `false` s'il est laisse tel quel.
+///
+/// Le repertoire que le produit cree nait en 0700 (`configuration::ecrire`),
+/// et l'unite systemd (`UMask=0077`) donne le meme mode a celui d'une version
+/// precedente, que `RuntimeDirectoryPreserve=yes` garde d'un demarrage a
+/// l'autre. Un compte qui n'en est ni proprietaire ni du groupe ne le
+/// traverse pas, et un coeur lance sous lui n'ouvrait pas sa configuration
+/// (mesure le 02/10/2026 sur essai-linux, en root dans un espace de montage
+/// jetable, sous le compte existant `nobody`: recette de `tests/coeurs.rs`).
+///
+/// 0710 est le plus etroit qui marche: le daemon en reste proprietaire avec
+/// tous les droits (le retrait des configurations mortes, au demarrage, le
+/// lit en root), le groupe du coeur n'y a que la traversee, ni la liste ni
+/// l'ecriture, et les autres rien. 0711 ouvrirait la traversee a tout compte
+/// local. Le groupe est pose AVANT la traversee: dans l'ordre inverse, le
+/// groupe precedent traverserait le temps du `chown`.
+///
+/// Seul un repertoire du daemon change: un vrai repertoire (pas un lien), a
+/// ce processus, ferme a tous sauf, au plus, la traversee de son groupe. Un
+/// repertoire que l'exploitation a ouvert autrement est laisse tel quel. Le
+/// repertoire est ouvert sans suivre de lien, puis change par son
+/// descripteur: rien ne peut lui etre substitue entre l'examen et le
+/// changement.
+#[cfg(unix)]
+pub(crate) fn ouvrir_la_traversee(repertoire: &std::path::Path, gid: u32) -> std::io::Result<bool> {
+    ouvrir_la_traversee_avec(repertoire, gid, |_, _| {})
+}
+
+/// Les etapes de [`ouvrir_la_traversee`] apres lesquelles une recette lit le
+/// repertoire par son descripteur. Le daemon n'en fait rien.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Traversee {
+    /// Le groupe du coeur est pose.
+    Groupe,
+    /// La traversee est ouverte a ce groupe.
+    Mode,
+}
+
+/// Le corps de [`ouvrir_la_traversee`]. `temoin` est appele apres chaque
+/// changement, avec le descripteur du repertoire change: les recettes y
+/// lisent l'ordre reel, le daemon n'y met rien.
+#[cfg(unix)]
+fn ouvrir_la_traversee_avec(
+    repertoire: &std::path::Path,
+    gid: u32,
+    mut temoin: impl FnMut(Traversee, &std::fs::File),
+) -> std::io::Result<bool> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+
+    if std::fs::symlink_metadata(repertoire)?
+        .file_type()
+        .is_symlink()
+    {
+        return Ok(false);
+    }
+    let rep = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(repertoire)?;
+    let m = rep.metadata()?;
+    // SAFETY: geteuid ne prend aucun argument et ne touche aucune memoire.
+    let moi = unsafe { libc::geteuid() };
+    if !m.is_dir() || m.uid() != moi || m.mode() & 0o067 != 0 {
+        return Ok(false);
+    }
+    std::os::unix::fs::fchown(&rep, None, Some(gid))?;
+    temoin(Traversee::Groupe, &rep);
+    rep.set_permissions(std::fs::Permissions::from_mode(0o710))?;
+    temoin(Traversee::Mode, &rep);
+    Ok(true)
 }
 
 /// Delai pendant lequel un coeur sans API doit rester en vie pour etre
@@ -731,6 +827,124 @@ async fn attendre_api(en_cours: &mut CoeurEnCours, api: SocketAddr) -> anyhow::R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Sans privilege, sur des repertoires de ce compte, avec son propre
+    /// groupe (le seul qu'il puisse donner sans `CAP_CHOWN`): un repertoire
+    /// ferme au seul daemon passe en 0710 a ce groupe, deux fois de suite; un
+    /// repertoire ouvert autrement, et un lien, sont laisses tels quels. Les
+    /// modes sont poses explicitement, pas laisses a l'umask du processus de
+    /// recettes. Le compte du coeur reel, lui, demande root: voir
+    /// `tests/coeurs.rs`.
+    #[cfg(unix)]
+    #[test]
+    fn seul_un_repertoire_ferme_au_daemon_s_ouvre_en_traversee_a_son_groupe() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        // SAFETY: getegid ne prend aucun argument et ne touche aucune memoire.
+        let gid = unsafe { libc::getegid() };
+        let base = std::env::temp_dir().join(format!("bifrost-traversee-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir(&base).unwrap();
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let etat = |p: &std::path::Path| {
+            let m = std::fs::symlink_metadata(p).unwrap();
+            (m.mode() & 0o7777, m.gid())
+        };
+        let rep = |nom: &str, mode: u32| {
+            let r = base.join(nom);
+            std::fs::create_dir(&r).unwrap();
+            std::fs::set_permissions(&r, std::fs::Permissions::from_mode(mode)).unwrap();
+            r
+        };
+
+        let ferme = rep("ferme", 0o700);
+        let premier = ouvrir_la_traversee(&ferme, gid).unwrap();
+        let apres_premier = etat(&ferme);
+        let second = ouvrir_la_traversee(&ferme, gid).unwrap();
+        let mut laisses = Vec::new();
+        for (nom, mode) in [("ouvert", 0o755), ("groupe", 0o750), ("autres", 0o701)] {
+            let r = rep(nom, mode);
+            laisses.push((nom, ouvrir_la_traversee(&r, gid).unwrap(), etat(&r).0, mode));
+        }
+        let cible = rep("cible", 0o700);
+        let lien = base.join("lien");
+        std::os::unix::fs::symlink(&cible, &lien).unwrap();
+        let par_le_lien = ouvrir_la_traversee(&lien, gid).unwrap();
+        let cible_apres = etat(&cible).0;
+        let fin = etat(&ferme);
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert!(premier && second, "repertoire ferme au daemon non ouvert");
+        assert_eq!(apres_premier, (0o710, gid));
+        assert_eq!(fin, (0o710, gid));
+        for (nom, ouvert, mode, avant) in laisses {
+            assert!(
+                !ouvert && mode == avant,
+                "{nom}: {mode:04o} au lieu de {avant:04o}"
+            );
+        }
+        assert!(
+            !par_le_lien && cible_apres == 0o700,
+            "par un lien: {cible_apres:04o}"
+        );
+    }
+
+    /// Le groupe du coeur est pose AVANT la traversee, et chacun l'est
+    /// reellement: lu par son descripteur apres chaque etape, le repertoire
+    /// passe de (0700, groupe d'avant) a (0700, groupe du coeur), puis a
+    /// (0710, groupe du coeur), sans jamais ouvrir la traversee au groupe
+    /// d'avant. Sans privilege: le groupe du coeur est un groupe
+    /// supplementaire de ce compte, que `fchown` peut donner sans `CAP_CHOWN`;
+    /// un compte sans groupe supplementaire ne distingue pas les deux groupes,
+    /// et la recette s'abstient. Le mode du repertoire est pose explicitement,
+    /// pas laisse a l'umask du processus de recettes.
+    #[cfg(unix)]
+    #[test]
+    fn le_groupe_du_coeur_est_pose_avant_la_traversee() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        // SAFETY: getgroups ecrit au plus `n` gid dans un tampon de `n` gid,
+        // et n'ecrit rien quand on lui passe zero.
+        let groupes = unsafe {
+            let n = libc::getgroups(0, std::ptr::null_mut());
+            let mut g: Vec<libc::gid_t> = vec![0; n.max(0) as usize];
+            let lus = libc::getgroups(n.max(0), g.as_mut_ptr());
+            g.truncate(lus.max(0) as usize);
+            g
+        };
+        let base =
+            std::env::temp_dir().join(format!("bifrost-traversee-ordre-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir(&base).unwrap();
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let rep = base.join("coeurs");
+        std::fs::create_dir(&rep).unwrap();
+        std::fs::set_permissions(&rep, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let avant = std::fs::metadata(&rep).unwrap().gid();
+        let Some(coeur) = groupes.into_iter().find(|g| *g != avant) else {
+            let _ = std::fs::remove_dir_all(&base);
+            println!(
+                "SKIPPED le_groupe_du_coeur_est_pose_avant_la_traversee: ce compte n'a aucun \
+                 groupe supplementaire a donner, le groupe d'avant et celui du coeur seraient le meme"
+            );
+            return;
+        };
+
+        let mut vu = Vec::new();
+        let ouverte = ouvrir_la_traversee_avec(&rep, coeur, |e, d| {
+            let m = d.metadata().expect("le repertoire par son descripteur");
+            vu.push((e, m.mode() & 0o7777, m.gid()));
+        });
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert!(matches!(ouverte, Ok(true)), "{ouverte:?}");
+        assert_eq!(
+            vu,
+            [
+                (Traversee::Groupe, 0o700, coeur),
+                (Traversee::Mode, 0o710, coeur)
+            ],
+            "groupe d'avant {avant}, groupe du coeur {coeur}"
+        );
+    }
 
     #[test]
     fn un_journal_vide_ne_dit_rien() {

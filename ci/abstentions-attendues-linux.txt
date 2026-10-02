@@ -44,6 +44,7 @@ SKIPPED la_garde_anti_orphelin_survit_a_la_baisse_de_privilege: baisser l'UID de
 SKIPPED la_poignee_rend_un_verdict_sans_jamais_faire_attendre_le_superviseur: BIFROST_COEURS ne designe aucun repertoire: cette recette veut un vrai sing-box, que le depot ne distribue pas
 SKIPPED les_quatre_issues_de_la_sonde_tiennent_face_a_un_vrai_coeur: BIFROST_COEURS ne designe aucun repertoire: cette recette veut un vrai sing-box, que le depot ne distribue pas
 SKIPPED un_chemin_etroit_est_vu_comme_tel: BIFROST_CHEMIN_ETROIT absent, aucune interface a MTU reduit a viser
+SKIPPED un_coeur_sous_son_compte_lit_sa_configuration_et_lui_seul_traverse: baisser l'UID demande root, or ce test tourne sous l'uid <N>
 SKIPPED: creer un espace de noms reseau demande CAP_NET_ADMIN
 SKIPPED: la cle du coffre est dans le TPM, qui n'est lisible que par root
 SKIPPED: le binaire minisign n'est pas installe sur cette machine
