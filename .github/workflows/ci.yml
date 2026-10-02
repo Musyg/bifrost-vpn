@@ -23,7 +23,15 @@ concurrency:
 
 # Toute action tierce est epinglee par SHA: un tag est mutable, et un tag
 # deplace suffit a executer du code arbitraire dans un job qui compile un
-# produit de securite.
+# produit de securite. Chaque outil installe l'est a une version exacte, et
+# chaque job tourne sur une image nommee par sa version (`ubuntu-24.04`,
+# `windows-2025-vs2026`) et non par `-latest`: un `-latest` change d'OS ou de
+# chaine MSVC sans un commit du depot. Annonces actions/runner-images#14017
+# (`windows-latest` et `windows-2025` passes a Visual Studio 2026 en juin
+# 2026) et #14748 (`ubuntu-latest` passe a Ubuntu 26.04 du 19/10 au
+# 19/11/2026). Ce qui reste flottant: la revision hebdomadaire de l'image (ses
+# paquets apt, son noyau, ses outils), relevee dans l'en-tete de chaque job
+# ("Image: ... Version: ...").
 env:
   CARGO_TERM_COLOR: always
 
@@ -31,7 +39,7 @@ jobs:
   controles:
     name: format, lint et tests (Linux)
     if: github.event_name != 'workflow_dispatch' || !inputs.windows
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # `shell: bash` pour toutes les etapes: GitHub lance alors
     # `bash --noprofile --norc -eo pipefail {0}`. Sans `shell`, il lance
     # `bash -e {0}`, SANS pipefail (documentation << Workflow syntax >>, table
@@ -104,13 +112,41 @@ jobs:
       - name: Configuration du resolveur chiffre
         run: ./scripts/resolveur-linux.sh
 
+      # Les binaires LIVRES, pas ceux des recettes. Dans la suite,
+      # `durcissement_binaire.rs` lit l'executable de la recette (profil de
+      # test, sans LTO); les scripts d'installation copient ceux de
+      # `cargo build --release`. Cette etape les construit comme ces scripts le
+      # conseillent, puis la meme recette lit leurs en-tetes: ici PIE, RELRO
+      # complet et pile non executable; dans le job Windows, ASLR 64 bits, DEP,
+      # Control Flow Guard (table et controles emis) et CET. Elle est ignoree
+      # dans la suite et ne tourne que par `--ignored`. Sans
+      # BIFROST_REPERTOIRE_LIVRE, ou sans un des binaires que les installeurs
+      # copient (liste confrontee a ces scripts par une autre recette), elle
+      # rougit au lieu de lire autre chose. Aucun RUSTFLAGS: defini, meme vide,
+      # il ferait ignorer `.cargo/config.toml`, et c'est ce qu'elle doit voir.
+      # `--workspace` comme la suite: memes fonctionnalites, la recette deja
+      # compilee par l'etape des recettes n'est pas reconstruite.
+      - name: Binaires livres (--release), en-tetes
+        env:
+          BIFROST_REPERTOIRE_LIVRE: target/release
+        run: |
+          cargo build --release --locked
+          cargo test --locked --workspace --test durcissement_binaire -- --ignored --nocapture
+
   windows:
     name: lint et tests (Windows)
     # Le quota Windows est reserve aux validations demandees explicitement.
     # Ni une PR, ni sa fusion, ni une relance de leur CI ne l'active.
     if: github.event_name == 'workflow_dispatch' && inputs.windows
-    runs-on: windows-latest
-    timeout-minutes: 20
+    runs-on: windows-2025-vs2026
+    # 30 et non plus 20: l'etape des binaires livres ajoute une construction
+    # --release complete (LTO, une unite de code par crate). Mesure du
+    # 02/10/2026: 299 s a froid sur dev-windows, ou la suite prend 338 s
+    # contre 232 s sur ce runner (run 36967583779). Estimation, non mesuree
+    # sur le runner: le job passerait d'environ 7 a environ 11 minutes. La
+    # borne reste ce qu'elle est: un job bloque ne doit pas immobiliser un
+    # runner.
+    timeout-minutes: 30
     concurrency:
       group: ${{ github.workflow }}-windows
       cancel-in-progress: false
@@ -160,6 +196,20 @@ jobs:
       - name: Compilation
         run: cargo build --workspace --locked
 
+      # Les binaires livres, construits en --release et lus par la meme
+      # recette: voir l'etape du meme nom dans le job `controles`. Sous
+      # Windows elle lit ASLR 64 bits et DEP, GUARD_CF et la table des cibles,
+      # les controles CFG emis dans le code (qui separent `checks` de
+      # `nochecks`), et le marquage CET de `/CETCOMPAT`. `shell: bash`: sous
+      # PowerShell, l'echec de la premiere commande n'arreterait pas l'etape.
+      - name: Binaires livres (--release), en-tetes
+        shell: bash
+        env:
+          BIFROST_REPERTOIRE_LIVRE: target/release
+        run: |
+          cargo build --release --locked
+          cargo test --locked --workspace --test durcissement_binaire -- --ignored --nocapture
+
       # L'autotest du kill switch (--wfp-selftest) n'est PAS execute ici, et ce
       # n'est pas un oubli. Il a ete essaye: il fonctionne, et c'est justement
       # le probleme. Le block-all coupe tout le reseau de la machine, donc la
@@ -171,7 +221,7 @@ jobs:
   fuite:
     name: suite de fuite
     if: github.event_name != 'workflow_dispatch' || !inputs.windows
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Le harnais lance des daemons et des captures: si l'un d'eux survit a son
     # script, le job reste ouvert bien apres que ses etapes ont reussi. Cette
     # borne evite d'immobiliser un runner pendant des heures.
@@ -183,6 +233,16 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Les versions de ces paquets ne sont PAS epinglees: elles sont celles de
+      # l'image du jour. Releve du run 36912524623 (01/10/2026, image
+      # ubuntu-24.04 20260927.320): les quatre y sont deja installes, apt ne
+      # pose rien (nftables 1.0.9-1ubuntu0.1, tcpdump 4.99.4-3ubuntu4.24.04.1,
+      # iproute2 6.1.0-1ubuntu6.4, jq 1.7.1-3ubuntu0.24.04.2). Epingler
+      # `paquet=version` casserait l'etape a la mise a jour suivante: les index
+      # d'Ubuntu ne gardent que la version de sortie et la derniere mise a jour
+      # (releve du 02/10/2026 sur un hote 24.04: iproute2 6.1.0-1ubuntu6 et
+      # 6.1.0-1ubuntu6.4, aucune version entre les deux). Limite nommee dans le
+      # document 07, section 2.2.
       - name: Dependances du harnais
         run: |
           sudo apt-get update
@@ -321,7 +381,7 @@ jobs:
   dependances:
     name: audit des dependances et SBOM
     if: github.event_name != 'workflow_dispatch' || !inputs.windows
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -333,10 +393,24 @@ jobs:
       # Des binaires publies, pas une compilation: `cargo install cargo-deny`
       # sur un runner prend plusieurs minutes a chaque execution, pour un outil
       # dont on ne modifie jamais le code.
+      #
+      # Chaque outil a sa version exacte. Sans `@version`, l'action prend le
+      # `latest` du manifeste qu'elle porte a l'empreinte epinglee; une montee
+      # de l'action changerait donc d'outil sans que cette ligne bouge. Les
+      # trois versions sont les dernieres publiees sur crates.io au 02/10/2026
+      # (cargo-audit 0.22.2 du 05/06/2026, cargo-deny 0.20.2 du 09/07/2026,
+      # cargo-cyclonedx 0.5.9 du 19/03/2026) et celles du manifeste de
+      # v2.86.5; les quatre commandes de ce job passent avec elles. Monter une
+      # version est un changement a part entiere, verifie avant.
+      #
+      # `fallback: none`: une version absente du manifeste fait echouer
+      # l'etape. Sans lui, l'action se rabattrait sur cargo-binstall, donc sur
+      # un binaire d'une autre provenance, sans somme de controle du manifeste.
       - name: Outillage
         uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518 # v2.86.5
         with:
-          tool: cargo-audit,cargo-deny,cargo-cyclonedx
+          tool: cargo-audit@0.22.2,cargo-deny@0.20.2,cargo-cyclonedx@0.5.9
+          fallback: none
 
       # Les deux outils lisent la MEME base RustSec, et c'est voulu de garder
       # les deux. cargo-audit est l'implementation de reference de RustSec;
@@ -373,9 +447,9 @@ jobs:
       # y prend `fuzz/Cargo.toml`, puis cherche `deny.toml` en partant du
       # dossier de ce manifeste, et trouve `fuzz/deny.toml` avant celui de la
       # racine. La place de `--config` a change avec cargo-deny 0.20.0 (avant
-      # la sous-commande, et non plus apres `check`), et l'action ci-dessus
-      # installe la derniere version: chacune des deux formes explicites est
-      # refusee par l'autre version, celle-ci tient sous les deux.
+      # la sous-commande, et non plus apres `check`): chacune des deux formes
+      # explicites est refusee par l'autre version, celle-ci tient sous les
+      # deux, ce qui garde le passage d'une version a l'autre sans surprise.
       - name: Licences, sources, doublons et avis du harnais de fuzzing
         working-directory: fuzz
         run: cargo deny check
@@ -423,7 +497,7 @@ jobs:
   fuzz:
     name: fuzzing des parseurs (Linux)
     if: github.event_name != 'workflow_dispatch' || !inputs.windows
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     defaults:
       run:
@@ -443,8 +517,12 @@ jobs:
       # Compile depuis crates.io a une version fixe, avec son propre verrou.
       # `taiki-e/install-action` ne connait pas cargo-fuzz et se replierait sur
       # cargo-binstall, c'est-a-dire sur une provenance qu'on ne choisit pas.
+      # 0.13.2 (crates.io, 09/06/2026), derniere version au 02/10/2026: les
+      # dix-sept cibles se construisent et rejouent leurs graines avec elle.
+      # cargo-fuzz ne sert qu'a construire: `fuzz-linux.sh` lance ensuite les
+      # binaires eux-memes.
       - name: cargo-fuzz
-        run: cargo install --locked cargo-fuzz --version 0.13.1
+        run: cargo install --locked cargo-fuzz --version 0.13.2
 
       # Avec la chaine du depot (`rust-toolchain.toml`), comme le format du
       # workspace racine: `cargo fmt --all` ne descend pas dans un espace de
