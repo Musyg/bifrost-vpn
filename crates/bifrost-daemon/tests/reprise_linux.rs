@@ -74,9 +74,8 @@ async fn le_hook_de_veille_fait_arriver_la_reprise_au_superviseur() {
         return;
     };
 
-    // Mode pose explicitement: `IpcServer::bind` applique un `umask(0o117)`
-    // processus-wide le temps de se lier, et un repertoire cree pendant ce
-    // temps-la naitrait sans bit d'execution, donc intraversable.
+    // Mode pose explicitement, pas laisse a l'umask du processus de
+    // recettes: le repertoire doit rester traversable quel qu'il soit.
     let rep = std::env::temp_dir().join(format!("bifrost-reprise-sup-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&rep);
     std::fs::create_dir_all(&rep).expect("atelier");

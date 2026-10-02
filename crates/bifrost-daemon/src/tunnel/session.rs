@@ -701,6 +701,10 @@ pub(crate) fn processus_vivant(pid: u32, debut: u64) -> std::io::Result<bool> {
 pub(crate) use systeme::preparer;
 #[cfg(target_os = "linux")]
 pub use systeme::{Session, designer_le_journal};
+/// Pour les recettes du montage (`super::linux`): le journal tel que le
+/// montage suivant le lit.
+#[cfg(all(test, target_os = "linux"))]
+pub(in crate::tunnel) use systeme::{entrees, reseau_courant};
 
 #[cfg(target_os = "linux")]
 mod systeme {
@@ -823,7 +827,7 @@ mod systeme {
     /// Les entrees du journal dont le namespace reseau est `reseau`. Une
     /// entree illisible est une erreur, quel que soit son namespace: on ne
     /// sait pas lequel c'est.
-    pub(super) fn entrees(rep: &Path, reseau: &str) -> Result<Vec<(String, Entree)>> {
+    pub(in crate::tunnel) fn entrees(rep: &Path, reseau: &str) -> Result<Vec<(String, Entree)>> {
         if !repertoire_sur(rep, false)? {
             return Ok(Vec::new());
         }
@@ -877,7 +881,7 @@ mod systeme {
     /// Le namespace reseau de ce processus: son cookie (`SO_NETNS_COOKIE`),
     /// que le noyau ne redonne jamais a un autre namespace; a defaut (un noyau
     /// qui ne le connait pas), le peripherique et l'inode du namespace.
-    pub(super) fn reseau_courant() -> Result<String> {
+    pub(in crate::tunnel) fn reseau_courant() -> Result<String> {
         // SAFETY: appel systeme sans pointeur; le descripteur rendu, s'il est
         // valide, est aussitot confie a un `OwnedFd` qui le fermera.
         let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0) };
@@ -1035,7 +1039,11 @@ mod systeme {
         }
 
         /// [`Session::ouvrir`], dans le journal `rep`.
-        fn ouvrir_dans(rep: &Path, plan: &Plan, cle: Option<String>) -> Result<Self> {
+        pub(in crate::tunnel) fn ouvrir_dans(
+            rep: &Path,
+            plan: &Plan,
+            cle: Option<String>,
+        ) -> Result<Self> {
             let (pid, debut) = moi()?;
             let entree = Entree {
                 pid,
