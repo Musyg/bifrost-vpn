@@ -390,6 +390,54 @@ Le rapport ne porte que des categories et des comptes. MATCH n'est pas une
 preuve d'etancheite du VPN. Voir
 [D1c.3 dans les specifications](docs/09-souverainete-verifiable.md#d1c3---routes-et-lignes-dinterface-windows-ip-helper-livrees).
 
+## Comparer les resolveurs DNS effectifs, Linux
+
+```sh
+bifrost-cli --json prove dns --intention intention.json --actif
+```
+
+L'intention dit quel plan DNS le produit a pose, avec les memes parametres que
+la configuration, et quel backend le daemon a choisi. Les sept champs sont
+obligatoires, `null` compris:
+
+```json
+{"schema_version": 1, "backend": "systemd-resolved", "interface": "wg0", "local_resolver": "127.0.0.1", "upstream": ["192.0.2.53", "2001:db8::53"], "embarque": false, "resolveur_uid": null}
+```
+
+`backend` vaut `systemd-resolved` ou `resolv-conf`. Avec un resolveur
+embarque, `embarque` vaut `true` et `resolveur_uid` peut porter son compte.
+L'attendu est le plan que le daemon pose lui-meme: les memes fonctions rendent
+les arguments `resolvectl`, le contenu de `/etc/resolv.conf` et la reference
+de la preuve.
+
+La commande lit deux fois, sans elevation, sans programme externe et sans
+rien changer: les sources `hosts` de `/etc/nsswitch.conf`, les ecoutes UDP du
+port 53, le mode et le contenu de `/etc/resolv.conf`, et, par le bus systeme,
+les serveurs et les domaines de systemd-resolved, lien par lien, avec leurs
+portees LLMNR et mDNS. Elle signale:
+- un `/etc/resolv.conf` qui ne mene pas au stub de resolved, ou qui differe
+  du rendu du produit;
+- une source `hosts` hors de la liste admise;
+- un lien du tunnel sans portee DNS, d'autres serveurs, ou autre chose que
+  `~.`;
+- un autre lien, ou la portee globale, qui a un serveur et un domaine, ou
+  `~.`;
+- LLMNR actif sur un lien;
+- un resolveur embarque qui n'ecoute pas, ou pas sous son compte.
+
+Deux lectures differentes, un bus absent ou qui refuse, une signature D-Bus
+non lue, des delegues DNS, ou un resolved d'un autre namespace rendent
+UNMEASURED/2.
+
+`.local` par mDNS est une limite nommee: il rend MATCH alors que des requetes
+partent sur le lien, et le rapport le compte. Le rapport ne porte que des
+categories et des comptes: ni adresse, ni domaine, ni interface, ni compte.
+Ni les caches, ni les connexions ouvertes, ni les resolveurs propres aux
+applications, ni le pare-feu ne sont prouves.
+
+MATCH n'est pas une preuve d'etancheite du VPN. Voir
+[D1c.4 dans les specifications](docs/09-souverainete-verifiable.md#d1c4---resolveurs-dns-effectifs-linux-par-intention-livres).
+
 ## Tester
 
 ### Quota de CI et validation Windows

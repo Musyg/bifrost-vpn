@@ -242,11 +242,13 @@ jobs:
       # d'Ubuntu ne gardent que la version de sortie et la derniere mise a jour
       # (releve du 02/10/2026 sur un hote 24.04: iproute2 6.1.0-1ubuntu6 et
       # 6.1.0-1ubuntu6.4, aucune version entre les deux). Limite nommee dans le
-      # document 07, section 2.2.
+      # document 07, section 2.2. `python3-dbus` et `python3-gi` servent au banc
+      # des resolveurs DNS (`scripts/preuve-dns-linux.sh`); leur presence dans
+      # l'image n'est pas relevee.
       - name: Dependances du harnais
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends nftables tcpdump iproute2 jq
+          sudo apt-get install -y --no-install-recommends nftables tcpdump iproute2 jq python3-dbus python3-gi
       - name: Environnement
         run: |
           uname -r
@@ -274,6 +276,14 @@ jobs:
         run: |
           cargo build --locked -p bifrost-daemon --example banc_demontage
           sudo bash ./scripts/banc-demontage-routage-linux.sh
+
+      # Le resolveur DNS effectif face au plan que le produit pose: un
+      # systemd-resolved reel sur un bus D-Bus prive, dans des namespaces
+      # jetables, sans toucher au resolveur ni au bus du runner.
+      - name: Preuve des resolveurs DNS effectifs dans des namespaces jetables
+        run: |
+          cargo build --locked -p bifrost-dns --example pose-dns
+          sudo bash ./scripts/preuve-dns-linux.sh
 
       # Les DEUX BRAS de `doh-bypass`, que ce vecteur n'avait pas.
       #

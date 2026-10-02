@@ -193,6 +193,16 @@ pub(crate) fn lire_une_fois(interface: &str) -> Result<Observation, &'static str
     Ok(Observation { tunnel, ipv4, ipv6 })
 }
 
+/// Les liens du namespace courant, `(index, nom)`, par un dump borne et
+/// strict: pour `prove dns`, qui confronte les liens que systemd-resolved cite
+/// a ceux de ce namespace.
+pub(crate) fn liens() -> Result<Vec<(u32, Vec<u8>)>, &'static str> {
+    let mut canal = Canal::ouvrir()?;
+    let (charges, _) =
+        canal.echanger(trames::requete_dump_liens, trames::RTM_NEWLINK, true, false)?;
+    charges.iter().map(|c| trames::lien_nomme(c)).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

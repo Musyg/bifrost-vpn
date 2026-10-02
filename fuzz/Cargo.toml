@@ -166,3 +166,10 @@ path = "fuzz_targets/declaration_daemon.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "trames_dbus"
+path = "fuzz_targets/trames_dbus.rs"
+test = false
+doc = false
+bench = false

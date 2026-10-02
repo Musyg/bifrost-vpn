@@ -152,6 +152,15 @@ pub(crate) fn requete_lien(nom: &str, sequence: u32, port: u32) -> Vec<u8> {
     v
 }
 
+/// Requete de dump de tous les liens (`RTM_GETLINK`): `ifinfomsg` entierement
+/// nul, famille AF_UNSPEC, sans attribut, ce que le controle strict du noyau
+/// exige d'un dump de liens (`rtnl_valid_dump_ifinfo_req`, v7.0).
+pub(crate) fn requete_dump_liens(sequence: u32, port: u32) -> Vec<u8> {
+    let mut v = entete(32, RTM_GETLINK, NLM_F_REQUEST | NLM_F_DUMP, sequence, port);
+    v.resize(32, 0);
+    v
+}
+
 /// Lit un datagramme de la reponse attendue et range la charge de chaque
 /// message de donnees dans `charges`. `total` borne la memoire.
 pub(crate) fn lire_datagramme(
@@ -642,4 +651,26 @@ pub(crate) fn lien(charge: &[u8], demande: &str) -> Result<u32, &'static str> {
         return Err("lien netlink rendu pour un autre nom");
     }
     Ok(index as u32)
+}
+
+/// Un lien d'un dump: son index et son nom, sous les memes controles que
+/// [`lien`]: longueurs des attributs, `IFLA_IFNAME` present une seule fois,
+/// index strictement positif.
+pub(crate) fn lien_nomme(charge: &[u8]) -> Result<(u32, Vec<u8>), &'static str> {
+    if charge.len() < 16 {
+        return Err("lien netlink tronque");
+    }
+    let index = i32_ne(&charge[4..8]);
+    let noms: Vec<&[u8]> = balayer(&charge[16..])?
+        .into_iter()
+        .filter(|(t, _)| t & 0x3fff == IFLA_IFNAME)
+        .map(|(_, v)| v)
+        .collect();
+    let [un] = noms.as_slice() else {
+        return Err("lien netlink sans nom unique");
+    };
+    if index <= 0 {
+        return Err("index de lien netlink invalide");
+    }
+    Ok((index as u32, nom(un)?))
 }

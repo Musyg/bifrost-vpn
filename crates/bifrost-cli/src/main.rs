@@ -24,7 +24,7 @@ use clap::{Parser, Subcommand};
 use bifrost_cli::preuve_routes;
 #[cfg(windows)]
 use bifrost_cli::preuve_routes_windows;
-use bifrost_cli::{preuve_nft, preuve_wfp};
+use bifrost_cli::{preuve_dns, preuve_nft, preuve_wfp};
 use bifrost_ipc::protocol::{Command as IpcCommand, Request, Response};
 
 #[derive(Parser, Debug)]
@@ -232,6 +232,22 @@ enum CmdPreuve {
         /// declarations.
         #[arg(long = "politique-daemon", conflicts_with = "intention")]
         politique_daemon: bool,
+        /// Lecture seule du systeme courant. Exigee pour que la ligne dise que
+        /// le systeme est lu.
+        #[arg(long, required = true)]
+        actif: bool,
+    },
+    /// Linux: compare le resolveur systeme au plan DNS qu'une intention decrit
+    /// (backend, interface, resolveur local, amonts, resolveur embarque):
+    /// systemd-resolved lu sur le bus systeme, ou le contenu de
+    /// /etc/resolv.conf, plus son mode et les sources hosts de nsswitch.conf.
+    /// Lecture seule, deux fois, sans elevation ni changement; le rapport ne
+    /// porte que des categories et des comptes. Ailleurs: NON MESURE.
+    Dns {
+        /// Intention DNS v1: schema_version, backend, interface,
+        /// local_resolver, upstream, embarque, resolveur_uid.
+        #[arg(long, required = true)]
+        intention: std::path::PathBuf,
         /// Lecture seule du systeme courant. Exigee pour que la ligne dise que
         /// le systeme est lu.
         #[arg(long, required = true)]
@@ -957,6 +973,17 @@ async fn run(args: Args) -> anyhow::Result<i32> {
             } else {
                 preuve_routes::verifier(intention.as_ref().expect("valide par clap"))
             };
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&rapport)?);
+            } else {
+                print!("{}", rapport.texte());
+            }
+            return Ok(rapport.code());
+        }
+        Cmd::Prove {
+            quoi: CmdPreuve::Dns { intention, .. },
+        } => {
+            let rapport = preuve_dns::verifier(intention);
             if args.json {
                 println!("{}", serde_json::to_string_pretty(&rapport)?);
             } else {

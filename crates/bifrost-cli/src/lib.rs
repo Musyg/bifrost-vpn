@@ -19,13 +19,20 @@
 //!   `declaration::analyser`, `declaration::analyser_routage` (Linux) et
 //!   `declaration::analyser_routage_windows`, les lecteurs de la declaration
 //!   du daemon; `plan_de_l_intention` et `plan_de_la_declaration` de
-//!   `preuve_routes` (Linux pour le second) et de `preuve_routes_windows`.
+//!   `preuve_routes` (Linux pour le second) et de `preuve_routes_windows`;
+//!   `preuve_dns::dbus::lire_reponse`, le lecteur des trames D-Bus de
+//!   `prove dns`.
 
 #![forbid(unsafe_code)]
 
 /// Le lecteur de la declaration du daemon, commun a `prove nft`, `prove wfp`
 /// et `prove routes`: identite du serveur, N1, mesure, N2.
 pub mod declaration;
+/// DNS: le plan du produit confronte au resolveur systeme. Pur et compile
+/// partout, sauf la collecte, qui est Linux.
+pub mod preuve_dns;
+#[cfg(target_os = "linux")]
+mod preuve_dns_linux;
 pub mod preuve_nft;
 #[cfg(target_os = "linux")]
 mod preuve_nft_daemon;

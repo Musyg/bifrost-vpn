@@ -785,8 +785,186 @@ autour de la collecte rendent UNMEASURED; un daemon qui n'est pas sous
 LocalSystem est refuse (`daemon-identity`); rien de pose est dit; une
 interface absente est un ecart. L'hote est inchange apres chaque serie.
 
-D1c reste incomplet. Ne sont pas livres: les resolveurs effectifs, les
-exceptions DNS et la provenance.
+#### D1c.4 - Resolveurs DNS effectifs Linux, par intention, livres
+
+`bifrost-cli --json prove dns --intention intention.json --actif`
+
+L'intention v1 porte exactement `schema_version` (1), `backend`
+(`systemd-resolved` ou `resolv-conf`), `interface` (la regle de nom du
+produit, sans `lo`), `local_resolver`, `upstream` (1 a 16 adresses sous leur
+forme canonique, sans doublon), `embarque` et `resolveur_uid` (`null`, ou le
+compte non nul du resolveur embarque, admis seulement avec lui), tous
+obligatoires, et doit passer la regle DNS du produit (`DnsPolicy::validate`).
+Le backend est declare: le daemon le choisit a l'execution et ne l'ecrit
+nulle part. Champs inconnus ou manquants, cles dupliquees, nombres non
+entiers et version inconnue sont refuses avant toute lecture du systeme, avec
+les plafonds de lecture de D1b.1.
+
+L'attendu est le plan DNS que le produit pose,
+`bifrost_core::plan_dns::PlanDns`: le lien du tunnel et les serveurs a
+interroger, le resolveur embarque seul quand il y en a un, sinon les amonts
+dans l'ordre du profil. Depuis D1c.4, `bifrost_dns::linux` tire de ce plan
+les arguments `resolvectl` (`dns <lien> <serveurs>`, puis `domain <lien> ~.`)
+et le contenu de `/etc/resolv.conf`: les recettes de lignes exactes d'avant
+passent sans retouche. Il n'y a pas de seconde implementation.
+
+Collecte, sans shell, sans programme externe, sans elevation, sans
+ecriture:
+- `/etc/nsswitch.conf`: les sources de la ligne `hosts`, et la presence de
+  `/etc/mdns.allow` quand un module mDNS non minimal y figure;
+- `/proc/net/udp`, et `udp6` pour un resolveur embarque IPv6: les ecoutes
+  UDP du port 53 du namespace courant et leur compte;
+- le contenu de `/etc/resolv.conf`;
+- backend `systemd-resolved`: le mode de `/etc/resolv.conf`, calcule comme
+  resolved le calcule (inode compare a ceux de ses fichiers uplink, stub et
+  statique), les liens du namespace (rtnetlink), et, sur le bus systeme, le
+  proprietaire de `org.freedesktop.resolve1` et son compte, les serveurs
+  (`DNSEx`) et les domaines (`Domains`) du Manager, le mode qu'il calcule
+  (`ResolvConfMode`), ses delegues DNS (`ListDelegates`), et pour chaque lien
+  `DefaultRoute`, `ScopesMask` et ses serveurs (`DNSEx` du lien).
+
+La collecte entiere est faite deux fois; deux lectures differentes rendent
+UNMEASURED.
+
+Le bus est lu par un lecteur D-Bus ecrit a la main, sans dependance, d'apres
+la specification D-Bus 0.43. Il s'authentifie par EXTERNAL, sans negocier de
+descripteur, et n'appelle que `Hello`, `GetNameOwner`,
+`GetConnectionUnixUser`, `Properties.Get`, `Manager.ListDelegates` et
+`Manager.GetLink`, chacun avec `NO_AUTO_START`: un service absent n'est pas
+demarre, il est dit absent. `Properties.GetAll` n'est pas employe: il rendrait
+des signatures que la preuve ne lit pas. L'adresse est celle que la
+specification fixe au bus systeme; la variable d'environnement qui la
+remplacerait n'est pas lue. Il lit les signatures `s`, `u`, `o`, `a(so)`
+(la presence d'un element, pas son contenu), et une variante qui porte
+`a(iiayqs)`, `a(iayqs)`, `a(isb)`, `s`, `b` ou `t`. Les cas suivants rendent
+UNMEASURED:
+- une autre signature, un descripteur de fichier passe;
+- un message tronque, une longueur hors borne (1 Mio par message, 4096
+  elements par tableau), un delai de 2 s depasse;
+- un boutisme autre que celui de l'hote, une version de protocole inconnue;
+- un remplissage non nul, une chaine hors UTF-8 strict, un booleen hors de 0
+  et 1, un champ d'en-tete connu du mauvais type ou en double;
+- une reponse a un autre appel ou d'un autre emetteur, un appel recu;
+- une erreur que le bus rend lui-meme pour un appel qu'il refuse de
+  transmettre.
+Un signal ou un message d'un type inconnu est saute en entier, et un champ
+d'en-tete inconnu d'un type de base aussi, comme la specification l'exige.
+
+Le Manager rend chaque serveur sous l'index de l'interface par laquelle
+resolved l'interroge (`dns_server_ifindex`, systemd 255 et 262), pas sous sa
+portee: un serveur de bouclage y porte l'index de `lo` quel que soit le lien
+qui le porte. Mesure au banc: le resolveur embarque, pose par le produit sur
+le lien du tunnel, figure sous `lo` dans le `DNSEx` du Manager. Chaque serveur
+est donc rattache a sa portee par le `DNSEx` de son lien: ceux de chaque lien
+sont retires un a un du Manager, sous l'index que le Manager doit leur
+donner, et ce qui reste est la portee globale. Un serveur de lien que le
+Manager ne rend pas rend UNMEASURED.
+
+Gardes, avant toute comparaison, UNMEASURED sinon:
+- le bus repond et `org.freedesktop.resolve1` y a un proprietaire;
+- le resolved lu est celui du namespace reseau courant: le bus systeme est
+  joignable depuis un autre namespace et y rend d'autres liens. L'ecoute UDP
+  du stub (`127.0.0.53:53`) doit etre visible ici sous le compte du
+  proprietaire du nom, tout index de lien que resolved cite doit exister ici,
+  et resolved doit connaitre chaque lien d'ici. C'est une heuristique: un
+  processus de ce compte peut lier cette adresse ailleurs, et
+  `DNSStubListener=no` rend la preuve UNMEASURED;
+- le mode de `/etc/resolv.conf` que resolved calcule est celui que la preuve
+  calcule, sinon resolved juge un autre fichier (autre namespace de montage);
+- aucun delegue DNS: ces portees (systemd 258 et suivants) ne figurent ni
+  dans `DNSEx` ni dans `Domains`;
+- chaque serveur qu'un lien declare figure dans le `DNSEx` du Manager.
+
+Ecarts, dans cet ordre:
+- `resolv-conf-path` (resolved): `/etc/resolv.conf` n'est ni le stub ni le
+  fichier statique de resolved, ou son contenu, lu comme glibc le lit, a une
+  ligne `nameserver` qui ne designe pas le stub, ou n'en a aucune. Le mode
+  compare des inodes, et un fichier monte sur celui du stub garde son inode:
+  mesure au banc, ou ce montage rend le mode `stub` alors que glibc interroge
+  l'adresse du fichier monte;
+- `resolv-conf-content` (resolv-conf): le fichier differe du rendu du
+  produit, au bit pres;
+- `hosts-sources`: un module de la ligne `hosts` qui n'est ni `files`, ni
+  `myhostname`, ni `mymachines`, ni `dns`, ni (resolved seulement)
+  `resolve`, ni un module mDNS de la limite nommee;
+- `tunnel-link-scope` (resolved): le lien du tunnel est absent, ou resolved
+  n'y tient pas de portee DNS active; son `~.` est alors inerte;
+- `tunnel-link-servers` (resolved): les serveurs du lien du tunnel ne sont
+  pas exactement ceux du plan, dans l'ordre, au port 53, sans nom TLS;
+- `tunnel-link-domains` (resolved): autre chose qu'exactement `~.`;
+- `dns-exceptions` (resolved): une autre portee qui a un serveur porte un
+  domaine autre que la racine, de routage ou de recherche: elle bat `~.` pour
+  ses noms;
+- `competing-default-routes` (resolved): une autre portee qui a un serveur
+  porte aussi `~.`: les deux sont interrogees;
+- `multicast-resolution` (resolved): une portee LLMNR active, sur n'importe
+  quel lien: elle prend les noms a une etiquette;
+- `local-resolver-listener` (resolveur embarque): aucune ecoute UDP de
+  `local_resolver:53`, ou une qui n'est pas sous le compte declare.
+
+La legitimite des autres portees se decide par une regle, sans liste
+d'adresses. Une portee autre que celle du tunnel, un lien ou la portee
+globale, est admise si elle n'a ni domaine, ni `~.`, ni portee LLMNR: ses
+serveurs ne sont alors consultes que lorsqu'aucun domaine ne correspond, ce
+que `~.` bat toujours (`dns_scope_good_domain`, systemd 255 et 262). Une
+portee sans serveur ne recoit rien. `DefaultRoute` ne change donc pas le
+jugement; il est compte.
+
+Limites nommees, ou du trafic DNS peut sortir hors du tunnel alors que la
+preuve rend MATCH:
+- `.local` par mDNS: une portee mDNS de resolved, ou un module `mdns*` de
+  nsswitch (minimal, ou non minimal sans `/etc/mdns.allow`); comptees;
+- la recherche inverse d'une adresse du reseau d'un lien fait jeu egal avec
+  `~.` sur ce lien;
+- les noms a une etiquette quand `ResolveUnicastSingleLabel=yes`, que le bus
+  ne dit pas, et, apres systemd 255, quand l'appelant le demande.
+
+Autres limites:
+- l'intention est declaree, ce n'est pas le profil actif du daemon;
+- systemd anterieur a 255 ou posterieur a 262 n'est ni mesure ni lu: la
+  mesure est faite sur systemd 255, les sources relues sont celles de 255 et
+  262;
+- Varlink (`io.systemd.Resolve`) n'est pas employe: la preuve lit le bus
+  D-Bus, et un resolved joignable par Varlink seulement la rend UNMEASURED;
+- un changement qui s'annule entre les deux lectures, ou ce qui change apres
+  la collecte, n'est pas vu;
+- une graphie de l'adresse du stub autre que `127.0.0.53` dans
+  `/etc/resolv.conf` est un ecart, meme si glibc la lit comme le stub;
+- ne sont pas prouves: les caches (resolved, nscd, applications), les
+  connexions ouvertes, les resolveurs propres aux applications, le pare-feu;
+  le mode DNS sur TLS n'est pas compare.
+
+Le perimetre est `linux-dns-comparison`, la source
+`resolved-dbus-and-system-files-read-twice` ou
+`resolv-conf-and-system-files-read-twice`, et `expected_source` vaut
+`bifrost-dns-plan-v1-user-declared`. Le rapport ne porte que des categories et
+des comptes: ni adresse, ni domaine, ni interface, ni compte. Hors Linux, la
+commande lit l'intention puis rend UNMEASURED, sans source.
+
+MATCH n'est pas une preuve d'etancheite du VPN.
+
+Mode face au daemon, non livre. `--politique-daemon` demanderait que le
+daemon declare, par une commande IPC distincte, le plan DNS qu'il a pose et
+le backend qu'il a choisi, retenus apres la derniere commande reussie et
+oublies au debut du demontage, avec le compte du resolveur embarque; la
+declaration serait lue par le lecteur commun (identite du serveur, N1, mesure,
+N2) et le plan reconstruit au meme constructeur.
+
+Acceptation, banc jetable (`scripts/preuve-dns-linux.sh`): un systemd-resolved
+255 reel, sur un bus D-Bus prive, dans un namespace de montage prive et des
+namespaces reseau jetables, sans toucher au resolveur ni au bus de l'hote. La
+pose du produit, rendue par le produit et appliquee telle quelle par
+`resolvectl`, correspond, en compte ordinaire comme en root, avec les memes
+comptes. Chaque categorie provoquee donne son seul ecart, et un temoin
+d'emission (un repondeur DNS par lien, et une resolution par glibc) dit par
+ou la requete sort. Bus absent, resolved absent du bus, bus qui refuse
+l'appel ou la connexion, signature inconnue, delegues DNS, autre namespace
+reseau et autre namespace de montage rendent UNMEASURED; un domaine qui
+bascule pendant la collecte aussi, jamais MATCH. La preuve ne change pas
+l'etat du resolveur, et l'hote est inchange apres chaque passage.
+
+D1c reste incomplet. Ne sont pas livres: la preuve DNS face au daemon, les
+resolveurs effectifs sous Windows et la provenance.
 
 ## D2 - Distribution reproductible et mises a jour verifiables
 
@@ -928,3 +1106,49 @@ pas effacee par ce plan. Chaque tranche met a jour ETAT.md et ses limites.
   `Metric`, `UseAutomaticMetric`, `NlMtu`, `DadTransmits`.
 - [Microsoft Learn, CreateIpForwardEntry2](https://learn.microsoft.com/en-us/windows/win32/api/netioapi/nf-netioapi-createipforwardentry2):
   la pose d'une route que le produit emploie.
+
+## Sources primaires relues le 2 octobre 2026, pour D1c.4
+
+- [D-Bus Specification 0.43](https://dbus.freedesktop.org/doc/dbus-specification.html),
+  revision du 29/10/2024: format des messages et marshalling, champs
+  d'en-tete et leurs types, remplissage nul, booleens, noms valides,
+  authentification EXTERNAL et `BEGIN`, `NO_AUTO_START`, adresse du bus
+  systeme, messages et champs inconnus a ignorer, methodes du bus.
+- [systemd v255, `src/resolve/resolved-bus.c`](https://raw.githubusercontent.com/systemd/systemd/v255/src/resolve/resolved-bus.c):
+  `DNSEx`, `Domains`, `ResolvConfMode` et `GetLink` du Manager;
+  `bus_dns_server_append`.
+- [systemd v255, `src/resolve/resolved-link-bus.c`](https://raw.githubusercontent.com/systemd/systemd/v255/src/resolve/resolved-link-bus.c):
+  `DNSEx` (`a(iayqs)`, sans index), `DefaultRoute` et `ScopesMask` d'un lien.
+- [systemd v255, `src/resolve/resolved-dns-server.c`](https://raw.githubusercontent.com/systemd/systemd/v255/src/resolve/resolved-dns-server.c)
+  et [v262](https://raw.githubusercontent.com/systemd/systemd/v262/src/resolve/resolved-dns-server.c):
+  `dns_server_ifindex`, l'index de `lo` pour une adresse de bouclage, quel que
+  soit le lien.
+- [systemd v255, `src/basic/in-addr-util.c`](https://raw.githubusercontent.com/systemd/systemd/v255/src/basic/in-addr-util.c):
+  `in_addr_is_localhost`, `127.0.0.0/8` et `::1`.
+- [systemd v255, `src/resolve/resolved-dns-scope.c`](https://raw.githubusercontent.com/systemd/systemd/v255/src/resolve/resolved-dns-scope.c)
+  et [v262](https://raw.githubusercontent.com/systemd/systemd/v262/src/resolve/resolved-dns-scope.c):
+  `dns_scope_good_domain`, le routage par domaine que la regle de legitimite
+  reprend.
+- [systemd v255, `src/resolve/resolved-resolv-conf.c`](https://raw.githubusercontent.com/systemd/systemd/v255/src/resolve/resolved-resolv-conf.c):
+  `resolv_conf_mode`, l'ordre uplink, stub, statique, et le stub ecrit.
+- [systemd v255, `src/resolve/resolved-def.h`](https://raw.githubusercontent.com/systemd/systemd/v255/src/resolve/resolved-def.h):
+  les bits de `ScopesMask`.
+- [systemd v255, `man/org.freedesktop.resolve1.xml`](https://raw.githubusercontent.com/systemd/systemd/v255/man/org.freedesktop.resolve1.xml),
+  [v259](https://raw.githubusercontent.com/systemd/systemd/v259/man/org.freedesktop.resolve1.xml)
+  et [v262](https://raw.githubusercontent.com/systemd/systemd/v262/man/org.freedesktop.resolve1.xml):
+  l'interface D-Bus, `ListDelegates` apparu en 258.
+- [systemd v255, `man/resolved.conf.xml`](https://raw.githubusercontent.com/systemd/systemd/v255/man/resolved.conf.xml)
+  et [`man/systemd-resolved.service.xml`](https://raw.githubusercontent.com/systemd/systemd/v255/man/systemd-resolved.service.xml):
+  modes de `/etc/resolv.conf`, stub, LLMNR, mDNS,
+  `ResolveUnicastSingleLabel`.
+- [glibc 2.39, `resolv/res_init.c`](https://sourceware.org/git/?p=glibc.git;a=blob_plain;f=resolv/res_init.c;hb=refs/tags/glibc-2.39):
+  lecture des lignes `nameserver` (mot-cle suivi d'un blanc, commentaires
+  `;` et `#`, adresse jusqu'au blanc suivant).
+- [man-pages, `nsswitch.conf(5)`](https://git.kernel.org/pub/scm/docs/man-pages/man-pages.git/plain/man/man5/nsswitch.conf.5)
+  et [`resolv.conf(5)`](https://git.kernel.org/pub/scm/docs/man-pages/man-pages.git/plain/man/man5/resolv.conf.5).
+- [nss-mdns, `README.md`](https://raw.githubusercontent.com/lathiat/nss-mdns/master/README.md):
+  modules minimaux et `/etc/mdns.allow`.
+- [Noyau Linux v7.0, `net/ipv4/udp.c`](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/plain/net/ipv4/udp.c?h=v7.0),
+  [`net/ipv6/datagram.c`](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/plain/net/ipv6/datagram.c?h=v7.0)
+  et [`include/net/transp_v6.h`](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/plain/include/net/transp_v6.h?h=v7.0):
+  le format de `/proc/net/udp` et `udp6`.
