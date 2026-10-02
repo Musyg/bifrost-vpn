@@ -465,11 +465,13 @@ mod fenetres {
                 )
             };
             if module.is_null() {
-                return Err(format!(
-                    "chargement de {} refuse ({}): architecture du binaire et de la \
-                     DLL differentes?",
-                    chemin.display(),
-                    std::io::Error::last_os_error()
+                // Lu avant tout autre appel, qui pourrait l'ecraser.
+                let erreur = std::io::Error::last_os_error();
+                let code = erreur.raw_os_error().map_or(0, |c| c as u32);
+                return Err(crate::tunnel::refus_dll::message(
+                    chemin,
+                    code,
+                    &erreur.to_string(),
                 ));
             }
 
@@ -1245,6 +1247,33 @@ mod tests {
                 );
             }
             None
+        }
+
+        /// Un refus de chargement rend le code que le systeme a donne, nomme,
+        /// et l'indice d'architecture seulement quand ce code est celui du
+        /// format. Sans la DLL de l'amont: le fichier refuse est fabrique ici.
+        ///
+        /// Lu, il est refuse par son format (193); tenu ouvert sans partage, il
+        /// est refuse avant d'etre lu (32), et ce refus-la ne dit rien de
+        /// l'architecture.
+        #[test]
+        fn un_refus_de_chargement_nomme_son_code() {
+            use crate::tunnel::refus_dll::essai::PasUneImage;
+            let erreur = |chemin: &std::path::Path| match fenetres::Wintun::charger_depuis(chemin) {
+                Ok(_) => panic!("un fichier qui n'est pas une image ne se charge pas"),
+                Err(e) => e,
+            };
+            let fichier = PasUneImage::nouveau("wintun");
+
+            let m = erreur(fichier.chemin());
+            assert!(m.contains("ERROR_BAD_EXE_FORMAT (193)"), "{m}");
+            assert!(m.contains("architecture"), "{m}");
+
+            let tenu = fichier.tenir();
+            let m = erreur(fichier.chemin());
+            drop(tenu);
+            assert!(m.contains("ERROR_SHARING_VIOLATION (32)"), "{m}");
+            assert!(!m.contains("architecture"), "{m}");
         }
 
         /// Tous les points d'entree, pas seulement le premier.
