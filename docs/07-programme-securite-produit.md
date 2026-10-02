@@ -148,6 +148,7 @@ memes valeurs.
 | `intention_routes` | `Unique` et `preuve_routes::plan_de_l_intention`; pour les memes valeurs, `declaration::analyser_routage` et `plan_de_la_declaration` | intention de `prove routes --intention` sous Linux; la CLI |
 | `intention_routes_windows` | `Unique` et `preuve_routes_windows::plan_de_l_intention`; pour les memes valeurs, `analyser_routage_windows` et `plan_de_la_declaration` | intention de `prove routes --intention` sous Windows (lecteur pur, compile partout); la CLI |
 | `declaration_daemon` | `declaration::{analyser, analyser_routage, analyser_routage_windows}` | reponse du daemon (root, LocalSystem) que `prove nft`, `prove wfp` et `prove routes` prennent pour attendu; la CLI, une fois l'identite du serveur admise |
+| `trames_dbus` | `bifrost_cli::preuve_dns::dbus::{lire_accord, lire_reponse}` | trames que le bus systeme relaie a `prove dns` (tout pair que le bus relaie), lues sous le compte de l'utilisateur; la CLI |
 
 Les graines (`fuzz/graines/<cible>`) viennent des recettes et des exemples du
 depot: litteraux recopies, ou produits par les encodeurs de production a
@@ -428,7 +429,7 @@ Consequence operationnelle : au lancement, pour un produit classe I, la voie Mod
 
 ### PARTIE 7 - PROGRAMME DE MISE EN OEUVRE
 
-**Indispensable au lancement :** modele de menace Threagile en CI ; CI securite (clippy/audit/deny/vet, gosec/govulncheck) ; fuzzing cargo-fuzz des parseurs (pose: dix-sept cibles, lecteurs de fichiers de la CLI compris, section 2.3) ; security.txt + politique CVD ; SBOM CycloneDX a chaque build ; durcissement compilation + verification winchecksec/checksec ; process interne Article 14.
+**Indispensable au lancement :** modele de menace Threagile en CI ; CI securite (clippy/audit/deny/vet, gosec/govulncheck) ; fuzzing cargo-fuzz des parseurs (pose: dix-huit cibles, lecteurs de fichiers de la CLI compris, section 2.3) ; security.txt + politique CVD ; SBOM CycloneDX a chaque build ; durcissement compilation + verification winchecksec/checksec ; process interne Article 14.
 **Ensuite :** audit externe (viser OTF/NLnet gratuit) ; VDP puis bug bounty prive ; ClusterFuzzLite continu ; audit crypto dedie ; ISO 27001/SOC 2 a envisager.
 
 **Calendrier :**

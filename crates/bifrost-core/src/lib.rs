@@ -12,6 +12,10 @@ pub mod config;
 /// decisions qui comptent doivent etre eprouvees partout, pas seulement sous
 /// Windows.
 pub mod demarrage;
+/// Le plan DNS du produit, en donnees pures: le gestionnaire DNS en tire ses
+/// commandes et son fichier, la preuve `prove dns` son attendu. Une seule
+/// source.
+pub mod plan_dns;
 pub mod ports;
 /// Le profil de coeur: un serveur, une technique, et de quoi s'y authentifier.
 /// Pur, comme le reste du crate: il lit un lien de partage, il ne joint rien.

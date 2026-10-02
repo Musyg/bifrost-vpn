@@ -66,16 +66,13 @@ pub fn new() -> Result<Box<dyn DnsManager>> {
 /// Une intention ecrite dans un commentaire n'est pas une garantie. Une
 /// fonction compilee sur les deux hotes en est une - meme raisonnement que
 /// `service::spec::ligne_de_commande`, sorti de `scm.rs` pour la meme raison.
+///
+/// Depuis D1c.4, la regle elle-meme vit dans `bifrost_core::plan_dns`, avec les
+/// deux rendus Linux: la preuve `prove dns` en tire son attendu, et la
+/// bibliotheque de la CLI ne depend pas de ce crate. Cette fonction en reste le
+/// point d'appel pour les gestionnaires DNS.
 pub fn serveurs_a_interroger(policy: &DnsPolicy) -> Vec<IpAddr> {
-    if policy.embarque {
-        // Un seul serveur, sur la boucle locale. Y ajouter les amonts en
-        // secours annulerait tout: au premier hoquet du resolveur chiffre, le
-        // systeme basculerait sur une resolution en clair, silencieusement, et
-        // justement le jour ou le chiffrement servait.
-        vec![policy.local_resolver]
-    } else {
-        policy.upstream.clone()
-    }
+    bifrost_core::plan_dns::serveurs_a_interroger(policy)
 }
 
 /// Adresse par defaut du resolveur local selon la plateforme.
