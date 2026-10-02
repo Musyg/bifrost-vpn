@@ -92,6 +92,21 @@ jobs:
 
 Cote Go (sing-box, Xray, go-rosenpass eventuel) : `gosec ./...` et `govulncheck ./...` en CI. cargo-vet reserve aux exigences supply-chain strictes (adopter incrementalement via `cargo vet suggest` pour les exemptions) ; cargo-deny suffit comme baseline. Eviter la fatigue d'alerte : faire echouer la CI sur cargo-audit (`-D warnings`) pour maintenir le taux d'alertes non traitees a 0, et ne mettre en `warn` que multiple-versions.
 
+**Ce que la CI reelle epingle, et ce qui reste flottant** (02/10/2026). Le bloc ci-dessus est un
+modele. `.github/workflows/ci.yml` epingle chaque action par empreinte de commit et chaque outil a
+une version exacte: `cargo-audit@0.22.2`, `cargo-deny@0.20.2` et `cargo-cyclonedx@0.5.9` par
+`taiki-e/install-action` (manifeste de la v2.86.5; `fallback: none`, une version absente du
+manifeste fait echouer l'etape au lieu de se rabattre sur cargo-binstall), `cargo-fuzz` 0.13.2 par
+`cargo install --locked --version`. Chacune etait la derniere publiee sur crates.io au 02/10/2026
+et les commandes de la CI passent avec elle; monter une version est un changement a part entiere.
+Les jobs tournent sur `ubuntu-24.04` et `windows-2025-vs2026`, pas sur `-latest`, qui change d'OS
+ou de chaine MSVC sans un commit du depot (`ubuntu-latest` passe a Ubuntu 26.04 du 19/10 au
+19/11/2026). Restent flottants: la revision hebdomadaire de l'image (noyau, outils, paquets
+preinstalles), que le depot ne choisit pas et que l'en-tete de chaque job releve; les paquets apt
+du job de fuite (nftables, tcpdump, iproute2, jq), deja presents dans l'image et non epingles, car
+les index d'Ubuntu ne gardent que la version de sortie et la derniere mise a jour: un
+`paquet=version` casserait l'etape a la mise a jour suivante.
+
 **2.3 Fuzzing** - Priorite : parseur de profils > parseur IPC > metadonnees de mise a jour > deserialisation. Outils : cargo-fuzz (libFuzzer) + `arbitrary` en premier choix ; AFL++/honggfuzz en complement (tous trois supportes par OSS-Fuzz/ClusterFuzz).
 
 **Ce qui est pose.** Le harnais vit dans `fuzz/` (cargo-fuzz 0.13, libFuzzer,
@@ -264,6 +279,28 @@ trois bits ASLR/DEP; relocation statique, RELRO coupe ou paresseux, pile executa
 Elle lit un binaire de recette (profil de test, sans LTO), pas les binaires `--release`: les
 drapeaux de cible sont les memes, et l'effet de LTO n'est mesure que par la mesure ci-dessus.
 
+**CET et les binaires livres, 02/10/2026.** `.cargo/config.toml` ajoute `-C link-arg=/CETCOMPAT`
+pour la cible MSVC x86_64, dans une table a part: Microsoft ne donne l'option que pour x64, et
+rustc 1.98.0 n'en a pas d'equivalent. L'image se declare compatible avec la pile fantome (bit
+CET_COMPAT des caracteristiques etendues, entree de type 20 du repertoire de debogage). Mesure sur
+dev-windows: le bit est pose sur le daemon, la CLI et chaque executable de recette, tailles et
+temps de construction `--release` inchanges; la suite complete et les deux binaires livres
+tournent sous ce marquage. Une etape de la CI (`controles` sous Linux, `windows` sur demande)
+construit en `--release` les binaires que les installeurs copient, et la recette ignoree
+`les_binaires_livres_portent_le_durcissement` lit leurs en-tetes avec les lectures de la suite:
+ASLR 64 bits et DEP, GUARD_CF et une table de cibles non vide, au moins 100 lectures des cases de
+controle CFG dans le code (4 sans controle emis, celles de la bibliotheque C de Microsoft; 4783
+pour le daemon et 5483 pour la CLI), le marquage CET; sous Linux, PIE, RELRO complet et pile non
+executable. Elle refuse un repertoire qui n'est pas `release` et une copie de son propre
+executable, et une autre recette confronte la liste des binaires lus aux scripts d'installation.
+Cout mesure: 286 s de construction et 3 s de lecture sur dev-windows, 27 s et 0,3 s sur
+essai-linux, sans recompiler la recette; sur le runner, non mesure. Chaque lecture a ete vue
+rouge: binaires construits avec `CARGO_ENCODED_RUSTFLAGS` vide ou hors du depot (CFG, controles et
+CET), sans `/CETCOMPAT` (CET seul), avec `control-flow-guard=nochecks` (le seul compte des
+controles: GUARD_CF et la table restent poses), pile executable, RELRO coupe ou paresseux,
+relocation statique; lecture d'un mauvais champ ou d'un mauvais bit; propriete retiree de la
+lecture; repertoire absent, vide ou de profil de test; copie de la recette a la place d'un livre.
+
 **Ce qui manque.**
 - La bibliotheque standard n'est pas instrumentee: elle est livree precompilee sans CFG, et seul
   `-Z build-std`, sur une chaine nightly, la recompilerait.
@@ -271,11 +308,16 @@ drapeaux de cible sont les memes, et l'effet de LTO n'est mesure que par la mesu
   statique compte les controles, pas leur effet. Un temoin d'execution devra empecher
   l'optimiseur de rendre l'appel direct (`std::hint::black_box`), sans quoi il ne prouve rien:
   c'est la cause de rust-lang/rust#135963, fermee le 24/01/2025 comme comportement attendu.
-- Aucune etape de CI ne lit les binaires `--release`; la recette tourne dans `controles` (Linux)
-  et dans `windows` (sur demande).
-- Ni CET (pile fantome, `/CETCOMPAT`), ni protection de pile de rustc: absents des binaires,
-  non poses. Le seul `__stack_chk_fail` des binaires Linux vient du code C d'une dependance de la
-  CLI.
+- L'effet de la pile fantome: le processeur de dev-windows ne la porte pas, et le processus y
+  tourne sans elle; le marquage est mesure, pas son effet. wintun.dll et wireguard.dll ne sont
+  pas marquees; en mode de compatibilite, seule une violation dans un module marque est fatale
+  (documentation de PROCESS_MITIGATION_USER_SHADOW_STACK_POLICY), ce qu'aucune mesure sous le
+  service reel n'a encore confirme.
+- La protection de pile de rustc (`-Z stack-protector`) n'existe que sur une chaine nightly
+  (rustc 1.98.0 refuse toute option `-Z`): non posee. Le seul `__stack_chk_fail` des binaires
+  Linux vient du code C d'une dependance de la CLI.
+- Les binaires tiers que les installeurs deposent (dnscrypt-proxy, wireguard.dll) ne sont pas
+  lus par la recette des binaires livres.
 - Les politiques d'execution Windows (`SetProcessMitigationPolicy`: ACG, signature, chargement
   d'images) ne sont pas posees: elles demandent une mesure sur essai-windows.
 
