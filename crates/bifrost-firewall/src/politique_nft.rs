@@ -169,11 +169,12 @@ impl Politique {
                         regles.push(accepter(vec![meta("oifname", json!(i))]));
                     }
                     regles.push(accepter(vec![
+                        ipv4_seulement(),
                         charge("udp", "sport", json!(68)),
                         charge("udp", "dport", json!(67)),
                     ]));
                     regles.push(accepter(vec![
-                        charge("ip6", "daddr", prefixe("fe80::", 10)),
+                        charge("ip6", "daddr", destinations_dhcpv6()),
                         charge("udp", "sport", json!(546)),
                         charge("udp", "dport", json!(547)),
                     ]));
@@ -214,6 +215,7 @@ impl Politique {
                         regles.push(accepter(vec![meta("iifname", json!(i))]));
                     }
                     regles.push(accepter(vec![
+                        ipv4_seulement(),
                         charge("udp", "sport", json!(67)),
                         charge("udp", "dport", json!(68)),
                     ]));
@@ -268,6 +270,16 @@ fn ndp() -> Vec<Value> {
         "type",
         json!({"set":[133,134,135,136,137]}),
     )])
+}
+/// `meta nfproto ipv4`, que `--numeric` rend par sa valeur: NFPROTO_IPV4, 2
+/// (forme mesuree sur nft 1.0.9). Le DHCPv4 du rendu ne vaut qu'en IPv4.
+fn ipv4_seulement() -> Value {
+    meta("nfproto", json!(2))
+}
+/// Les destinations du client DHCPv6, dans l'ordre ou nft les liste: le lien,
+/// puis ses deux groupes ff02::1:2 et ff05::1:3.
+fn destinations_dhcpv6() -> Value {
+    json!({"set":[prefixe("fe80::",10),"ff02::1:2","ff05::1:3"]})
 }
 /// Les prefixes du LAN d'une famille, dans l'ordre ou nft les liste.
 fn prefixes_lan(famille: &str) -> Value {
@@ -617,6 +629,91 @@ mod tests {
                 }
                 None => assert!(accepts.is_empty(), "{resolveur}: {accepts:?}"),
             }
+        }
+    }
+
+    /// Une regle de la reference nomme-t-elle un port du DHCP (67, 68, 546,
+    /// 547) en source ou en destination?
+    fn nomme_le_dhcp(expr: &Value) -> bool {
+        expr.as_array().unwrap().iter().any(|e| {
+            let m = &e["match"];
+            matches!(
+                m["left"]["payload"]["field"].as_str(),
+                Some("sport" | "dport")
+            ) && matches!(m["right"].as_u64(), Some(67 | 68 | 546 | 547))
+        })
+    }
+
+    /// Le DHCP de la reference suit le rendu, dans chaque sens: le DHCPv4 en
+    /// IPv4 seulement (`meta nfproto ipv4`, que `--numeric` rend 2), sortie et
+    /// entree; le client DHCPv6 vers le lien et ses deux groupes, et sa
+    /// reponse depuis le lien. Formes ecrites ici en toutes lettres, telles
+    /// que nft 1.0.9 les rend (mesure du 02/10/2026), chacune dans sa chaine,
+    /// LAN ouvert comme ferme; aucune autre regle ne nomme un port du DHCP.
+    #[test]
+    fn le_dhcp_de_la_reference_suit_le_rendu_dans_chaque_sens() {
+        let egal = |gauche: Value, droite: Value| json!({"match":{"op":"==","left":gauche,"right":droite}});
+        let famille = egal(json!({"meta":{"key":"nfproto"}}), json!(2));
+        let port = |champ: &str, n: u16| {
+            egal(
+                json!({"payload":{"protocol":"udp","field":champ}}),
+                json!(n),
+            )
+        };
+        let accepte = json!({"accept": null});
+        let sortie_v4 = json!([famille, port("sport", 68), port("dport", 67), accepte]);
+        let entree_v4 = json!([famille, port("sport", 67), port("dport", 68), accepte]);
+        let sortie_v6 = json!([
+            egal(
+                json!({"payload":{"protocol":"ip6","field":"daddr"}}),
+                json!({"set":[{"prefix":{"addr":"fe80::","len":10}},"ff02::1:2","ff05::1:3"]})
+            ),
+            port("sport", 546),
+            port("dport", 547),
+            accepte
+        ]);
+        let entree_v6 = json!([
+            egal(
+                json!({"payload":{"protocol":"ip6","field":"saddr"}}),
+                json!({"prefix":{"addr":"fe80::","len":10}})
+            ),
+            port("sport", 547),
+            port("dport", 546),
+            accepte
+        ]);
+        for (allow_lan, resolveur) in [
+            (false, "127.0.0.1"),
+            (true, "127.0.0.1"),
+            (false, "::1"),
+            (true, "192.168.1.1"),
+        ] {
+            let mut v = intention();
+            v["allow_lan"] = json!(allow_lan);
+            v["dns_resolver"] = json!(resolveur);
+            let attendu = Politique::lire(v).unwrap().reference().unwrap();
+            let dhcp = |chaine: &str| -> Vec<Value> {
+                attendu["nftables"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|v| v.get("rule"))
+                    .filter(|r| r["chain"] == chaine)
+                    .map(|r| r["expr"].clone())
+                    .filter(nomme_le_dhcp)
+                    .collect()
+            };
+            let cas = format!("allow_lan {allow_lan}, resolveur {resolveur}");
+            assert_eq!(
+                dhcp("output"),
+                vec![sortie_v4.clone(), sortie_v6.clone()],
+                "{cas}"
+            );
+            assert_eq!(
+                dhcp("input"),
+                vec![entree_v4.clone(), entree_v6.clone()],
+                "{cas}"
+            );
+            assert!(dhcp("forward").is_empty(), "{cas}");
         }
     }
 
