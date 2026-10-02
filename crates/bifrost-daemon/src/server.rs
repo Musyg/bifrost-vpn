@@ -685,6 +685,15 @@ upstream = ["10.2.0.1"]
         /// Un second client rend le socket lisible; tokio tente alors
         /// `accept(2)` sur ce numero, qui rend `ENOTSOCK`, une erreur de
         /// l'ecoute elle-meme, et `serve` rend.
+        ///
+        /// Le second client passe par un second nom du socket, un lien
+        /// physique pose avant la perte. tokio ne tient l'ecoute pour vide
+        /// qu'apres un `accept(2)` qui rend `EAGAIN`: si la perte tombe entre
+        /// la premiere acceptation et cet essai, `accept(2)` rend `ENOTSOCK`
+        /// sans attendre le second client, `serve` rend, et l'`IpcServer` qui
+        /// tombe retire son chemin. Par le premier nom, le second client ne
+        /// trouvait alors plus rien (`NotFound`); par le second, il atteint le
+        /// meme socket, que son double tient, dans les deux ordres.
         #[cfg(target_os = "linux")]
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         async fn une_ecoute_perdue_sous_serve_arrete_le_superviseur_puis_rend_son_erreur() {
@@ -704,6 +713,7 @@ upstream = ["10.2.0.1"]
             let socket = chemin.to_string_lossy().into_owned();
 
             let vers_le_socket = chemin.clone();
+            let second_nom = dossier.join("second-nom.sock");
             let clients = std::thread::spawn(move || {
                 let debut = std::time::Instant::now();
                 let attendre = |quoi: &str| {
@@ -726,6 +736,9 @@ upstream = ["10.2.0.1"]
                     attendre("premier client jamais accepte");
                 };
                 let ecoute = celui_qui_ecoute(&lies);
+                // Avant la perte, tant que `serve` tient son chemin: le second
+                // nom designe le meme socket et survit au retrait du premier.
+                std::fs::hard_link(&vers_le_socket, &second_nom).expect("second nom du socket");
                 // SAFETY: dup ne lit ni n'ecrit aucune memoire; `ecoute` est un
                 // descripteur ouvert de ce processus.
                 let garde = unsafe { libc::dup(ecoute) };
@@ -735,7 +748,7 @@ upstream = ["10.2.0.1"]
                 // numeros sont ouverts, et le socket reste tenu par `garde`.
                 let rc = unsafe { libc::dup2(nul.as_raw_fd(), ecoute) };
                 assert_eq!(rc, ecoute, "dup2: {}", std::io::Error::last_os_error());
-                let second = UnixStream::connect(&vers_le_socket).expect("second client");
+                let second = UnixStream::connect(&second_nom).expect("second client");
                 drop(premier);
                 (garde, second)
             });
