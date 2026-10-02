@@ -1792,24 +1792,30 @@ mod imp {
             (serveur, premier)
         }
 
-        /// Occupe au-dela de la borne: le client a attendu au moins
-        /// `ATTENTE_PIPE_OCCUPE`, puis rend l'erreur du systeme telle quelle,
-        /// sans pendre.
+        /// L'attente arbitree d'une instance libre, ecrite ici et non reprise
+        /// de `ATTENTE_PIPE_OCCUPE`: une garde qui se compare a la constante
+        /// la suit dans sa mutation.
+        const ATTENTE_ARBITREE: Duration = Duration::from_secs(2);
+
+        /// Occupe au-dela de la borne: le client a attendu l'attente arbitree,
+        /// 2 s, et pas au-dela d'une seconde de plus, puis rend l'erreur du
+        /// systeme telle quelle, sans pendre.
         #[test]
         fn un_pipe_occupe_au_dela_de_la_borne_rend_son_erreur_sans_pendre() {
             let rt = runtime_serveur();
             let nom = nom("borne");
             let (_serveur, _premier) = serveur_occupe(&nom, &rt);
             let (issue, duree) = client(nom, ServerRequirement::Privileged)
-                .recv_timeout(ATTENTE_PIPE_OCCUPE + Duration::from_secs(3))
+                .recv_timeout(ATTENTE_ARBITREE + Duration::from_secs(3))
                 .expect("l'attente d'une instance libre doit etre bornee");
+            println!("mesure pipe occupe au-dela de la borne: {issue:?} apres {duree:?}");
             assert_eq!(issue, Issue::Io(Some(PIPE_OCCUPE)), "{duree:?}");
             assert!(
-                duree >= ATTENTE_PIPE_OCCUPE,
-                "le client n'a pas attendu d'instance libre: {duree:?}"
+                duree >= ATTENTE_ARBITREE,
+                "le client n'a pas attendu {ATTENTE_ARBITREE:?} une instance libre: {duree:?}"
             );
             assert!(
-                duree < ATTENTE_PIPE_OCCUPE + Duration::from_secs(1),
+                duree < ATTENTE_ARBITREE + Duration::from_secs(1),
                 "l'attente a depasse sa borne: {duree:?}"
             );
         }
@@ -2647,6 +2653,70 @@ mod tests_acceptation {
         assert_eq!(lignes, 1, "quatre incidents, une ligne");
     }
 
+    /// Erreurs propres a une connexion injectees a la suite, avant le client
+    /// qui attend dans la file d'ecoute.
+    #[cfg(unix)]
+    const ERREURS_DE_CONNEXION: u64 = 1000;
+
+    /// Au-dela, l'acceptation a attendu entre deux erreurs propres a une
+    /// connexion: une pause de 1 ms par erreur suffit a le depasser, et mille
+    /// essais sans pause tiennent en quelques millisecondes, meme sous
+    /// charge de calcul.
+    #[cfg(unix)]
+    const SANS_ATTENTE_AU_PLUS: Duration = Duration::from_secs(1);
+
+    /// Unix: apres une erreur qui ne touche qu'une connexion, l'acceptation
+    /// reprend AUSSITOT, sans la pause d'un epuisement. Mille acceptations en
+    /// erreur (avortee, erreur de protocole, interrompue, a tour de role),
+    /// puis le client qui attendait est accepte: le tout dans
+    /// `SANS_ATTENTE_AU_PLUS`, et une ligne de journal pour les mille.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn une_erreur_propre_a_une_connexion_reprend_sans_attendre() {
+        let (mut serveur, chemin) = serveur("sans-attente").await;
+        let acceptations = Arc::new(AtomicU64::new(0));
+        let a = acceptations.clone();
+        serveur.panne = Some(Box::new(move |etape| {
+            if etape != imp::Etape::Acceptation {
+                return None;
+            }
+            let n = a.fetch_add(1, Ordering::SeqCst);
+            if n >= ERREURS_DE_CONNEXION {
+                return None;
+            }
+            let code = match n % 3 {
+                0 => libc::ECONNABORTED,
+                1 => libc::EPROTO,
+                _ => libc::EINTR,
+            };
+            Some(std::io::Error::from_raw_os_error(code))
+        }));
+        let mut client = ouvrir(&chemin).await.expect("client");
+        demander(&mut client).await;
+
+        let debut = Instant::now();
+        let issue = tokio::time::timeout(AU_PLUS, serveur.accept()).await;
+        let duree = debut.elapsed();
+        let mesure = decrire(&issue);
+        servir(issue).await;
+        let servi = repondu(&mut client).await;
+        let acceptations = acceptations.load(Ordering::SeqCst);
+        let lignes = serveur.journal.lignes;
+        drop(serveur);
+        nettoyer(&chemin);
+        println!(
+            "mesure reprise sans attente: accept={mesure} apres {duree:?}, essais d'acceptation={acceptations}, lignes={lignes}, servi={servi}"
+        );
+        assert_eq!(mesure, "acceptee");
+        assert_eq!(acceptations, ERREURS_DE_CONNEXION + 1);
+        assert!(
+            duree < SANS_ATTENTE_AU_PLUS,
+            "{ERREURS_DE_CONNEXION} erreurs propres a une connexion en {duree:?}: l'acceptation a attendu entre deux"
+        );
+        assert_eq!(lignes, 1, "mille incidents, une ligne");
+        assert!(servi, "le client qui attendait n'a pas ete servi");
+    }
+
     /// La reponse que le client a recue dans `AU_PLUS`, s'il en a recu une.
     #[cfg(unix)]
     async fn reponse_recue<C: tokio::io::AsyncRead + Unpin>(client: &mut C) -> Option<Response> {
@@ -2664,12 +2734,57 @@ mod tests_acceptation {
     /// Les evenements de journal emis sur le fil qui l'a pose par
     /// `tracing::subscriber::set_default`, chacun reduit a son niveau puis a
     /// ses champs: le journal de production filtre par niveau, une ligne
-    /// emise sous ce filtre n'existe pas.
-    #[cfg(unix)]
+    /// emise sous ce filtre n'existe pas. Se pose par [`capturer`].
     #[derive(Clone, Default)]
     struct Capture(Arc<std::sync::Mutex<Vec<String>>>);
 
-    #[cfg(unix)]
+    /// L'abonne global des recettes de ce binaire: il ne garde rien.
+    ///
+    /// `tracing` garde en cache, pour tout le processus, l'interet de chaque
+    /// point de journal, calcule a son premier passage. Tant qu'un seul
+    /// abonne est inscrit, ce calcul ne consulte que l'abonne du fil qui
+    /// passe le premier (tracing-core 0.1.36, `callsite.rs`, `Dispatchers`):
+    /// si c'est le fil d'une recette voisine sans abonne, le point est tenu
+    /// pour muet partout, et une recette qui capture le journal n'en recoit
+    /// plus rien. Inscrit pour tout le binaire, cet abonne-ci fait qu'une
+    /// capture posee n'est jamais seule: le calcul consulte alors tous les
+    /// abonnes inscrits, la capture comprise, quel que soit le fil qui passe.
+    /// C'est son inscription qui porte, pas l'interet qu'il rend.
+    struct Muet;
+
+    impl tracing::Subscriber for Muet {
+        fn register_callsite(
+            &self,
+            _: &'static tracing::Metadata<'static>,
+        ) -> tracing::subscriber::Interest {
+            tracing::subscriber::Interest::sometimes()
+        }
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            false
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, _: &tracing::Event<'_>) {}
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    /// Une capture du journal de ce fil, l'abonne global [`Muet`] pose une
+    /// fois pour tout le binaire.
+    fn capturer() -> (Capture, tracing::subscriber::DefaultGuard) {
+        static GLOBAL: std::sync::Once = std::sync::Once::new();
+        GLOBAL.call_once(|| {
+            tracing::subscriber::set_global_default(Muet)
+                .expect("aucun autre abonne global dans ce binaire");
+        });
+        let capture = Capture::default();
+        let garde = tracing::subscriber::set_default(capture.clone());
+        (capture, garde)
+    }
+
     impl tracing::Subscriber for Capture {
         fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
             true
@@ -2715,8 +2830,7 @@ mod tests_acceptation {
         // SAFETY: geteuid et getegid ne prennent aucun argument et ne
         // touchent aucune memoire.
         let (euid, egid) = unsafe { (libc::geteuid(), libc::getegid()) };
-        let capture = Capture::default();
-        let _journal = tracing::subscriber::set_default(capture.clone());
+        let (capture, _journal) = capturer();
         let lectures = Arc::new(AtomicU64::new(0));
         let illisibles = |serveur: &mut IpcServer| {
             let l = lectures.clone();
@@ -2820,8 +2934,12 @@ mod tests_acceptation {
     /// creation de l'instance suivante rend `ERROR_NO_SYSTEM_RESOURCES`,
     /// le client etant deja connecte; a chaque essai un tiers tente de creer
     /// le nom du pipe, ce qu'il ne doit jamais pouvoir faire.
+    ///
+    /// L'episode s'ecrit au journal: une ligne d'avertissement, lue telle que
+    /// le journal la recoit, et non le compteur `lignes` qui la suit.
     #[tokio::test]
     async fn un_epuisement_attend_sans_boucle_active_puis_reprend() {
+        let (capture, _journal) = capturer();
         let (mut serveur, chemin) = serveur("epuisement").await;
         let essais = Arc::new(AtomicU64::new(0));
         let tiers = Arc::new(AtomicU64::new(0));
@@ -2893,8 +3011,13 @@ mod tests_acceptation {
         let lignes = serveur.journal.lignes;
         drop(serveur);
         nettoyer(&chemin);
+        let journal = capture.0.lock().unwrap().clone();
+        let episode: Vec<&String> = journal
+            .iter()
+            .filter(|l| l.contains(ACCEPTATION_SUSPENDUE))
+            .collect();
         println!(
-            "mesure epuisement simule: accept={mesure} apres {duree:?}, essais={essais}, lignes={lignes}, nom pris par un tiers={tiers}, servi={servi}, second servi={second}"
+            "mesure epuisement simule: accept={mesure} apres {duree:?}, essais={essais}, lignes={lignes}, nom pris par un tiers={tiers}, servi={servi}, second servi={second}, journal={episode:?}"
         );
         assert_eq!(mesure, "acceptee");
         assert_eq!(tiers, 0, "un tiers a pu creer le nom du pipe");
@@ -2907,6 +3030,18 @@ mod tests_acceptation {
             "reprise hors de sa borne: {duree:?}"
         );
         assert_eq!(lignes, 1, "un episode, une ligne");
+        assert_eq!(
+            episode.len(),
+            1,
+            "un episode, une ligne recue par le journal: {journal:?}"
+        );
+        // Le daemon journalise `bifrost_ipc` au niveau info par defaut: une
+        // ligne emise plus bas n'y figurerait pas.
+        assert!(
+            episode[0].starts_with("WARN "),
+            "l'episode doit etre un avertissement: {}",
+            episode[0]
+        );
         assert!(servi && second, "client servi: {servi}, second: {second}");
     }
 

@@ -626,31 +626,66 @@ mod tests {
         assert_eq!(bac.mode(), 0o640, "le mode d'origine n'a pas ete rendu");
     }
 
+    /// Present dans l'environnement de l'enfant, et la seulement.
+    const SEULE: &str = "BIFROST_RECETTE_DNS_SEULE";
+
+    /// Rejoue la recette `nom` seule dans un processus enfant (ce binaire,
+    /// cette recette, un seul fil de recettes) et exige qu'elle y ait passe,
+    /// et que sa sortie porte `marque`, que seul son corps imprime apres ses
+    /// assertions.
+    fn seule_dans_un_processus(nom: &str, marque: &str) {
+        let sortie = Command::new(std::env::current_exe().expect("binaire de la recette"))
+            .args(["--exact", nom, "--nocapture", "--test-threads=1"])
+            .env(SEULE, "1")
+            .stdin(Stdio::null())
+            .output()
+            .expect("lancement de l'enfant");
+        let texte = String::from_utf8_lossy(&sortie.stdout);
+        assert!(
+            sortie.status.success()
+                && texte.contains(&format!("test {nom} ... "))
+                && texte.contains(marque)
+                && texte.contains("test result: ok. 1 passed;"),
+            "l'enfant ({}):\n{texte}\n{}",
+            sortie.status,
+            String::from_utf8_lossy(&sortie.stderr)
+        );
+    }
+
     /// Le mode pendant le tunnel est pose explicitement, pas herite du umask.
     ///
     /// La recette e2e tourne en `umask 077` pour proteger la cle privee du
     /// profil. Le daemon en heritait, et posait un resolv.conf en 600: tout
     /// processus non root perdait la resolution de noms.
+    ///
+    /// Jouee seule dans un processus enfant, qui pose l'umask 077 du daemon
+    /// avant `apply`. L'umask est un attribut du processus: pose dans le
+    /// binaire de recettes, il valait aussi, le temps d'`apply`, pour tout
+    /// fichier ou repertoire qu'une recette voisine creait.
     #[test]
     fn le_resolveur_reste_lisible_par_tout_le_monde() {
+        const MARQUE: &str = "resolveur sous l'umask 077, mesure seul:";
+        if std::env::var_os(SEULE).is_none() {
+            return seule_dans_un_processus(
+                "linux::tests::le_resolveur_reste_lisible_par_tout_le_monde",
+                MARQUE,
+            );
+        }
         let bac = Jetable::neuf();
         fs::write(bac.resolv(), "nameserver 192.168.1.1\n").unwrap();
         let mut dns = bac.gestionnaire();
 
-        // SAFETY: umask ne prend qu'un masque entier et ne touche aucune memoire; on
-        // restaure la valeur precedente juste apres.
-        let precedent = unsafe { libc::umask(0o077) };
-        let resultat = dns.apply("wg0", &policy());
-        // SAFETY: umask ne prend qu'un masque entier et ne touche aucune memoire;
-        // restaure la valeur precedente relevee ci-dessus.
-        unsafe { libc::umask(precedent) };
-        resultat.unwrap();
+        // SAFETY: umask ne prend qu'un masque entier et ne touche aucune
+        // memoire; ce processus enfant ne porte que cette recette.
+        unsafe { libc::umask(0o077) };
+        dns.apply("wg0", &policy()).unwrap();
 
+        let mode = bac.mode();
         assert_eq!(
-            bac.mode(),
-            0o644,
+            mode, 0o644,
             "resolv.conf herite du umask: illisible hors root"
         );
+        println!("{MARQUE} resolv.conf en {mode:04o}");
     }
 
     /// Une reconnexion rappelle `apply` sans `restore` entre les deux.
