@@ -785,6 +785,31 @@ autour de la collecte rendent UNMEASURED; un daemon qui n'est pas sous
 LocalSystem est refuse (`daemon-identity`); rien de pose est dit; une
 interface absente est un ecart. L'hote est inchange apres chaque serie.
 
+Une famille routee sans etre adressee. Mesure du 02/10/2026 sur
+essai-windows, sous le service reel installe par `--install-service`
+(binaires `--release`), profil WireGuard de documentation (pair injoignable,
+`allow_lan`), en trois variantes: adresse IPv4 seule et `allowed_ips =
+["0.0.0.0/0", "::/0"]`; une adresse dans chaque famille et les memes
+`allowed_ips`; adresse IPv4 seule et `0.0.0.0/0` seul. Dans la premiere, le
+plan pose la route `::/0` sans regler de ligne IPv6, et Windows l'accepte:
+`connect` reussit (le tunnel reste en `connecting`, le pair etant
+injoignable), la route est sur l'adaptateur WireGuardNT, qui ne porte en
+IPv6 que l'adresse de lien local que Windows lui donne, et sa ligne IPv6
+reste en metrique automatique. `Find-NetRoute` y choisit le tunnel pour une
+adresse IPv6 globale de documentation, avec cette adresse de lien local pour
+source; dans la troisieme, sans `::/0`, aucune route ne la joint, comme
+avant l'armement. Les filtres WFP du fournisseur sont les memes dans les
+trois variantes, blocage general et permis de l'interface du tunnel compris
+sur les couches IPv6, et `prove wfp` correspond; aucun trafic IPv6 global
+n'a ete emis, le site n'en ayant pas. Les deux modes de `prove routes`
+rendent les memes comptes: la route `::/0` du plan est trouvee sur le tunnel,
+et la ligne IPv6, que le plan ne regle pas, n'est pas jugee; leurs seuls
+ecarts sont des routes plus specifiques d'une autre interface virtuelle de
+l'hote, presentes avant le banc. `disconnect` retire routes, adresses,
+adaptateur et filtres, et la table des routes revient a celle d'avant. Une
+recette du plan et deux recettes de la preuve, par l'intention et par la
+declaration du daemon, figent ce cas.
+
 #### D1c.4 - Resolveurs DNS effectifs Linux, par intention, livres
 
 `bifrost-cli --json prove dns --intention intention.json --actif`

@@ -164,8 +164,12 @@ impl PlanWindows {
     /// Le chemin par coeur: la route par defaut de chaque famille adressee, et
     /// d'elle seule. Un coeur ne dit pas ce qu'il transporte, il porte
     /// n'importe quelle destination: le plan se decide, et la decision est
-    /// "tout". Une route IPv6 sur une interface sans adresse IPv6 serait
-    /// refusee par Windows. Le `/0` est sur parce que le coeur ne s'echappe pas
+    /// "tout". Une famille sans adresse n'a pas de route, par choix du plan et
+    /// non par un refus de Windows: sur l'adaptateur WireGuardNT, une route
+    /// `::/0` est acceptee alors que l'interface ne porte en IPv6 que l'adresse
+    /// de lien local que Windows lui donne (mesure du 02/10/2026 sur
+    /// essai-windows, service reel; le TUN Wintun du coeur n'a pas ete mesure
+    /// dans ce cas). Le `/0` est sur parce que le coeur ne s'echappe pas
     /// par la table de routage mais par sa SOCKET, liee a l'interface physique;
     /// et il ne mange pas le reseau local, dont les routes connectees sont plus
     /// specifiques. sing-tun pose aussi `0.0.0.0/0` hors de macOS.
@@ -558,6 +562,66 @@ mod tests {
         assert!(!p.lignes[0].capture);
         assert_eq!(p.lignes[0].metrique_imposee(), None);
         assert!(!p.contient_route_par_defaut());
+    }
+
+    /// Sur le chemin WireGuard, une famille routee mais non adressee a sa
+    /// route et pas de ligne. C'est le plan que le service reel a pose le
+    /// 02/10/2026 sur essai-windows pour un profil de documentation a adresse
+    /// IPv4 seule et `allowed_ips = ["0.0.0.0/0", "::/0"]`: `connect`
+    /// reussit, Windows accepte `::/0` sur l'adaptateur WireGuardNT, qui ne
+    /// porte en IPv6 que son adresse de lien local, et `disconnect` retire
+    /// tout. Les deux temoins de la meme mesure sont tenus aussi: une adresse
+    /// dans chaque famille donne une ligne IPv6, capturee; sans `::/0`, aucune
+    /// route IPv6.
+    #[test]
+    fn une_famille_routee_sans_adresse_a_sa_route_et_pas_de_ligne() {
+        let a = cfg(&["10.2.0.2/32"], &["0.0.0.0/0", "::/0"]);
+        let p = PlanWindows::de_la_configuration(&a);
+        assert_eq!(p.familles(), [Famille::Ipv4]);
+        assert!(p.ligne(Famille::Ipv6).is_none());
+        assert_eq!(
+            rendu(&p.pose(&a.addresses)),
+            [
+                "adresse+ 10.2.0.2/32",
+                "ligne ipv4 mtu 1420 dad 0 metrique Some(0)",
+                "route+ 0.0.0.0/0 metrique 0",
+                "route+ ::/0 metrique 0",
+            ]
+        );
+        assert_eq!(
+            rendu(&p.retrait(&a.addresses)),
+            [
+                "route- 0.0.0.0/0 metrique 0",
+                "route- ::/0 metrique 0",
+                "adresse- 10.2.0.2/32",
+            ]
+        );
+
+        let b = cfg(&["10.2.0.2/32", "fd00::2/128"], &["0.0.0.0/0", "::/0"]);
+        let p = PlanWindows::de_la_configuration(&b);
+        assert_eq!(
+            rendu(&p.pose(&b.addresses)),
+            [
+                "adresse+ 10.2.0.2/32",
+                "adresse+ fd00::2/128",
+                "ligne ipv4 mtu 1420 dad 0 metrique Some(0)",
+                "ligne ipv6 mtu 1420 dad 0 metrique Some(0)",
+                "route+ 0.0.0.0/0 metrique 0",
+                "route+ ::/0 metrique 0",
+            ]
+        );
+
+        let c = cfg(&["10.2.0.2/32"], &["0.0.0.0/0"]);
+        let p = PlanWindows::de_la_configuration(&c);
+        assert_eq!(
+            rendu(&p.pose(&c.addresses)),
+            [
+                "adresse+ 10.2.0.2/32",
+                "ligne ipv4 mtu 1420 dad 0 metrique Some(0)",
+                "route+ 0.0.0.0/0 metrique 0",
+            ]
+        );
+        assert!(p.routes(Famille::Ipv6).is_empty());
     }
 
     /// Le plan reconstruit depuis ce qu'il declare (chemin, interface, MTU,

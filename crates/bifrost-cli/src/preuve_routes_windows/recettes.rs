@@ -194,6 +194,8 @@ fn pose(t: &mut TableIpHelper, plan: &PlanWindows) {
 
 const WG: &str = r#"{"schema_version":1,"plateforme":"windows","chemin":"wireguard","interface":"bfwg0","mtu":1420,"familles":["ipv4","ipv6"],"destinations":["198.51.100.0/24","2001:db8:d1c::/48"]}"#;
 const COEUR: &str = r#"{"schema_version":1,"plateforme":"windows","chemin":"coeur","interface":"bftun0","mtu":1280,"familles":["ipv4","ipv6"],"destinations":null}"#;
+/// Un profil WireGuard a adresse IPv4 seule qui route les deux familles.
+const WG_SANS_ADRESSE_V6: &str = r#"{"schema_version":1,"plateforme":"windows","chemin":"wireguard","interface":"bfwg0","mtu":1420,"familles":["ipv4"],"destinations":["0.0.0.0/0","::/0"]}"#;
 
 fn plan(texte: &str) -> PlanWindows {
     plan_de_l_intention(serde_json::from_str(texte).unwrap()).unwrap()
@@ -210,6 +212,34 @@ fn plan_coeur() -> PlanWindows {
 fn posee(p: &PlanWindows) -> TableIpHelper {
     let mut t = hote();
     pose(&mut t, p);
+    t
+}
+
+/// La table que la mesure du 02/10/2026 a lue sur le tunnel, plan pose, pour
+/// un profil a adresse IPv4 seule qui route les deux familles, transcrite sur
+/// l'hote des recettes SANS passer par le plan. En IPv4: la route par defaut,
+/// l'adresse et ses routes, la ligne imposee. En IPv6: `::/0`, la ligne que
+/// Windows cree avec l'adaptateur, en metrique automatique, l'adresse de lien
+/// local et ses deux routes, la multidiffusion.
+fn table_mesuree_sans_adresse_v6() -> TableIpHelper {
+    let mut t = hote();
+    t.tunnel = Some(TUNNEL);
+    t.lignes
+        .extend([ligne(TUNNEL, V4, 0, false), ligne(TUNNEL, V6, 5, true)]);
+    t.adresses.extend([
+        adresse(TUNNEL, "192.0.2.2/32"),
+        adresse(TUNNEL, "fe80::d1c/64"),
+    ]);
+    t.routes.extend([
+        a_metrique(route(TUNNEL, "0.0.0.0/0"), 0),
+        route(TUNNEL, "192.0.2.2/32"),
+        route(TUNNEL, "224.0.0.0/4"),
+        route(TUNNEL, "255.255.255.255/32"),
+        a_metrique(route(TUNNEL, "::/0"), 0),
+        route(TUNNEL, "fe80::/64"),
+        route(TUNNEL, "fe80::d1c/128"),
+        route(TUNNEL, "ff00::/8"),
+    ]);
     t
 }
 
@@ -606,6 +636,65 @@ fn la_concurrente_se_juge_contre_la_route_du_plan_la_plus_specifique() {
         0,
     ));
     assert_eq!(ecarts(&p, &t), ["ipv4-competing-route"]);
+}
+
+/// Une famille routee mais non adressee: l'intention la designe telle
+/// quelle, au constructeur de la pose, avec sa route et sans ligne. Sur la
+/// table que la mesure a lue, correspondance: la route du plan est sur le
+/// tunnel, et ce que Windows y ajoute est admis. Sans `::/0` sur le tunnel,
+/// la route du plan manque et celle du lien physique gagne. La ligne IPv6 du
+/// tunnel n'est pas jugee, le plan ne l'imposant pas, mais c'est la metrique
+/// qu'elle porte qui departage le `::/0` du tunnel de celui d'une autre
+/// interface.
+#[test]
+fn une_famille_routee_sans_adresse_se_juge_sur_la_table_mesuree() {
+    let p = plan(WG_SANS_ADRESSE_V6);
+    assert_eq!(
+        p,
+        PlanWindows::wireguard("bfwg0", &[V4], &[net("0.0.0.0/0"), net("::/0")], 1420)
+    );
+    assert_eq!(p.familles(), [V4]);
+    assert_eq!(p.routes(V6).len(), 1);
+
+    let rien = jugees([0; 7]);
+    let (attendus, observes, e) = comparer(&p, &table_mesuree_sans_adresse_v6());
+    assert!(e.is_empty(), "{e:?}");
+    assert_eq!(
+        serde_json::to_value(&attendus).unwrap(),
+        json!({
+            "ipv4": {"plan_routes": 1, "interface_metric_forced": true},
+            "ipv6": {"plan_routes": 1, "interface_metric_forced": false}
+        })
+    );
+    assert_eq!(
+        serde_json::to_value(&observes).unwrap(),
+        json!({
+            "ipv4": {
+                "routes": 15, "interfaces": 4, "tunnel_routes": 4, "plan_routes_found": 1,
+                "tunnel_other_routes": jugees([1, 0, 0, 1, 1, 0, 0]),
+                "winning_routes_elsewhere": jugees([6, 1, 1, 1, 1, 0, 0]),
+                "tied_routes_elsewhere": rien
+            },
+            "ipv6": {
+                "routes": 12, "interfaces": 4, "tunnel_routes": 4, "plan_routes_found": 1,
+                "tunnel_other_routes": jugees([1, 1, 0, 1, 0, 0, 0]),
+                "winning_routes_elsewhere": jugees([4, 2, 0, 1, 0, 0, 0]),
+                "tied_routes_elsewhere": rien
+            }
+        })
+    );
+
+    let mut t = table_mesuree_sans_adresse_v6();
+    retirer(&mut t, TUNNEL, "::/0");
+    assert_eq!(
+        ecarts(&p, &t),
+        ["ipv6-plan-route-missing", "ipv6-competing-route"]
+    );
+
+    // 0 + 4 sur le lien physique contre 0 + 5 sur le tunnel.
+    let mut t = table_mesuree_sans_adresse_v6();
+    ligne_de(&mut t, LAN, V6).metrique = 4;
+    assert_eq!(ecarts(&p, &t), ["ipv6-competing-route"]);
 }
 
 /// La regle de legitimite, classe par classe, sur l'occurrence ou elle decide:
@@ -1255,6 +1344,36 @@ async fn un_plan_declare_conforme_aux_tables_correspond() {
         vec![lue(&coeur), lue(&coeur)],
         &posee(&plan_coeur()),
         "bftun0",
+    )
+    .await;
+    assert_eq!(r["verdict"], "MATCH", "{r}");
+    assert_eq!((n, c), (2, 2));
+    rien_de_la_declaration(&r);
+}
+
+/// Le plan d'un profil qui route `::/0` sans adresse IPv6, tel que le daemon
+/// le declare: ses familles adressees, les destinations qu'il a posees.
+/// Reconstruit au meme constructeur, il est celui de l'intention, et il
+/// correspond a la table que la mesure a lue.
+#[tokio::test]
+async fn un_plan_declare_a_famille_routee_sans_adresse_correspond() {
+    let declare = PlanRoutageWindows {
+        chemin: CheminRoutage::Wireguard,
+        interface: "bfwg0".into(),
+        mtu: 1420,
+        familles: vec![FamilleRoutage::Ipv4],
+        destinations: Some(vec![net("0.0.0.0/0"), net("::/0")]),
+    };
+    let t = trame(4, EtatRoutage::Pose, Some(declare));
+    let (d, _) = lue(&t).unwrap();
+    assert_eq!(
+        plan_de_la_declaration(&d).unwrap(),
+        plan(WG_SANS_ADRESSE_V6)
+    );
+    let (r, n, c) = prouver(
+        vec![lue(&t), lue(&t)],
+        &table_mesuree_sans_adresse_v6(),
+        "bfwg0",
     )
     .await;
     assert_eq!(r["verdict"], "MATCH", "{r}");

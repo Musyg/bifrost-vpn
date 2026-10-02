@@ -109,10 +109,11 @@ pub fn route_bouclage(endpoint: IpAddr) -> Route {
 /// tel - il porte n'importe quelle destination vers son serveur - donc le plan
 /// ne se lit nulle part: il se decide, et la decision est "tout".
 ///
-/// Une route par famille effectivement adressee. Une route IPv6 sur une
-/// interface qui n'a pas d'adresse IPv6 serait refusee par Windows, et une
-/// famille laissee dehors sortirait EN CLAIR par le lien physique - c'est
-/// exactement le cas que `--ipv6-leak` mesure.
+/// Une route par famille effectivement adressee: c'est le choix du plan, pas
+/// un refus de Windows, qui accepte `::/0` sur un adaptateur WireGuardNT sans
+/// adresse IPv6 du profil (mesure du 02/10/2026, voir [`PlanWindows::coeur`]).
+/// Une famille adressee laissee dehors sortirait EN CLAIR par le lien
+/// physique - c'est exactement le cas que `--ipv6-leak` mesure.
 ///
 /// # Pourquoi `/0` et non deux moities `/1`
 ///
@@ -203,8 +204,8 @@ mod tests {
 
     #[test]
     fn un_portage_par_coeur_n_invente_pas_une_famille_non_adressee() {
-        // Une route IPv6 sur une interface sans adresse IPv6 est refusee par
-        // Windows, et un refus a cet endroit avorte le montage entier.
+        // Le coeur ne pose la route que des familles adressees: c'est le
+        // plan, pas un refus de Windows (voir `PlanWindows::coeur`).
         let v6 = routes_for(&cfg_coeur(&["fd00::2/128"]));
         assert_eq!(v6.len(), 1, "{v6:?}");
         assert!(!v6[0].dest.addr.is_ipv4());
