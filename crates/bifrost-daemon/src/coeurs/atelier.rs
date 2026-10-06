@@ -79,7 +79,8 @@ pub struct Vivant {
 /// Ce que l'atelier PUBLIE sur le coeur actif, pour quiconque doit lui parler
 /// APRES son lancement.
 ///
-/// Pas seulement l'adresse SOCKS: aussi son API, son PID et son compte dedie.
+/// Pas seulement l'adresse SOCKS: aussi son API, son PID, sa date de demarrage
+/// et son compte dedie.
 /// C'est ce qui permet a la facade (trafic), a la sonde et a la bascule (secret)
 /// de VERIFIER, avant chaque envoi, que le port qu'ils s'appretent a joindre est
 /// toujours tenu par le coeur qu'on a lance - et non par un squatteur qui
@@ -98,6 +99,10 @@ pub struct CoeurPublie {
     /// quand les descripteurs du coeur sont illisibles au daemon (l'unite
     /// livree). Voir [`super::proprietaire`].
     pub uid: Option<u32>,
+    /// La date de demarrage de l'enfant, relevee par le daemon a son
+    /// lancement: avec le PID, ce qui le designe a chaque verification. Voir
+    /// [`proprietaire::Attendu::demarrage`].
+    pub demarrage: Option<u64>,
 }
 
 impl CoeurPublie {
@@ -106,6 +111,7 @@ impl CoeurPublie {
         proprietaire::Attendu {
             pid: self.pid,
             uid: self.uid,
+            demarrage: self.demarrage,
         }
     }
 }
@@ -289,18 +295,25 @@ async fn tenir(mut demandes: mpsc::Receiver<Demande>, publier: watch::Sender<Opt
                         // trafic. On refuse donc de publier une adresse qu'un
                         // tiers detient - la meme regle que pour le secret de
                         // l'API, a l'autre bout du chemin par coeur.
-                        match proprietaire_de_l_entree(garde.pid(), garde.uid(), socks) {
+                        match proprietaire_de_l_entree(
+                            garde.pid(),
+                            garde.uid(),
+                            garde.demarrage(),
+                            socks,
+                        ) {
                             Ok(pid) => {
-                                // Publier PID, compte et API en plus de l'entree
-                                // SOCKS: c'est ce que la facade, la sonde et la
-                                // bascule reverifient avant chaque usage, pour
-                                // qu'un squatteur qui reprendrait le port apres
-                                // une mort du coeur ne recoive ni octet ni secret.
+                                // Publier PID, date de demarrage, compte et API
+                                // en plus de l'entree SOCKS: c'est ce que la
+                                // facade, la sonde et la bascule reverifient
+                                // avant chaque usage, pour qu'un squatteur qui
+                                // reprendrait le port apres une mort du coeur ne
+                                // recoive ni octet ni secret.
                                 let publie = CoeurPublie {
                                     socks,
                                     api: garde.api(),
                                     pid,
                                     uid: garde.uid(),
+                                    demarrage: garde.demarrage(),
                                 };
                                 en_cours = Some(garde);
                                 // Publier seulement une fois le coeur VIVANT:
@@ -377,11 +390,13 @@ async fn attendre_la_mort(en_cours: &mut Option<CoeurEnCours>) -> String {
 /// lancement: une ecoute qui existe DEJA et qui n'est pas au coeur.
 ///
 /// Rend le PID verifie quand le controle passe: c'est lui qu'on PUBLIE dans
-/// [`CoeurPublie`], avec le compte dedie, pour que la facade, la sonde et la
-/// bascule reverifient plus tard que le port est toujours tenu par ce coeur.
+/// [`CoeurPublie`], avec sa date de demarrage et le compte dedie, pour que la
+/// facade, la sonde et la bascule reverifient plus tard que le port est
+/// toujours tenu par ce coeur.
 fn proprietaire_de_l_entree(
     pid: Option<u32>,
     uid: Option<u32>,
+    demarrage: Option<u64>,
     socks: SocketAddr,
 ) -> Result<u32, String> {
     let Some(pid) = pid else {
@@ -389,7 +404,12 @@ fn proprietaire_de_l_entree(
             "le coeur n'a pas de PID: impossible de verifier qui tient son entree SOCKS".to_owned(),
         );
     };
-    match proprietaire::verifier_ecoute(socks.port(), proprietaire::Attendu { pid, uid }) {
+    let attendu = proprietaire::Attendu {
+        pid,
+        uid,
+        demarrage,
+    };
+    match proprietaire::verifier_ecoute(socks.port(), attendu) {
         Proprietaire::Confirme | Proprietaire::PersonneEncore => Ok(pid),
         Proprietaire::Autre { details } => Err(format!(
             "l'entree SOCKS {socks} est tenue par un autre que le coeur lance: le trafic ne lui sera pas mene ({details})"

@@ -179,6 +179,7 @@ mod tests {
             api: None,
             pid: std::process::id(),
             uid: None,
+            demarrage: proprietaire::date_de_demarrage(std::process::id()).ok(),
         }
     }
 

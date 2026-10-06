@@ -483,6 +483,8 @@ fn la_poignee_rend_un_verdict_sans_jamais_faire_attendre_le_superviseur() {
             api: Some(mort.api),
             pid: mort.enfant.id(),
             uid: None,
+            demarrage: bifrost_daemon::coeurs::proprietaire::date_de_demarrage(mort.enfant.id())
+                .ok(),
         }));
     let (mut poignee, veille) = vitalite::ouvrir(adresse(mort.api, &secret), coeur_rx);
     let ex = executeur();
