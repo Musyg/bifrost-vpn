@@ -9,6 +9,12 @@
 /// entre le `fork` et l'`exec`, et vit donc dans les modules qui lancent.
 #[cfg(windows)]
 pub mod anti_orphelin;
+/// Les politiques d'attenuation a l'execution que le daemon Windows se pose au
+/// demarrage (document 07, section 2.4).
+///
+/// Compile partout: la liste, le bilan et la place de la pose se verifient sur
+/// les deux hotes; la pose n'existe que sous Windows.
+pub mod attenuation;
 /// Reconnaitre le reseau courant sans rien emettre, et ranger ce qu'on a
 /// appris de lui. Le pendant impur de `bifrost_evasion::carnet`.
 pub mod carnet;
