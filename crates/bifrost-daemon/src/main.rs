@@ -1163,6 +1163,12 @@ fn demarrage_cli(
 }
 
 fn main() -> anyhow::Result<()> {
+    // Les politiques d'attenuation, AVANT toute autre instruction: une
+    // politique ne vaut que pour ce qui arrive apres sa pose. Un refus ne
+    // bloque rien, il est journalise des que le journal existe. Voir le module
+    // `attenuation`, dont une recette tient cette place.
+    #[cfg(windows)]
+    let attenuations = bifrost_daemon::attenuation::poser();
     let args = Args::parse();
 
     // Le plus tot possible: une ligne de commande qui se contredit se refuse
@@ -1371,6 +1377,8 @@ fn main() -> anyhow::Result<()> {
     init_tracing(args.service);
     #[cfg(not(windows))]
     init_tracing(false);
+    #[cfg(windows)]
+    bifrost_daemon::attenuation::journaliser(&attenuations);
 
     if args.cleanup_firewall {
         let mut fw = bifrost_firewall::new()?;

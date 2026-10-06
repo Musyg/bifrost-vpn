@@ -302,6 +302,49 @@ controles: GUARD_CF et la table restent poses), pile executable, RELRO coupe ou 
 relocation statique; lecture d'un mauvais champ ou d'un mauvais bit; propriete retiree de la
 lecture; repertoire absent, vide ou de profil de test; copie de la recette a la place d'un livre.
 
+**Politiques d'execution Windows, 02/10/2026.** Le daemon se pose cinq politiques par
+`SetProcessMitigationPolicy` (module `attenuation`), comme premiere instruction de `main` et
+avant la lecture de sa ligne de commande, en service comme en console: `ProcessImageLoadPolicy`
+(aucune image depuis un peripherique distant ni d'etiquette d'integrite basse, System32 d'abord
+pour une image chargee par son nom), `ProcessExtensionPointDisablePolicy` (ni DLL AppInit, ni
+fournisseur Winsock en couche, ni crochet global, ni ancien editeur de methode d'entree),
+`ProcessStrictHandleCheckPolicy` (une reference a une poignee invalide leve une exception; les deux
+bits, que le systeme exige ensemble), `ProcessControlFlowGuardPolicy` en `StrictMode` (toute DLL
+chargee ensuite doit porter CFG) et `ProcessDynamicCodePolicy` (ACG, sans retrait par fil ni par
+un autre processus). Une pose refusee est journalisee avec la politique, ses champs et le code
+systeme, et le daemon continue: une politique absente est un durcissement en moins, pas une raison
+de laisser la machine sans kill switch. Documentation Microsoft lue le 02/10/2026:
+`SetProcessMitigationPolicy` (mise a jour le 07/01/2026), les structures `PROCESS_MITIGATION_*`
+(22/02/2024), l'enumeration `PROCESS_MITIGATION_POLICY` (17/06/2026).
+
+**Ce qui est ecarte.** `ProcessSignaturePolicy`: `MicrosoftSignedOnly` fait echouer le chargement
+de wintun.dll et de wireguard.dll, signees par leur editeur (erreur 577 sous le service reel), donc
+tout tunnel; `StoreSignedOnly` et `MitigationOptIn` exigent une signature qu'elles ne portent pas
+non plus. `ProcessSystemCallDisablePolicy` (Win32k): le daemon importe user32, dont il emploie
+quatre fonctions pour la window-station et le bureau du compte du resolveur, et la pose est alors
+refusee (code 19, mesure sur dev-windows). `ProcessChildProcessPolicy`: le daemon lance les coeurs
+et le resolveur (creation refusee, code 367, mesure sur dev-windows).
+
+**Ce qui est mesure.** Sur dev-windows: seule `ProcessImageLoadPolicy` passe aux processus crees
+apres la pose. Sur essai-windows, sous le service reel installe par le mecanisme du depot, binaires
+`--release`: les cinq politiques se relisent de l'exterieur du processus du service
+(`GetProcessMitigationPolicy` et `Get-ProcessMitigation` concordent), le coeur et le resolveur
+lances ne portent que la premiere. Le service fait la meme chose avec et sans elles: statut par
+l'IPC, kill switch arme puis desarme avec `allow_lan` (le LAN repond pendant l'armement),
+adaptateur WireGuardNT, coeur sous son TUN Wintun, resolveur lance sous son compte, meme processus
+du debut a la fin, arret propre et code de sortie 0, aucune erreur nouvelle au journal.
+wintun.dll et wireguard.dll portent GUARD_CF et se chargent sous `StrictMode`.
+
+**Les gardes.** Les recettes du module tiennent la liste posee (nom, valeur, bits, ordre), l'ecart
+entre posees et ecartees, le refus nomme, et la place de la pose: premiere instruction de `main`,
+bilan journalise juste apres l'ouverture du journal. `tests/attenuation_windows.rs` relit les
+politiques dans son propre processus apres la pose; `tests/attenuation_daemon_windows.rs` les
+relit de l'exterieur dans un daemon lance, depuis un processus qui n'en porte aucune, puisque la
+premiere passe aux enfants. Les deux lisent une table ecrite a part. Chaque recette a ete vue
+rouge: politique omise, mauvais bit, mauvaise valeur, un seul bit des poignees, mauvaise taille,
+pose apres le journal ou apres la lecture de la ligne de commande, journal retire, lecture
+toujours pleine, refus sans nom, politique ecartee posee, lanceur qui se pose les politiques.
+
 **Ce qui manque.**
 - La bibliotheque standard n'est pas instrumentee: elle est livree precompilee sans CFG, et seul
   `-Z build-std`, sur une chaine nightly, la recompilerait.
@@ -319,8 +362,13 @@ lecture; repertoire absent, vide ou de profil de test; copie de la recette a la 
   Linux vient du code C d'une dependance de la CLI.
 - Les binaires tiers que les installeurs deposent (dnscrypt-proxy, wireguard.dll) ne sont pas
   lus par la recette des binaires livres.
-- Les politiques d'execution Windows (`SetProcessMitigationPolicy`: ACG, signature, chargement
-  d'images) ne sont pas posees: elles demandent une mesure sur essai-windows.
+- Les politiques d'execution Windows ne couvrent pas ce que le chargeur a deja charge quand
+  `main` commence: les DLL importees statiquement. Les poser avant ce point demande un reglage du
+  systeme (options d'execution de l'image), hors du daemon.
+- La signature reste ecartee tant que wintun.dll et wireguard.dll ne portent pas de signature
+  Microsoft, et Win32k tant que le daemon emploie user32 pour le compte du resolveur.
+- Le resolveur sous les politiques n'est mesure qu'a son lancement: sans pair vivant il ne repond
+  pas, avec ou sans elles. Aucune chute sur une poignee invalide n'a ete provoquee.
 
 ### PARTIE 3 - AUDIT EXTERNE
 
