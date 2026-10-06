@@ -321,6 +321,11 @@ pub struct CoeurEnCours {
     /// illisibles au daemon - le cas de l'unite livree. Voir
     /// [`super::proprietaire`].
     uid: Option<u32>,
+    /// La date de demarrage de l'enfant, relevee par le daemon a son lancement
+    /// ([`proprietaire::date_de_demarrage`]): avec le PID, ce qui le designe a
+    /// chaque verification de ses ecoutes. `None` si elle n'a pas pu etre
+    /// relevee, et aucune verification ne confirme alors rien.
+    demarrage: Option<u64>,
     /// Sous Windows, la poignee du Job doit vivre aussi longtemps que le
     /// superviseur: c'est sa fermeture qui tue le coeur.
     #[cfg(windows)]
@@ -350,6 +355,11 @@ impl CoeurEnCours {
     /// Le compte dedie pose au lancement, s'il y en a un.
     pub fn uid(&self) -> Option<u32> {
         self.uid
+    }
+
+    /// La date de demarrage relevee au lancement, si elle a pu l'etre.
+    pub fn demarrage(&self) -> Option<u64> {
+        self.demarrage
     }
 
     pub fn api(&self) -> Option<SocketAddr> {
@@ -595,6 +605,24 @@ pub async fn demarrer(
     #[cfg(windows)]
     let _job = job::attacher(&enfant)?;
 
+    // La date de demarrage de l'enfant, relevee par le daemon lui-meme et
+    // MAINTENANT: il tient le `Child` sans l'avoir attendu, donc ce PID designe
+    // cet enfant et lui seul. Avec le PID, c'est elle que chaque verification
+    // de ses ecoutes exige (voir `super::proprietaire`). Illisible, aucune
+    // verification ne confirmera rien, et le refus le dira.
+    let demarrage = enfant
+        .id()
+        .and_then(|pid| match proprietaire::date_de_demarrage(pid) {
+            Ok(date) => Some(date),
+            Err(e) => {
+                tracing::warn!(
+                    erreur = %e,
+                    "date de demarrage du coeur illisible: aucune verification de ses ecoutes ne le confirmera"
+                );
+                None
+            }
+        });
+
     // Pris tout de suite: le drain doit tourner avant meme l'attente de l'API,
     // sinon un coeur qui se plaint abondamment remplit le tuyau et se bloque.
     let journal = enfant
@@ -614,6 +642,7 @@ pub async fn demarrer(
         // Ce que le daemon a lui-meme pose ci-dessus, et non ce qu'on lirait chez
         // l'enfant. `None` sous Windows, ou le champ n'a pas d'effet.
         uid: lancement.utilisateur.map(|u| u.uid),
+        demarrage,
         #[cfg(windows)]
         _job,
         _configuration: configuration,
@@ -744,8 +773,8 @@ async fn sursis_sans_api(en_cours: &mut CoeurEnCours) -> anyhow::Result<()> {
 ///
 /// Avant CHAQUE `interroger_version` - la seule requete qui porte
 /// `Authorization: Bearer <secret>` - on verifie que l'ecoute de l'API
-/// appartient bien a l'enfant (son PID, ou son compte dedie quand ses
-/// descripteurs sont illisibles au daemon). Un port de la boucle locale a un numero
+/// appartient bien a l'enfant (son PID et sa date de demarrage, et son compte
+/// dedie quand ses descripteurs sont illisibles au daemon). Un port de la boucle locale a un numero
 /// fixe et previsible; un compte ordinaire qui le lie avant le coeur recevrait
 /// sinon le secret, et pourrait repondre a sa place - version, vitalite,
 /// selection - un coeur imposteur que le daemon croirait sien. La verification
@@ -767,6 +796,7 @@ async fn attendre_api(en_cours: &mut CoeurEnCours, api: SocketAddr) -> anyhow::R
     let attendu = proprietaire::Attendu {
         pid,
         uid: en_cours.uid,
+        demarrage: en_cours.demarrage,
     };
 
     let sondage = async {

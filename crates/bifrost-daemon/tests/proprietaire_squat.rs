@@ -392,6 +392,7 @@ async fn la_sonde_ne_livre_pas_le_secret_a_un_squatteur_en_session() {
         api: Some(api),
         pid: pid_coeur,
         uid: None,
+        demarrage: proprietaire::date_de_demarrage(pid_coeur).ok(),
     };
     let (_publier, coeur_rx) = tokio::sync::watch::channel(Some(publie));
     let adresse = vitalite::Adresse {
@@ -458,6 +459,7 @@ async fn la_bascule_ne_livre_pas_le_secret_a_un_squatteur_en_session() {
         api: Some(api),
         pid: pid_coeur,
         uid: None,
+        demarrage: proprietaire::date_de_demarrage(pid_coeur).ok(),
     };
     let (_publier, coeur_rx) = tokio::sync::watch::channel(Some(publie));
     let adresse = vitalite::Adresse {
@@ -526,6 +528,7 @@ async fn la_facade_ne_mene_pas_le_trafic_a_un_squatteur_en_session() {
         api: None,
         pid: pid_coeur,
         uid: None,
+        demarrage: proprietaire::date_de_demarrage(pid_coeur).ok(),
     };
     let (_publier, arriere) = tokio::sync::watch::channel(Some(publie));
     let (adresse, la_facade) = facade::ouvrir("127.0.0.1:0".parse().unwrap(), arriere)
@@ -667,6 +670,7 @@ async fn verdict_a_cote_de(lier: fn() -> std::io::Result<TcpListener>, nom: &str
                     proprietaire::Attendu {
                         pid: doublure.id(),
                         uid: None,
+                        demarrage: proprietaire::date_de_demarrage(doublure.id()).ok(),
                     },
                 );
                 let _ = doublure.kill();

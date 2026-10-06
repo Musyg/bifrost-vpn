@@ -39,12 +39,31 @@
 //!
 //! # Comment on identifie le proprietaire, par plateforme
 //!
+//! L'enfant est designe par un COUPLE: son PID et sa date de demarrage, que le
+//! daemon releve lui-meme sur son enfant au lancement, tant qu'il en tient le
+//! `Child` sans l'avoir attendu ([`date_de_demarrage`], porte par
+//! [`Attendu::demarrage`]). Ce couple designe un seul processus tant que la
+//! machine ne redemarre pas. A chaque verification, la decision exige que le
+//! processus du PID ait encore cette date AVANT de faire confiance a ce qu'elle
+//! lit de lui, et la relit APRES: date differente, illisible ou jamais relevee,
+//! le verdict est `Illisible`. Jamais `Confirme`, et jamais `Autre` non plus:
+//! un processus qui n'est plus l'enfant ne dit rien des ecoutes de l'enfant, et
+//! n'accuse donc personne.
+//!
 //! - **Windows**: `GetExtendedTcpTable` avec `TCP_TABLE_OWNER_PID_LISTENER`
 //!   rend le PID proprietaire de chaque ecoute, pour tout compte et sans
-//!   privilege. On le compare au PID de l'enfant. La reutilisation de PID est
-//!   fermee tant que le `Child` vit: tokio en garde la poignee, et Windows ne
-//!   reattribue un PID qu'une fois toutes ses poignees fermees.
-//! - **Linux**, par ordre de force:
+//!   privilege. On le compare au PID de l'enfant. La date est sa date de
+//!   creation (`GetProcessTimes`, en centaines de nanosecondes), lue avant la
+//!   table et relue apres elle. Tant que le `Child` vit, tokio en garde la
+//!   poignee, et Windows ne reattribue un PID qu'une fois toutes ses poignees
+//!   fermees; la date exige en plus que le PID de la table designe encore
+//!   l'enfant au moment de chaque verification.
+//! - **Linux**: la date est le champ 22 (`starttime`) de `/proc/<pid>/stat`,
+//!   lisible par tout compte comme `/proc/<pid>/status`, compte apres la
+//!   DERNIERE parenthese fermante (le nom du processus peut contenir espaces
+//!   et parentheses). Elle est lue avant les descripteurs de l'enfant et
+//!   relue apres eux et apres son statut, sur chacun des deux chemins
+//!   suivants, par ordre de force:
 //!   1. **L'inode, quand les descripteurs de l'enfant sont lisibles.**
 //!      `/proc/net/tcp{,6}` donne l'inode de chaque ecoute, `/proc/<pid>/fd`
 //!      les inodes que l'enfant detient. C'est la reponse exacte a << est-ce MON
@@ -110,6 +129,75 @@ pub enum Proprietaire {
 pub struct Attendu {
     pub pid: u32,
     pub uid: Option<u32>,
+    /// La date de demarrage de l'enfant, relevee par le daemon a son lancement
+    /// ([`date_de_demarrage`], tant qu'il tient le `Child`), dans l'unite du
+    /// systeme: sous Linux le `starttime` de `/proc/<pid>/stat`, en tics
+    /// d'horloge depuis le demarrage de la machine; sous Windows la date de
+    /// creation du processus, en centaines de nanosecondes depuis 1601. Avec
+    /// `pid`, c'est ce qui designe l'enfant. `None` quand elle n'a pas pu etre
+    /// relevee: aucune verification ne confirme alors rien.
+    pub demarrage: Option<u64>,
+}
+
+/// La date de demarrage du processus `pid`, dans l'unite que porte
+/// [`Attendu::demarrage`].
+///
+/// Le daemon l'appelle sur son enfant au lancement, tant qu'il en tient le
+/// `Child` sans l'avoir attendu: ce PID ne designe alors que cet enfant. La
+/// verification la relit ensuite pour s'assurer que le PID le designe encore.
+pub fn date_de_demarrage(pid: u32) -> Result<u64, String> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::demarrage_de(pid)
+    }
+    #[cfg(windows)]
+    {
+        windows_impl::demarrage_de(pid)
+    }
+    #[cfg(not(any(target_os = "linux", windows)))]
+    {
+        let _ = pid;
+        Err("date de demarrage d'un processus non implementee sur cette plateforme".to_owned())
+    }
+}
+
+/// Le processus du PID attendu est-il encore l'enfant que le daemon a lance.
+///
+/// `avant` et `apres` sont les deux lectures de sa date de demarrage qui
+/// encadrent ce que la verification lit de lui: ses descripteurs ou son
+/// statut sous Linux, la table des ecoutes sous Windows. Les deux doivent etre
+/// lisibles et egales a la date relevee au lancement
+/// ([`Attendu::demarrage`]). Sinon, la raison: l'appelant en fait
+/// `Illisible`, ni `Confirme` ni `Autre`, puisqu'un processus qui n'est plus
+/// l'enfant ne dit rien des ecoutes de l'enfant. Pure.
+#[cfg(any(target_os = "linux", windows))]
+fn meme_processus(
+    attendu: Attendu,
+    avant: &Result<u64, String>,
+    apres: &Result<u64, String>,
+) -> Result<(), String> {
+    let pid = attendu.pid;
+    let Some(relevee) = attendu.demarrage else {
+        return Err(format!(
+            "aucune date de demarrage n'a ete relevee au lancement du processus {pid}: rien n'etablit que ce PID designe encore l'enfant lance"
+        ));
+    };
+    for (quand, lue) in [("avant", avant), ("apres", apres)] {
+        match lue {
+            Ok(date) if *date == relevee => {}
+            Ok(date) => {
+                return Err(format!(
+                    "le processus {pid} n'est plus l'enfant lance: date de demarrage {date} lue {quand} la verification, {relevee} relevee au lancement"
+                ));
+            }
+            Err(e) => {
+                return Err(format!(
+                    "date de demarrage du processus {pid} illisible {quand} la verification: {e}"
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Le port `port` de la boucle locale est-il ecoute par le coeur `attendu`.
@@ -123,7 +211,7 @@ pub fn verifier_ecoute(port: u16, attendu: Attendu) -> Proprietaire {
     }
     #[cfg(windows)]
     {
-        windows_impl::verifier(port, attendu.pid)
+        windows_impl::verifier(port, attendu)
     }
     #[cfg(not(any(target_os = "linux", windows)))]
     {
@@ -236,14 +324,27 @@ mod linux {
     /// Le chemin par le compte dedie ne s'emprunte que quand ces descripteurs
     /// sont REFUSES, ce qu'un compte ordinaire ne sait pas provoquer sur son
     /// propre enfant. Les recettes fournissent donc le refus; tout le reste - la
-    /// table des ecoutes, l'etat et l'uid de l'enfant - est lu pour de vrai.
-    /// Sans ce parametre, aucune recette ne voyait l'etat de l'enfant: le forcer
-    /// a << vivant, sous le compte declare >> les laissait toutes vertes. La
-    /// production passe [`descripteurs_de`].
+    /// table des ecoutes, la date de demarrage, l'etat et l'uid de l'enfant -
+    /// est lu pour de vrai. Sans ce parametre, aucune recette ne voyait l'etat
+    /// de l'enfant: le forcer a << vivant, sous le compte declare >> les
+    /// laissait toutes vertes. La production passe [`descripteurs_de`].
     pub(super) fn verifier_avec(
         port: u16,
         attendu: Attendu,
         lire_descripteurs: impl Fn(u32) -> Descripteurs,
+    ) -> Proprietaire {
+        verifier_avec_lecteurs(port, attendu, lire_descripteurs, demarrage_de)
+    }
+
+    /// [`verifier_avec`], avec aussi la lecture de la date de demarrage en
+    /// parametre: les recettes y eprouvent l'ordre des lectures, la date AVANT
+    /// les descripteurs, puis relue APRES eux et apres le statut. La production
+    /// passe [`demarrage_de`].
+    pub(super) fn verifier_avec_lecteurs(
+        port: u16,
+        attendu: Attendu,
+        lire_descripteurs: impl Fn(u32) -> Descripteurs,
+        lire_demarrage: impl Fn(u32) -> Result<u64, String>,
     ) -> Proprietaire {
         let ecoutes = match ecoutes_sur(port) {
             Ok(e) => e,
@@ -252,12 +353,17 @@ mod linux {
         if ecoutes.is_empty() {
             return Proprietaire::PersonneEncore;
         }
+        // La date de demarrage encadre tout ce qu'on lit du PID: lue avant ses
+        // descripteurs, relue apres eux et apres son statut. Egale des deux
+        // cotes a celle du lancement, ces lectures sont celles de l'enfant.
+        let avant = lire_demarrage(attendu.pid);
         let fds = lire_descripteurs(attendu.pid);
         let statut = match fds {
             Descripteurs::Refuses(_) => Some(statut_de(attendu.pid)),
             _ => None,
         };
-        let verdict = trancher(&ecoutes, &fds, statut.as_ref(), attendu);
+        let apres = lire_demarrage(attendu.pid);
+        let verdict = decider(&ecoutes, &fds, statut.as_ref(), &avant, &apres, attendu);
 
         // Par les inodes, une ecoute etrangere peut n'etre que celle de l'enfant
         // qui s'arretait entre la lecture de la table et celle de ses liens. On
@@ -283,8 +389,41 @@ mod linux {
         verdict
     }
 
-    /// Le verdict, a partir de ce qui a ete lu. Pure: c'est ici que se decide
-    /// qui est accuse, et les recettes l'eprouvent sans privilege.
+    /// Le verdict entier: l'identite du processus d'abord, ses ecoutes ensuite.
+    ///
+    /// Chacun des deux chemins qui FONT CONFIANCE a ce qu'on a lu du PID - ses
+    /// descripteurs (par l'inode) ou son statut (par le compte dedie) - exige
+    /// d'abord que ce PID designe encore l'enfant lance: sa date de demarrage,
+    /// lue avant ces lectures et relue apres, est celle que le daemon a relevee
+    /// au lancement (`super::meme_processus`). Sinon `Illisible`, ni `Confirme`
+    /// ni `Autre`. Les deux autres cas ne font confiance a rien, et [`trancher`]
+    /// les refuse deja sans accuser personne. Pure, comme [`trancher`].
+    pub(super) fn decider(
+        ecoutes: &[Ecoute],
+        fds: &Descripteurs,
+        statut: Option<&Result<Statut, String>>,
+        avant: &Result<u64, String>,
+        apres: &Result<u64, String>,
+        attendu: Attendu,
+    ) -> Proprietaire {
+        let identite = match fds {
+            // Par l'inode: les inodes lus ne sont ceux de l'enfant que si le
+            // PID le designe encore.
+            Descripteurs::Lus(_) => super::meme_processus(attendu, avant, apres),
+            // Par le compte: l'etat et l'uid lus ne sont ceux de l'enfant qu'a
+            // la meme condition.
+            Descripteurs::Refuses(_) => super::meme_processus(attendu, avant, apres),
+            Descripteurs::Absent | Descripteurs::Erreur(_) => Ok(()),
+        };
+        match identite {
+            Ok(()) => trancher(ecoutes, fds, statut, attendu),
+            Err(details) => Proprietaire::Illisible { details },
+        }
+    }
+
+    /// Le verdict sur les ecoutes, a partir de ce qui a ete lu, une fois
+    /// l'identite du processus etablie par [`decider`]. Pure: c'est ici que se
+    /// decide qui est accuse, et les recettes l'eprouvent sans privilege.
     pub(super) fn trancher(
         ecoutes: &[Ecoute],
         fds: &Descripteurs,
@@ -506,6 +645,31 @@ mod linux {
         })
     }
 
+    /// La date de demarrage du processus, par `/proc/<pid>/stat`: le champ 22
+    /// (`starttime`), en tics d'horloge depuis le demarrage de la machine.
+    /// Le fichier est lisible par tout compte, comme `/proc/<pid>/status`, et
+    /// le noyau y ecrit cette date pour tout processus, zombie compris.
+    pub(super) fn demarrage_de(pid: u32) -> Result<u64, String> {
+        let chemin = format!("/proc/{pid}/stat");
+        let contenu = std::fs::read(&chemin).map_err(|e| match e.kind() {
+            ErrorKind::NotFound => format!("{chemin} absent: le processus n'existe plus"),
+            _ => format!("lecture de {chemin}: {e}"),
+        })?;
+        demarrage_dans_stat(&contenu)
+            .ok_or_else(|| format!("{chemin}: champ 22 (starttime) absent ou non numerique"))
+    }
+
+    /// Le champ 22 d'un texte de `/proc/<pid>/stat`, compte apres la DERNIERE
+    /// parenthese fermante: le nom du processus, entre parentheses, peut
+    /// contenir espaces et parentheses. Le parseur est celui du journal des
+    /// sessions de routage (`tunnel::session::etat_et_debut`), pour qu'une
+    /// seule lecture de ce format vive dans le produit. Un nom qui n'est pas de
+    /// l'UTF-8 ne change rien aux champs qui le suivent, tous ASCII.
+    pub(super) fn demarrage_dans_stat(contenu: &[u8]) -> Option<u64> {
+        crate::tunnel::session::etat_et_debut(&String::from_utf8_lossy(contenu))
+            .map(|(_, debut)| debut)
+    }
+
     /// L'inode d'un lien `socket:[12345]`, ou `None` si ce n'est pas un socket.
     fn inode_de_lien(lien: &str) -> Option<u64> {
         let reste = lien.strip_prefix("socket:[")?;
@@ -527,9 +691,13 @@ mod linux {
             Ecoute { uid, inode }
         }
 
+        /// La date de demarrage que les recettes pures declarent pour `MOI`.
+        const DATE: u64 = 98765;
+
         const MOI: Attendu = Attendu {
             pid: 4242,
             uid: Some(990),
+            demarrage: Some(DATE),
         };
 
         #[test]
@@ -715,6 +883,7 @@ mod linux {
             let sans_compte = Attendu {
                 pid: 4242,
                 uid: None,
+                demarrage: MOI.demarrage,
             };
             match trancher(&[ecoute(990, 45678)], &fds, None, sans_compte) {
                 Proprietaire::Illisible { details } => {
@@ -802,6 +971,7 @@ mod linux {
             let attendu = Attendu {
                 pid: enfant.id(),
                 uid: Some(mon_uid()),
+                demarrage: demarrage_de(enfant.id()).ok(),
             };
             let v = verifier_avec(port, attendu, refus_simule);
             let _ = enfant.kill();
@@ -816,11 +986,13 @@ mod linux {
             let (_ecoute, port) = ecoute_du_compte();
             let mut enfant = enfant_qui_dort();
             let pid = enfant.id();
+            let demarrage = demarrage_de(pid).ok();
             enfant.kill().expect("tuer l'enfant par son PID");
             enfant.wait().expect("reaper l'enfant");
             let attendu = Attendu {
                 pid,
                 uid: Some(mon_uid()),
+                demarrage,
             };
             match verifier_avec(port, attendu, refus_simule) {
                 Proprietaire::Illisible { details } => {
@@ -836,6 +1008,7 @@ mod linux {
             let (_ecoute, port) = ecoute_du_compte();
             let mut enfant = enfant_qui_dort();
             let pid = enfant.id();
+            let demarrage = demarrage_de(pid).ok();
             enfant.kill().expect("tuer l'enfant par son PID");
             let debut = std::time::Instant::now();
             while statut_de(pid).map(|s| s.vivant).unwrap_or(true) {
@@ -848,6 +1021,7 @@ mod linux {
             let attendu = Attendu {
                 pid,
                 uid: Some(mon_uid()),
+                demarrage,
             };
             let v = verifier_avec(port, attendu, refus_simule);
             let _ = enfant.wait();
@@ -872,6 +1046,7 @@ mod linux {
             let attendu = Attendu {
                 pid: enfant.id(),
                 uid: Some(moi.wrapping_add(1)),
+                demarrage: demarrage_de(enfant.id()).ok(),
             };
             let v = verifier_avec(port, attendu, refus_simule);
             let _ = enfant.kill();
@@ -910,6 +1085,7 @@ mod linux {
             let attendu = Attendu {
                 pid: 1,
                 uid: Some(moi),
+                demarrage: demarrage_de(1).ok(),
             };
             match verifier_avec(port, attendu, refus_simule) {
                 Proprietaire::Illisible { details } => assert!(
@@ -921,25 +1097,416 @@ mod linux {
                 ),
             }
         }
+
+        // La date de demarrage: sa lecture dans `/proc/<pid>/stat`, puis la
+        // decision avec une date egale, differente et illisible, sur chacun
+        // des deux chemins.
+
+        /// Un texte de `/proc/<pid>/stat` au format du noyau: le champ 3 est
+        /// l'etat, chacun des champs 4 a 52 porte son propre numero, sauf le
+        /// 22, qui porte `demarrage`. Lire un autre champ que le 22 rend donc
+        /// un numero de champ, et non la date.
+        fn stat(nom: &str, demarrage: &str) -> Vec<u8> {
+            let champs: Vec<String> = (4..=52)
+                .map(|n| {
+                    if n == 22 {
+                        demarrage.to_owned()
+                    } else {
+                        n.to_string()
+                    }
+                })
+                .collect();
+            format!("4242 ({nom}) S {}\n", champs.join(" ")).into_bytes()
+        }
+
+        #[test]
+        fn la_date_de_demarrage_est_le_champ_22_de_stat() {
+            assert_eq!(demarrage_dans_stat(&stat("sing-box", "98765")), Some(98765));
+        }
+
+        /// Le nom peut porter espaces et parentheses: les champs se comptent
+        /// apres la DERNIERE parenthese fermante, jamais apres la premiere.
+        #[test]
+        fn un_nom_avec_espaces_et_parentheses_ne_decale_pas_les_champs() {
+            for nom in ["sing box", "x) y (z", "a) S 1 (b", ") )", "(("] {
+                assert_eq!(
+                    demarrage_dans_stat(&stat(nom, "98765")),
+                    Some(98765),
+                    "nom {nom:?}"
+                );
+            }
+        }
+
+        /// Un nom qui n'est pas de l'UTF-8 ne rend pas la date illisible.
+        #[test]
+        fn un_nom_hors_utf8_ne_rend_pas_la_date_illisible() {
+            let mut texte = stat("ab", "98765");
+            let debut = texte.iter().position(|&o| o == b'a').unwrap();
+            texte[debut] = 0xff;
+            texte[debut + 1] = 0xfe;
+            assert_eq!(demarrage_dans_stat(&texte), Some(98765));
+        }
+
+        /// Des champs manquants ne donnent aucune date: ni celle d'un autre
+        /// champ, ni zero.
+        #[test]
+        fn des_champs_manquants_ne_donnent_aucune_date() {
+            let complet = String::from_utf8(stat("sing-box", "98765")).unwrap();
+            let jusqu_au_21 = &complet[..complet.find(" 98765").unwrap()];
+            assert_eq!(demarrage_dans_stat(jusqu_au_21.as_bytes()), None);
+            assert_eq!(demarrage_dans_stat(b"4242 (sing-box"), None);
+            assert_eq!(demarrage_dans_stat(b"4242 sing-box S 4 5 6"), None);
+            assert_eq!(demarrage_dans_stat(b""), None);
+        }
+
+        #[test]
+        fn une_date_non_numerique_ne_donne_aucune_date() {
+            for valeur in ["abc", "-5", "12a", "1.5", "99999999999999999999999"] {
+                assert_eq!(
+                    demarrage_dans_stat(&stat("sing-box", valeur)),
+                    None,
+                    "valeur {valeur:?}"
+                );
+            }
+        }
+
+        /// La lecture reelle: la date de ce processus, lue deux fois, est la
+        /// meme, et c'est celle que le journal des sessions lit de son cote.
+        /// Un PID qui n'existe pas rend une raison, jamais une date.
+        #[test]
+        fn la_date_de_ce_processus_se_lit_et_ne_change_pas() {
+            let pid = std::process::id();
+            let une = demarrage_de(pid).expect("son propre /proc/<pid>/stat est lisible");
+            assert_eq!(demarrage_de(pid), Ok(une));
+            assert_eq!(
+                crate::tunnel::session::ce_processus()
+                    .map(|(_, debut)| debut)
+                    .ok(),
+                Some(une)
+            );
+            let absent = demarrage_de(u32::MAX).expect_err("aucun processus ne porte ce PID");
+            assert!(absent.contains("n'existe plus"), "{absent}");
+        }
+
+        /// Une date lue, une date qui n'est pas celle du lancement, une date
+        /// illisible.
+        fn egale() -> Result<u64, String> {
+            Ok(DATE)
+        }
+        fn differente() -> Result<u64, String> {
+            Ok(DATE + 1)
+        }
+        fn illisible() -> Result<u64, String> {
+            Err("/proc/4242/stat absent: le processus n'existe plus".to_owned())
+        }
+
+        /// Ce que le chemin par l'inode lit: l'ecoute est detenue par le PID.
+        fn par_l_inode() -> (Vec<Ecoute>, Descripteurs) {
+            (
+                vec![ecoute(990, 45678)],
+                Descripteurs::Lus([45678].into_iter().collect()),
+            )
+        }
+
+        /// Ce que le chemin par le compte lit: descripteurs refuses, PID vivant
+        /// sous le compte declare, ecoute de ce compte.
+        fn par_le_compte() -> (Vec<Ecoute>, Descripteurs, Result<Statut, String>) {
+            (
+                vec![ecoute(990, 45678)],
+                Descripteurs::Refuses("refuse".into()),
+                Ok(Statut {
+                    vivant: true,
+                    uid: 990,
+                }),
+            )
+        }
+
+        /// Le refus attendu quand le PID ne designe plus l'enfant: `Illisible`,
+        /// avec une raison qui contient `motif`.
+        fn illisible_avec(v: Proprietaire, motif: &str) {
+            match v {
+                Proprietaire::Illisible { details } => {
+                    assert!(details.contains(motif), "{details}")
+                }
+                autre => panic!("attendu Illisible ({motif}), obtenu {autre:?}"),
+            }
+        }
+
+        #[test]
+        fn par_l_inode_la_date_du_lancement_avant_et_apres_confirme() {
+            let (ecoutes, fds) = par_l_inode();
+            assert_eq!(
+                decider(&ecoutes, &fds, None, &egale(), &egale(), MOI),
+                Proprietaire::Confirme
+            );
+        }
+
+        #[test]
+        fn par_l_inode_une_date_differente_ne_confirme_rien() {
+            let (ecoutes, fds) = par_l_inode();
+            illisible_avec(
+                decider(&ecoutes, &fds, None, &differente(), &egale(), MOI),
+                "n'est plus l'enfant lance",
+            );
+            illisible_avec(
+                decider(&ecoutes, &fds, None, &egale(), &differente(), MOI),
+                "lue apres",
+            );
+        }
+
+        #[test]
+        fn par_l_inode_une_date_illisible_ne_confirme_rien() {
+            let (ecoutes, fds) = par_l_inode();
+            illisible_avec(
+                decider(&ecoutes, &fds, None, &illisible(), &egale(), MOI),
+                "illisible avant",
+            );
+            illisible_avec(
+                decider(&ecoutes, &fds, None, &egale(), &illisible(), MOI),
+                "illisible apres",
+            );
+        }
+
+        /// Une ecoute que le PID ne detient pas n'accuse personne quand le PID
+        /// n'est plus l'enfant: ses descripteurs ne disent rien de l'enfant.
+        #[test]
+        fn par_l_inode_un_pid_qui_n_est_plus_l_enfant_n_accuse_personne() {
+            let fds = Descripteurs::Lus([1].into_iter().collect());
+            let ecoutes = [ecoute(990, 45678)];
+            assert!(matches!(
+                decider(&ecoutes, &fds, None, &egale(), &egale(), MOI),
+                Proprietaire::Autre { .. }
+            ));
+            illisible_avec(
+                decider(&ecoutes, &fds, None, &differente(), &differente(), MOI),
+                "n'est plus l'enfant lance",
+            );
+        }
+
+        #[test]
+        fn par_le_compte_la_date_du_lancement_avant_et_apres_confirme() {
+            let (ecoutes, fds, statut) = par_le_compte();
+            assert_eq!(
+                decider(&ecoutes, &fds, Some(&statut), &egale(), &egale(), MOI),
+                Proprietaire::Confirme
+            );
+        }
+
+        #[test]
+        fn par_le_compte_une_date_differente_ne_confirme_rien() {
+            let (ecoutes, fds, statut) = par_le_compte();
+            illisible_avec(
+                decider(&ecoutes, &fds, Some(&statut), &differente(), &egale(), MOI),
+                "n'est plus l'enfant lance",
+            );
+            illisible_avec(
+                decider(&ecoutes, &fds, Some(&statut), &egale(), &differente(), MOI),
+                "lue apres",
+            );
+        }
+
+        #[test]
+        fn par_le_compte_une_date_illisible_ne_confirme_rien() {
+            let (ecoutes, fds, statut) = par_le_compte();
+            illisible_avec(
+                decider(&ecoutes, &fds, Some(&statut), &illisible(), &egale(), MOI),
+                "illisible avant",
+            );
+            illisible_avec(
+                decider(&ecoutes, &fds, Some(&statut), &egale(), &illisible(), MOI),
+                "illisible apres",
+            );
+        }
+
+        /// Une ecoute d'un autre compte n'accuse personne quand le PID n'est
+        /// plus l'enfant: son statut ne dit rien de l'enfant.
+        #[test]
+        fn par_le_compte_un_pid_qui_n_est_plus_l_enfant_n_accuse_personne() {
+            let (_, fds, statut) = par_le_compte();
+            let ecoutes = [ecoute(1000, 45678)];
+            assert!(matches!(
+                decider(&ecoutes, &fds, Some(&statut), &egale(), &egale(), MOI),
+                Proprietaire::Autre { .. }
+            ));
+            illisible_avec(
+                decider(
+                    &ecoutes,
+                    &fds,
+                    Some(&statut),
+                    &differente(),
+                    &differente(),
+                    MOI,
+                ),
+                "n'est plus l'enfant lance",
+            );
+        }
+
+        /// Une date jamais relevee au lancement ne confirme rien, sur aucun
+        /// des deux chemins, meme quand les lectures concordent entre elles.
+        #[test]
+        fn sans_date_relevee_au_lancement_aucun_chemin_ne_confirme() {
+            let sans_date = Attendu {
+                demarrage: None,
+                ..MOI
+            };
+            let (ecoutes, fds) = par_l_inode();
+            illisible_avec(
+                decider(&ecoutes, &fds, None, &egale(), &egale(), sans_date),
+                "aucune date de demarrage",
+            );
+            let (ecoutes, fds, statut) = par_le_compte();
+            illisible_avec(
+                decider(&ecoutes, &fds, Some(&statut), &egale(), &egale(), sans_date),
+                "aucune date de demarrage",
+            );
+        }
+
+        // L'ordre des lectures, compose: vraie table des ecoutes (une ecoute de
+        // CE processus, qui est ici le processus attendu), vrais descripteurs
+        // ou refus simule, vrai statut; seule la date est fournie, pour qu'elle
+        // puisse changer entre ses deux lectures.
+
+        /// Des lectures de date qui rendent les dates donnees, dans l'ordre, et
+        /// inscrivent chaque lecture, de date comme de descripteurs, au meme
+        /// journal.
+        struct Lectures {
+            dates: Vec<u64>,
+            rang: std::cell::Cell<usize>,
+            journal: std::cell::RefCell<Vec<&'static str>>,
+        }
+
+        impl Lectures {
+            fn nouvelles(dates: &[u64]) -> Self {
+                Lectures {
+                    dates: dates.to_vec(),
+                    rang: std::cell::Cell::new(0),
+                    journal: std::cell::RefCell::new(Vec::new()),
+                }
+            }
+
+            fn date(&self, _: u32) -> Result<u64, String> {
+                self.journal.borrow_mut().push("date");
+                let i = self.rang.get();
+                self.rang.set(i + 1);
+                self.dates
+                    .get(i)
+                    .copied()
+                    .ok_or_else(|| format!("lecture de date numero {i} non prevue"))
+            }
+
+            fn descripteurs(&self, pid: u32, par_l_inode: bool) -> Descripteurs {
+                self.journal.borrow_mut().push("descripteurs");
+                if par_l_inode {
+                    descripteurs_de(pid)
+                } else {
+                    refus_simule(pid)
+                }
+            }
+
+            fn ordre(&self) -> Vec<&'static str> {
+                self.journal.borrow().clone()
+            }
+        }
+
+        /// Le processus attendu est celui-ci, avec la date que les lectures
+        /// fournies rendent d'abord.
+        fn ce_processus_date(uid: Option<u32>) -> Attendu {
+            Attendu {
+                pid: std::process::id(),
+                uid,
+                demarrage: Some(DATE),
+            }
+        }
+
+        #[test]
+        fn par_l_inode_la_date_est_lue_avant_les_descripteurs_et_relue_apres() {
+            let (_ecoute, port) = ecoute_du_compte();
+            let attendu = ce_processus_date(None);
+
+            let stable = Lectures::nouvelles(&[DATE, DATE]);
+            let v = verifier_avec_lecteurs(
+                port,
+                attendu,
+                |p| stable.descripteurs(p, true),
+                |p| stable.date(p),
+            );
+            assert_eq!(v, Proprietaire::Confirme);
+            assert_eq!(stable.ordre(), ["date", "descripteurs", "date"]);
+
+            let changee = Lectures::nouvelles(&[DATE, DATE + 1]);
+            let v = verifier_avec_lecteurs(
+                port,
+                attendu,
+                |p| changee.descripteurs(p, true),
+                |p| changee.date(p),
+            );
+            illisible_avec(v, "lue apres");
+            assert_eq!(changee.ordre(), ["date", "descripteurs", "date"]);
+        }
+
+        #[test]
+        fn par_le_compte_la_date_est_lue_avant_les_descripteurs_et_relue_apres() {
+            let (_ecoute, port) = ecoute_du_compte();
+            let attendu = ce_processus_date(Some(mon_uid()));
+
+            let stable = Lectures::nouvelles(&[DATE, DATE]);
+            let v = verifier_avec_lecteurs(
+                port,
+                attendu,
+                |p| stable.descripteurs(p, false),
+                |p| stable.date(p),
+            );
+            assert_eq!(v, Proprietaire::Confirme);
+            assert_eq!(stable.ordre(), ["date", "descripteurs", "date"]);
+
+            let changee = Lectures::nouvelles(&[DATE, DATE + 1]);
+            let v = verifier_avec_lecteurs(
+                port,
+                attendu,
+                |p| changee.descripteurs(p, false),
+                |p| changee.date(p),
+            );
+            illisible_avec(v, "lue apres");
+            assert_eq!(changee.ordre(), ["date", "descripteurs", "date"]);
+        }
     }
 }
 
 #[cfg(windows)]
 mod windows_impl {
-    use super::Proprietaire;
+    use super::{Attendu, Proprietaire};
     use std::net::{Ipv4Addr, Ipv6Addr};
+    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, FILETIME};
     use windows_sys::Win32::NetworkManagement::IpHelper::{
         GetExtendedTcpTable, MIB_TCP_STATE_LISTEN, MIB_TCP6ROW_OWNER_PID, MIB_TCP6TABLE_OWNER_PID,
         MIB_TCPROW_OWNER_PID, MIB_TCPTABLE_OWNER_PID, TCP_TABLE_OWNER_PID_LISTENER,
     };
     use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6};
+    use windows_sys::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
 
     /// 127.0.0.1 tel que `dwLocalAddr` le porte (ordre reseau lu en u32
     /// petit-boutiste: 0x0100007F).
     const V4_BOUCLE: u32 = 0x0100_007F;
     const V4_TOUTES: u32 = 0;
 
-    pub fn verifier(port: u16, pid_attendu: u32) -> Proprietaire {
+    pub fn verifier(port: u16, attendu: Attendu) -> Proprietaire {
+        verifier_avec(port, attendu, demarrage_de)
+    }
+
+    /// [`verifier`], avec la lecture de la date de creation en parametre: les
+    /// recettes y eprouvent qu'elle est relue APRES la table des ecoutes. La
+    /// production passe [`demarrage_de`].
+    pub(super) fn verifier_avec(
+        port: u16,
+        attendu: Attendu,
+        lire_demarrage: impl Fn(u32) -> Result<u64, String>,
+    ) -> Proprietaire {
+        // La date de creation du PID encadre la lecture de la table: lue avant,
+        // relue apres. Egale des deux cotes a celle du lancement, le PID que la
+        // table nomme est celui de l'enfant.
+        let avant = lire_demarrage(attendu.pid);
         let mut proprietaires = Vec::new();
 
         match lire_v4(port) {
@@ -962,7 +1529,26 @@ mod windows_impl {
         if proprietaires.is_empty() {
             return Proprietaire::PersonneEncore;
         }
-        for pid in &proprietaires {
+        let apres = lire_demarrage(attendu.pid);
+        trancher(&proprietaires, &avant, &apres, attendu)
+    }
+
+    /// Le verdict, a partir des PID proprietaires des ecoutes et des deux
+    /// lectures de la date de creation du PID attendu. L'identite d'abord: le
+    /// PID de la table ne designe l'enfant que si sa date de creation est
+    /// celle relevee au lancement (`super::meme_processus`); sinon
+    /// `Illisible`, ni `Confirme` ni `Autre`. Pure.
+    pub(super) fn trancher(
+        proprietaires: &[u32],
+        avant: &Result<u64, String>,
+        apres: &Result<u64, String>,
+        attendu: Attendu,
+    ) -> Proprietaire {
+        if let Err(details) = super::meme_processus(attendu, avant, apres) {
+            return Proprietaire::Illisible { details };
+        }
+        let pid_attendu = attendu.pid;
+        for pid in proprietaires {
             if *pid != pid_attendu {
                 return Proprietaire::Autre {
                     details: format!(
@@ -972,6 +1558,52 @@ mod windows_impl {
             }
         }
         Proprietaire::Confirme
+    }
+
+    /// La date de creation du processus `pid`, en centaines de nanosecondes
+    /// depuis 1601 (`FILETIME`), la meme que `lancement` lit pour nommer les
+    /// configurations. `PROCESS_QUERY_LIMITED_INFORMATION` suffit.
+    pub(super) fn demarrage_de(pid: u32) -> Result<u64, String> {
+        // SAFETY: OpenProcess ne lit que ses arguments entiers; la poignee
+        // rendue est fermee ci-dessous sur tous les chemins.
+        let poignee = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if poignee.is_null() {
+            let e = std::io::Error::last_os_error();
+            if e.raw_os_error() == Some(ERROR_INVALID_PARAMETER as i32) {
+                return Err(format!("aucun processus {pid}: le processus n'existe plus"));
+            }
+            return Err(format!("ouverture du processus {pid}: {e}"));
+        }
+        let vide = || FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
+        let (mut creation, mut fin, mut noyau, mut utilisateur) = (vide(), vide(), vide(), vide());
+        // SAFETY: `poignee` est ouverte ci-dessus avec
+        // PROCESS_QUERY_LIMITED_INFORMATION; les quatre pointeurs designent des
+        // FILETIME locaux et vivants.
+        let lu = unsafe {
+            GetProcessTimes(
+                poignee,
+                &mut creation,
+                &mut fin,
+                &mut noyau,
+                &mut utilisateur,
+            )
+        };
+        // L'erreur est prise AVANT CloseHandle, qui la remplacerait.
+        let erreur = (lu == 0).then(std::io::Error::last_os_error);
+        // SAFETY: `poignee` a ete ouverte ici et n'est plus utilisee apres.
+        unsafe { CloseHandle(poignee) };
+        match erreur {
+            Some(e) => Err(format!("date de creation du processus {pid}: {e}")),
+            None => Ok(date_de_filetime(&creation)),
+        }
+    }
+
+    /// Les deux moities d'un `FILETIME`, poids fort d'abord, en un nombre.
+    pub(super) fn date_de_filetime(f: &FILETIME) -> u64 {
+        (u64::from(f.dwHighDateTime) << 32) | u64::from(f.dwLowDateTime)
     }
 
     /// Une ecoute v4 a cette adresse recevrait-elle une connexion vers
@@ -1132,6 +1764,146 @@ mod windows_impl {
             ));
             assert!(!recoit_la_boucle_v6(&Ipv6Addr::LOCALHOST.octets()));
         }
+
+        // La date de creation: sa lecture, puis la decision avec une date
+        // egale, differente et illisible.
+
+        /// La date que les recettes pures declarent pour `MOI`.
+        const DATE: u64 = 133_000_000_000_000_000;
+
+        const MOI: Attendu = Attendu {
+            pid: 4242,
+            uid: None,
+            demarrage: Some(DATE),
+        };
+
+        fn egale() -> Result<u64, String> {
+            Ok(DATE)
+        }
+        fn differente() -> Result<u64, String> {
+            Ok(DATE + 1)
+        }
+        fn illisible() -> Result<u64, String> {
+            Err("aucun processus 4242: le processus n'existe plus".to_owned())
+        }
+
+        /// Le refus attendu quand le PID ne designe plus l'enfant.
+        fn illisible_avec(v: Proprietaire, motif: &str) {
+            match v {
+                Proprietaire::Illisible { details } => {
+                    assert!(details.contains(motif), "{details}")
+                }
+                autre => panic!("attendu Illisible ({motif}), obtenu {autre:?}"),
+            }
+        }
+
+        #[test]
+        fn les_deux_moities_d_un_filetime_font_la_date() {
+            let f = FILETIME {
+                dwLowDateTime: 0x8765_4321,
+                dwHighDateTime: 0x01DC_1234,
+            };
+            assert_eq!(date_de_filetime(&f), 0x01DC_1234_8765_4321);
+        }
+
+        #[test]
+        fn la_date_du_lancement_avant_et_apres_confirme() {
+            assert_eq!(
+                trancher(&[4242], &egale(), &egale(), MOI),
+                Proprietaire::Confirme
+            );
+        }
+
+        #[test]
+        fn une_date_de_creation_differente_ne_confirme_rien() {
+            illisible_avec(
+                trancher(&[4242], &differente(), &egale(), MOI),
+                "n'est plus l'enfant lance",
+            );
+            illisible_avec(trancher(&[4242], &egale(), &differente(), MOI), "lue apres");
+        }
+
+        #[test]
+        fn une_date_de_creation_illisible_ne_confirme_rien() {
+            illisible_avec(
+                trancher(&[4242], &illisible(), &egale(), MOI),
+                "illisible avant",
+            );
+            illisible_avec(
+                trancher(&[4242], &egale(), &illisible(), MOI),
+                "illisible apres",
+            );
+        }
+
+        /// Une ecoute d'un autre PID n'accuse personne quand le PID attendu
+        /// n'est plus l'enfant; elle est etrangere quand il l'est encore.
+        #[test]
+        fn un_pid_qui_n_est_plus_l_enfant_n_accuse_personne() {
+            assert!(matches!(
+                trancher(&[4242, 7], &egale(), &egale(), MOI),
+                Proprietaire::Autre { .. }
+            ));
+            illisible_avec(
+                trancher(&[4242, 7], &differente(), &differente(), MOI),
+                "n'est plus l'enfant lance",
+            );
+        }
+
+        #[test]
+        fn sans_date_relevee_au_lancement_rien_n_est_confirme() {
+            let sans_date = Attendu {
+                demarrage: None,
+                ..MOI
+            };
+            illisible_avec(
+                trancher(&[4242], &egale(), &egale(), sans_date),
+                "aucune date de demarrage",
+            );
+        }
+
+        /// La lecture reelle: la date de ce processus, lue deux fois, est la
+        /// meme et n'est pas nulle.
+        #[test]
+        fn la_date_de_ce_processus_se_lit_et_ne_change_pas() {
+            let pid = std::process::id();
+            let une = demarrage_de(pid).expect("sa propre date de creation est lisible");
+            assert_ne!(une, 0);
+            assert_eq!(demarrage_de(pid), Ok(une));
+        }
+
+        /// La date est relue APRES la table: une ecoute de CE processus, qui
+        /// est ici le processus attendu, et une date fournie qui change entre
+        /// ses deux lectures.
+        #[test]
+        fn la_date_de_creation_est_relue_apres_la_table() {
+            let ecoute =
+                std::net::TcpListener::bind("127.0.0.1:0").expect("un port libre sur la boucle");
+            let port = ecoute.local_addr().unwrap().port();
+            let attendu = Attendu {
+                pid: std::process::id(),
+                uid: None,
+                demarrage: Some(DATE),
+            };
+            let lectures = |dates: [u64; 2]| {
+                let rang = std::cell::Cell::new(0usize);
+                move |_: u32| {
+                    let i = rang.get();
+                    rang.set(i + 1);
+                    dates
+                        .get(i)
+                        .copied()
+                        .ok_or_else(|| format!("lecture de date numero {i} non prevue"))
+                }
+            };
+            assert_eq!(
+                verifier_avec(port, attendu, lectures([DATE, DATE])),
+                Proprietaire::Confirme
+            );
+            illisible_avec(
+                verifier_avec(port, attendu, lectures([DATE, DATE + 1])),
+                "lue apres",
+            );
+        }
     }
 }
 
@@ -1144,6 +1916,7 @@ mod tests {
         Attendu {
             pid: std::process::id(),
             uid: None,
+            demarrage: date_de_demarrage(std::process::id()).ok(),
         }
     }
 
@@ -1164,6 +1937,7 @@ mod tests {
         let autre = Attendu {
             pid: std::process::id().wrapping_add(1).max(2),
             uid: None,
+            demarrage: moi().demarrage,
         };
         match verifier_ecoute(port, autre) {
             Proprietaire::Confirme => {
@@ -1193,6 +1967,7 @@ mod tests {
         let attendu = Attendu {
             pid: enfant.id(),
             uid: None,
+            demarrage: date_de_demarrage(enfant.id()).ok(),
         };
         std::thread::sleep(std::time::Duration::from_millis(150));
         let verdict = verifier_ecoute(port, attendu);
@@ -1215,5 +1990,39 @@ mod tests {
             Proprietaire::PersonneEncore,
             "un port sans ecoute ne doit pas etre pris pour une presence"
         );
+    }
+
+    /// L'identite du processus, commune aux deux plateformes: les deux
+    /// lectures de la date doivent etre lisibles et egales a celle du
+    /// lancement, et une date jamais relevee ne vaut rien.
+    #[cfg(any(target_os = "linux", windows))]
+    #[test]
+    fn le_meme_processus_exige_la_date_du_lancement_avant_et_apres() {
+        let attendu = Attendu {
+            pid: 4242,
+            uid: None,
+            demarrage: Some(10),
+        };
+        let date = |d: u64| -> Result<u64, String> { Ok(d) };
+        let illisible = || -> Result<u64, String> { Err("lecture refusee".to_owned()) };
+
+        assert_eq!(meme_processus(attendu, &date(10), &date(10)), Ok(()));
+        for (avant, apres, motif) in [
+            (date(11), date(10), "lue avant"),
+            (date(10), date(11), "lue apres"),
+            (illisible(), date(10), "illisible avant"),
+            (date(10), illisible(), "illisible apres"),
+        ] {
+            let raison = meme_processus(attendu, &avant, &apres)
+                .expect_err("une seule lecture qui differe suffit a refuser");
+            assert!(raison.contains(motif), "{raison}");
+        }
+        let sans_date = Attendu {
+            demarrage: None,
+            ..attendu
+        };
+        let raison = meme_processus(sans_date, &date(10), &date(10))
+            .expect_err("une date jamais relevee ne designe personne");
+        assert!(raison.contains("aucune date de demarrage"), "{raison}");
     }
 }

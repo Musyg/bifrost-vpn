@@ -221,6 +221,7 @@ fn dans_l_espace_de_noms_le_chemin_par_coeur_porte_le_trafic() {
         api: None,
         pid: std::process::id(),
         uid: None,
+        demarrage: bifrost_daemon::coeurs::proprietaire::date_de_demarrage(std::process::id()).ok(),
     };
     let (publier, suivre) = tokio::sync::watch::channel(Some(coeur_publie));
     // Le journal des sessions de routage de la recette, pas celui de la
