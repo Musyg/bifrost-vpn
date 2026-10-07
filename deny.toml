@@ -3,9 +3,10 @@
 # Ecrit le 22 aout 2026 d'apres le document 07 partie 2.2, qui donnait deja ce
 # fichier. Trois ecarts avec ce qu'il proposait, tous mesures et non supposes:
 # `db-path` a saute, la liste des licences a ete RELEVEE sur l'arbre reel par
-# `cargo deny list` au lieu d'etre recopiee, et `cargo-vet` n'est pas cable -
+# `cargo deny list` au lieu d'etre recopiee, et `cargo-vet` n'etait pas cable -
 # le document lui-meme le reserve aux exigences supply-chain strictes et dit
-# que cargo-deny suffit comme baseline.
+# que cargo-deny suffit comme baseline. Il l'est depuis le 07/10/2026, en plus
+# de ce fichier et non a sa place: voir `supply-chain/` et le document 07.
 #
 # Schema verifie contre cargo-deny 0.20.2, publie le 9 juillet 2026: aucun des
 # champs employes ici ne fait partie de ceux qui ont ete retires. Le sont
