@@ -389,7 +389,8 @@ mod fenetres {
     ///
     /// Tous a la construction. Un chargement partiel laisserait le daemon
     /// decouvrir un symbole manquant au milieu d'une montee, kill switch deja
-    /// arme.
+    /// arme. Un symbole absent relache la DLL avant le retour: le chargeur ne
+    /// garde aucun module ouvert apres un refus.
     pub struct Wintun {
         module: HMODULE,
         creer: CreateAdapterFn,
@@ -489,47 +490,58 @@ mod fenetres {
                 }
             };
 
-            // SAFETY: chaque symbole est resolu depuis la DLL de l'amont, et sa
-            // signature est celle de `wintun.h`.
-            let charge = unsafe {
-                Self {
-                    module,
-                    creer: std::mem::transmute::<*const c_void, CreateAdapterFn>(resoudre(
-                        "WintunCreateAdapter",
-                    )?),
-                    fermer: std::mem::transmute::<*const c_void, CloseAdapterFn>(resoudre(
-                        "WintunCloseAdapter",
-                    )?),
-                    luid: std::mem::transmute::<*const c_void, GetAdapterLuidFn>(resoudre(
-                        "WintunGetAdapterLUID",
-                    )?),
-                    version: std::mem::transmute::<*const c_void, GetRunningDriverVersionFn>(
-                        resoudre("WintunGetRunningDriverVersion")?,
-                    ),
-                    ouvrir_session: std::mem::transmute::<*const c_void, StartSessionFn>(resoudre(
-                        "WintunStartSession",
-                    )?),
-                    finir_session: std::mem::transmute::<*const c_void, EndSessionFn>(resoudre(
-                        "WintunEndSession",
-                    )?),
-                    evenement: std::mem::transmute::<*const c_void, GetReadWaitEventFn>(resoudre(
-                        "WintunGetReadWaitEvent",
-                    )?),
-                    recevoir: std::mem::transmute::<*const c_void, ReceivePacketFn>(resoudre(
-                        "WintunReceivePacket",
-                    )?),
-                    rendre: std::mem::transmute::<*const c_void, ReleaseReceivePacketFn>(resoudre(
-                        "WintunReleaseReceivePacket",
-                    )?),
-                    allouer: std::mem::transmute::<*const c_void, AllocateSendPacketFn>(resoudre(
-                        "WintunAllocateSendPacket",
-                    )?),
-                    envoyer: std::mem::transmute::<*const c_void, SendPacketFn>(resoudre(
-                        "WintunSendPacket",
-                    )?),
+            // Toute sortie en erreur a partir d'ici doit relacher le module.
+            let resolus = (|| -> Result<Self, String> {
+                // SAFETY: chaque symbole est resolu depuis la DLL de l'amont,
+                // et sa signature est celle de `wintun.h`.
+                unsafe {
+                    Ok(Self {
+                        module,
+                        creer: std::mem::transmute::<*const c_void, CreateAdapterFn>(resoudre(
+                            "WintunCreateAdapter",
+                        )?),
+                        fermer: std::mem::transmute::<*const c_void, CloseAdapterFn>(resoudre(
+                            "WintunCloseAdapter",
+                        )?),
+                        luid: std::mem::transmute::<*const c_void, GetAdapterLuidFn>(resoudre(
+                            "WintunGetAdapterLUID",
+                        )?),
+                        version: std::mem::transmute::<*const c_void, GetRunningDriverVersionFn>(
+                            resoudre("WintunGetRunningDriverVersion")?,
+                        ),
+                        ouvrir_session: std::mem::transmute::<*const c_void, StartSessionFn>(
+                            resoudre("WintunStartSession")?,
+                        ),
+                        finir_session: std::mem::transmute::<*const c_void, EndSessionFn>(
+                            resoudre("WintunEndSession")?,
+                        ),
+                        evenement: std::mem::transmute::<*const c_void, GetReadWaitEventFn>(
+                            resoudre("WintunGetReadWaitEvent")?,
+                        ),
+                        recevoir: std::mem::transmute::<*const c_void, ReceivePacketFn>(resoudre(
+                            "WintunReceivePacket",
+                        )?),
+                        rendre: std::mem::transmute::<*const c_void, ReleaseReceivePacketFn>(
+                            resoudre("WintunReleaseReceivePacket")?,
+                        ),
+                        allouer: std::mem::transmute::<*const c_void, AllocateSendPacketFn>(
+                            resoudre("WintunAllocateSendPacket")?,
+                        ),
+                        envoyer: std::mem::transmute::<*const c_void, SendPacketFn>(resoudre(
+                            "WintunSendPacket",
+                        )?),
+                    })
                 }
-            };
-            Ok(charge)
+            })();
+
+            match resolus {
+                Ok(w) => Ok(w),
+                Err(e) => {
+                    // SAFETY: module charge et non encore relache.
+                    unsafe { FreeLibrary(module) };
+                    Err(e)
+                }
+            }
         }
 
         /// La version du pilote EN COURS D'EXECUTION, ou `None` s'il n'est pas
@@ -1274,6 +1286,109 @@ mod tests {
             drop(tenu);
             assert!(m.contains("ERROR_SHARING_VIOLATION (32)"), "{m}");
             assert!(!m.contains("architecture"), "{m}");
+        }
+
+        /// Un symbole absent relache le module.
+        ///
+        /// Le chargeur garantit qu'une DLL refusee pour un symbole manquant
+        /// n'est pas gardee ouverte: elle est relachee avant le retour de
+        /// `charger_depuis`, et le message nomme le symbole. C'est la garantie
+        /// que tient le chargeur WireGuardNT voisin; ici elle est mesuree
+        /// jusqu'au relachement, pas seulement jusqu'au message.
+        ///
+        /// Observable: une image chargee ne peut pas etre supprimee de son
+        /// fichier; une image relachee, si. On copie une DLL systeme -
+        /// presente sur toute installation, qui se charge mais n'exporte
+        /// aucun symbole Wintun - sous un nom UNIQUE dans le repertoire
+        /// temporaire. Le nom unique est ce qui rend la mesure honnete: ni
+        /// une DLL connue du systeme (KnownDLLs) ni un module deja charge
+        /// sous le meme nom ne peut etre rendu a la place de notre copie, le
+        /// chargeur n'ayant rien d'homonyme a reutiliser; c'est donc bien ce
+        /// fichier-la qu'il mappe et verrouille. Mesure du 07/10/2026 sur
+        /// dev-windows, hors depot: vrai meme pour une DLL dont l'original
+        /// est deja charge dans le processus. Apres le retour, `remove_file`
+        /// doit reussir; une image encore chargee le fait echouer.
+        #[test]
+        fn un_symbole_absent_relache_le_module() {
+            use std::os::windows::ffi::OsStrExt;
+            use std::path::{Path, PathBuf};
+            use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+
+            // Retire la copie a la fin, rouge comprise. Une image encore
+            // chargee ne se laisse pas supprimer: le fichier survit alors
+            // jusqu'a la fin du processus, et ce reste est en soi la trace
+            // de ce que la recette mesure.
+            struct Jetable(PathBuf);
+            impl Drop for Jetable {
+                fn drop(&mut self) {
+                    let _ = std::fs::remove_file(&self.0);
+                }
+            }
+
+            let source = Path::new(r"C:\Windows\System32\winhttp.dll");
+            if !source.is_file() {
+                println!(
+                    "SKIPPED: {} absente, aucune DLL systeme a copier",
+                    source.display()
+                );
+                return;
+            }
+
+            // Un nom par processus et par instant: deux executions
+            // concurrentes ne se partagent pas le fichier, et aucun module
+            // deja charge ne peut porter ce nom.
+            let marque = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos());
+            let copie = std::env::temp_dir().join(format!(
+                "bifrost-wtl-{}-{marque}-winhttp.dll",
+                std::process::id()
+            ));
+            std::fs::copy(source, &copie).expect("copie de la DLL systeme");
+            let _jetable = Jetable(copie.clone());
+
+            // Verifie, et non suppose: c'est l'absence d'un homonyme deja
+            // charge qui garantit que la copie est l'image mappee.
+            let nom_large: Vec<u16> = copie
+                .file_name()
+                .expect("la copie a un nom")
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
+            // SAFETY: chaine terminee par un zero, lecture sans effet de bord.
+            let deja = unsafe { GetModuleHandleW(nom_large.as_ptr()) };
+            if !deja.is_null() {
+                println!(
+                    "SKIPPED: {} deja chargee, la mesure ne vaudrait rien",
+                    copie.display()
+                );
+                return;
+            }
+
+            let e = match fenetres::Wintun::charger_depuis(&copie) {
+                Ok(_) => panic!("une DLL sans les symboles Wintun ne doit pas se charger"),
+                Err(e) => e,
+            };
+            // Le chemin voulu est celui du symbole absent, apres un chargement
+            // reussi. Si la copie n'a pas pu etre mappee, l'observable ne dit
+            // rien du relachement: abstention nommee, pas un faux vert.
+            if !e.contains("absent") {
+                println!(
+                    "SKIPPED: la copie n'a pas pu etre mappee ({e}), le relachement \
+                     n'a pas pu etre mesure"
+                );
+                return;
+            }
+            assert!(
+                e.contains("WintunCreateAdapter"),
+                "l'erreur doit nommer le symbole absent: {e}"
+            );
+
+            // La mesure: l'image relachee se laisse supprimer.
+            std::fs::remove_file(&copie).expect(
+                "le module doit etre relache apres un symbole absent: une image \
+                 encore chargee ne peut pas etre supprimee",
+            );
         }
 
         /// Tous les points d'entree, pas seulement le premier.
