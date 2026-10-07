@@ -96,9 +96,12 @@ Cote Go (sing-box, Xray, go-rosenpass eventuel) : `gosec ./...` et `govulncheck 
 modele. `.github/workflows/ci.yml` epingle chaque action par empreinte de commit et chaque outil a
 une version exacte: `cargo-audit@0.22.2`, `cargo-deny@0.20.2` et `cargo-cyclonedx@0.5.9` par
 `taiki-e/install-action` (manifeste de la v2.86.5; `fallback: none`, une version absente du
-manifeste fait echouer l'etape au lieu de se rabattre sur cargo-binstall), `cargo-fuzz` 0.13.2 par
-`cargo install --locked --version`. Chacune etait la derniere publiee sur crates.io au 02/10/2026
-et les commandes de la CI passent avec elle; monter une version est un changement a part entiere.
+manifeste fait echouer l'etape au lieu de se rabattre sur cargo-binstall), `cargo-fuzz` 0.13.2 et
+`cargo-vet` 0.10.2 par `cargo install --locked --version` (le manifeste de l'action, a l'empreinte
+epinglee, ne connait de cargo-vet que la 0.10.0: les 0.10.1 et 0.10.2 n'ont aucun binaire publie
+dans les releases GitHub de cargo-vet). Chacune etait la derniere publiee sur crates.io au
+02/10/2026, cargo-vet encore au 07/10/2026, et les commandes de la CI passent avec elle; monter
+une version est un changement a part entiere.
 Les jobs tournent sur `ubuntu-24.04` et `windows-2025-vs2026`, pas sur `-latest`, qui change d'OS
 ou de chaine MSVC sans un commit du depot (`ubuntu-latest` passe a Ubuntu 26.04 du 19/10 au
 19/11/2026). Restent flottants: la revision hebdomadaire de l'image (noyau, outils, paquets
@@ -106,6 +109,45 @@ preinstalles), que le depot ne choisit pas et que l'en-tete de chaque job releve
 du job de fuite (nftables, tcpdump, iproute2, jq), deja presents dans l'image et non epingles, car
 les index d'Ubuntu ne gardent que la version de sortie et la derniere mise a jour: un
 `paquet=version` casserait l'etape a la mise a jour suivante.
+
+**cargo vet sur l'espace de travail racine** (07/10/2026). `supply-chain/` porte la configuration de
+cargo-vet (`config.toml`), le verrou des audits importes (`imports.lock`) et le fichier des audits
+du depot (`audits.toml`). Aucun ensemble d'audits publies n'est importe, par choix: un import
+recopie dans `imports.lock`, donc dans ce depot public, le nom et l'adresse de courriel de chaque
+auditeur dont un audit sert. `config.toml` n'a donc aucune section `[imports]`, et `imports.lock`
+ne porte que l'en-tete que `cargo vet init` ecrit (vet refuse de tourner sans ce fichier, et refuse
+un fichier vide). `audits.toml` est VIDE: le depot ne certifie aucun paquet lui-meme. Les 299
+dependances tierces du verrou racine, toutes plateformes et toutes fonctionnalites confondues, sont
+donc toutes exemptees, chacune a sa version exacte (270 au critere `safe-to-deploy`, 29 a
+`safe-to-run`). Les criteres sont ceux de cargo-vet par defaut: `safe-to-deploy` pour les
+dependances normales et de construction de chaque paquet du depot, `safe-to-run` pour celles qui ne
+servent qu'aux recettes. Le seul paquet du depot qui n'est pas livre, le temoin de diagnostic
+`bifrost-temoin-svchost`, ne tire rien que le daemon ne tire deja. Les onze paquets du depot sont
+declares de premiere partie (`audit-as-crates-io = false`): aucun n'existe sur crates.io, et la
+declaration empeche vet de les confondre un jour avec un paquet homonyme du registre.
+
+La CI le verifie dans le job `dependances`: `cargo vet --locked`, puis `git diff --exit-code` sur
+`supply-chain/`. Sous `--locked`, vet ne va chercher aucun audit. L'etape echoue, en nommant le
+paquet, sa version et le critere qui lui manque, sur une dependance nouvelle, sur une autre version
+d'une dependance exemptee et sur une exemption retiree. Elle echoue aussi sur un `imports.lock`
+absent ou vide, et sur un fichier hors de la forme canonique de vet, lignes vides finales comprises:
+apres un succes, vet reecrit les trois fichiers a sa forme, et le `git diff` voit tout octet qu'il
+a change. Ajouter une dependance, ou en changer la version, demande donc de lancer `cargo vet` hors
+de la CI, qui dit ce qui manque, puis de l'exempter ou de l'auditer et de committer
+`supply-chain/`.
+
+`supply-chain/` est aussi sous la garde ASCII du depot, dans le job `controles`: la recette
+`crates/bifrost-evasion/tests/sources_ascii.rs` en lit tous les fichiers, dans un lot a part et
+sous la meme regle que les sources, et rougit sur un caractere hors ASCII comme sur un repertoire
+absent ou un des trois fichiers de vet manquant. `caracteres_de_controle.rs` y lit les `.toml` et
+le `.lock` comme partout ailleurs dans le depot.
+
+Ce que cela ne dit pas:
+- une exemption n'est pas un audit: les 299 dependances ne sont couvertes que par la decision de les
+  accepter telles quelles, prise a la mise en place; l'etape dit seulement qu'aucune n'entre ni ne
+  change de version sans un commit de `supply-chain/`;
+- le harnais `fuzz/`, espace de travail separe, n'est pas couvert: 266 dependances tierces dans son
+  verrou, dont 2 absentes du verrou racine (`arbitrary`, `libfuzzer-sys`).
 
 **2.3 Fuzzing** - Priorite : parseur de profils > parseur IPC > metadonnees de mise a jour > deserialisation. Outils : cargo-fuzz (libFuzzer) + `arbitrary` en premier choix ; AFL++/honggfuzz en complement (tous trois supportes par OSS-Fuzz/ClusterFuzz).
 

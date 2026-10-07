@@ -27,9 +27,17 @@
 //! # Son perimetre
 //!
 //! `crates/**/*.rs`, tous les fichiers de `scripts/`, tous ceux de
-//! `packaging/`. Les documents `.md` ne sont PAS gardes ici: c'est une
-//! decision de la tranche qui a ecrit cette recette, `docs/` portant du
-//! non-ASCII anterieur qu'une autre passe traitera.
+//! `packaging/`, et tous ceux de `supply-chain/`, ou cargo vet tient sa
+//! configuration (`config.toml`), le verrou de ses imports (`imports.lock`)
+//! et les audits du depot (`audits.toml`). Les documents `.md` ne sont PAS
+//! gardes ici: c'est une decision de la tranche qui a ecrit cette recette,
+//! `docs/` portant du non-ASCII anterieur qu'une autre passe traitera.
+//!
+//! Chaque racine est ramassee dans son propre lot, et la meme regle s'applique
+//! a chaque octet des quatre. Un lot doit avoir ete lu pour que la recette
+//! passe: une racine absente ou vide la fait rougir au lieu de la laisser
+//! verte sans rien avoir regarde. Pour `supply-chain/`, ce controle est
+//! nominatif: les trois fichiers de cargo vet doivent etre dans le lot.
 //!
 //! Le parcours se fait sur le disque, sans git: sur essai-linux le depot est
 //! copie par `tar` et n'a pas de `.git`. Une recette qui appellerait
@@ -132,7 +140,7 @@ const DOSSIERS_IGNORES: [&str; 2] = [".git", "target"];
 /// `extension` filtre par extension quand elle est fournie (`Some("rs")` pour
 /// les sources Rust), ou prend tout quand elle vaut `None` (scripts et
 /// packaging, ou cohabitent `.sh`, `.ps1`, `.py`, `.service`, `.conf` et des
-/// fichiers sans extension).
+/// fichiers sans extension; `supply-chain/`, `.toml` et `.lock`).
 fn ramasser(dossier: &Path, extension: Option<&str>, trouves: &mut Lot) {
     let Ok(entrees) = std::fs::read_dir(dossier) else {
         return;
@@ -162,16 +170,26 @@ fn ramasser(dossier: &Path, extension: Option<&str>, trouves: &mut Lot) {
     }
 }
 
-/// Les trois racines du perimetre, chacune dans son propre lot pour que le
-/// controle positif verifie qu'AUCUNE des trois n'est restee vide.
-fn collecter() -> (Lot, Lot, Lot) {
+/// Les fichiers que cargo vet tient dans `supply-chain/`, chemin relatif a la
+/// racine. Le lot de cette racine doit les porter tous les trois.
+const FICHIERS_DE_CARGO_VET: [&str; 3] = [
+    "supply-chain/audits.toml",
+    "supply-chain/config.toml",
+    "supply-chain/imports.lock",
+];
+
+/// Les quatre racines du perimetre, chacune dans son propre lot pour que le
+/// controle positif verifie qu'AUCUNE des quatre n'est restee vide.
+fn collecter() -> (Lot, Lot, Lot, Lot) {
     let mut rust = Vec::new();
     ramasser(&racine().join("crates"), Some("rs"), &mut rust);
     let mut scripts = Vec::new();
     ramasser(&racine().join("scripts"), None, &mut scripts);
     let mut packaging = Vec::new();
     ramasser(&racine().join("packaging"), None, &mut packaging);
-    (rust, scripts, packaging)
+    let mut approvisionnement = Vec::new();
+    ramasser(&racine().join("supply-chain"), None, &mut approvisionnement);
+    (rust, scripts, packaging, approvisionnement)
 }
 
 /// Un ecart, forme lisible: `chemin:ligne:colonne: U+XXXX`.
@@ -202,11 +220,11 @@ fn ecarts_de(rel: &str, bytes: &[u8]) -> Vec<String> {
 
 #[test]
 fn aucun_octet_non_ascii_hors_admis_et_exceptions() {
-    let (rust, scripts, packaging) = collecter();
+    let (rust, scripts, packaging, approvisionnement) = collecter();
 
     // Controle positif par racine: un parcours casse - mauvaise racine, lecture
     // qui echoue en silence - rendrait un lot vide, donc un succes, sans avoir
-    // rien lu. Les trois racines doivent chacune avoir ete descendues.
+    // rien lu. Les quatre racines doivent chacune avoir ete descendues.
     assert!(
         rust.len() > 100,
         "seules {} source(s) Rust trouvees: le parcours de crates/ est casse",
@@ -222,9 +240,24 @@ fn aucun_octet_non_ascii_hors_admis_et_exceptions() {
         "seuls {} fichier(s) trouves dans packaging/: le parcours est casse",
         packaging.len()
     );
+    // Nominatif pour `supply-chain/`: ses trois fichiers sont connus, et un
+    // seul qui manque laisserait un lot non vide qui ne garde pas tout.
+    for attendu in FICHIERS_DE_CARGO_VET {
+        assert!(
+            approvisionnement.iter().any(|(rel, _)| rel == attendu),
+            "{attendu} absent du lot de supply-chain/ ({} fichier(s) trouves): \
+             le repertoire ou ce fichier manque, ou le parcours est casse",
+            approvisionnement.len()
+        );
+    }
 
     let mut ecarts = Vec::new();
-    for (rel, bytes) in rust.iter().chain(&scripts).chain(&packaging) {
+    for (rel, bytes) in rust
+        .iter()
+        .chain(&scripts)
+        .chain(&packaging)
+        .chain(&approvisionnement)
+    {
         ecarts.extend(ecarts_de(rel, bytes));
     }
 
@@ -242,8 +275,13 @@ fn chaque_exception_designe_encore_du_non_ascii_reel() {
     // Une derogation qui ne sert plus elargit la regle en silence. Chaque
     // exception doit encore designer un fichier scanne, dont le litteral admis
     // est present ET porte vraiment du non-ASCII.
-    let (rust, scripts, packaging) = collecter();
-    let tous: Lot = rust.into_iter().chain(scripts).chain(packaging).collect();
+    let (rust, scripts, packaging, approvisionnement) = collecter();
+    let tous: Lot = rust
+        .into_iter()
+        .chain(scripts)
+        .chain(packaging)
+        .chain(approvisionnement)
+        .collect();
 
     for ex in EXCEPTIONS {
         let Some((_, bytes)) = tous.iter().find(|(rel, _)| rel == ex.fichier) else {

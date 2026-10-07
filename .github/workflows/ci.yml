@@ -464,6 +464,43 @@ jobs:
         working-directory: fuzz
         run: cargo deny check
 
+      # Compile depuis crates.io a une version fixe, avec son propre verrou,
+      # comme cargo-fuzz. 0.10.2 (crates.io, 13/01/2026) est la derniere
+      # version au 07/10/2026. Le manifeste de `taiki-e/install-action` a
+      # l'empreinte epinglee ne connait que 0.10.0: 0.10.1 et 0.10.2 n'ont
+      # aucun binaire publie dans les releases GitHub de cargo-vet, et
+      # `fallback: none` y ferait echouer l'etape.
+      - name: cargo-vet
+        run: cargo install --locked cargo-vet --version 0.10.2
+
+      # Chaque dependance tierce de l'espace de travail racine doit etre
+      # couverte, au critere que vet exige d'elle, par un audit ou par une
+      # exemption a version exacte: voir `supply-chain/`. Aucun ensemble
+      # d'audits publies n'est importe, par choix (document 07, section 2.2),
+      # et `audits.toml` n'en porte aucun: toutes sont exemptees.
+      # `supply-chain/imports.lock` ne porte que l'en-tete que
+      # `cargo vet init` ecrit (vet exige que le fichier existe). `--locked`:
+      # vet ne va chercher aucun audit, et un fichier qui n'est pas a la forme
+      # canonique de vet fait echouer l'etape. En cas d'echec, la sortie nomme
+      # chaque paquet et version sans audit, avec le critere qui lui manque.
+      #
+      # `git diff` ensuite: apres un succes, vet reecrit les trois fichiers a
+      # sa forme canonique. La seconde ligne fait echouer l'etape des que
+      # cette reecriture change un octet de `supply-chain/`, lignes vides
+      # finales comprises, et montre lequel. Les trois fichiers sont aussi
+      # sous la garde ASCII du depot, dans le job `controles`:
+      # `crates/bifrost-evasion/tests/sources_ascii.rs`.
+      #
+      # Ce que cette etape ne garantit pas: une exemption n'est pas un audit.
+      # L'etape dit seulement qu'aucune dependance n'entre ni ne change de
+      # version sans un commit de `supply-chain/`, pas qu'une dependance a ete
+      # lue. Le harnais `fuzz/` n'est pas couvert. Voir le document 07,
+      # section 2.2.
+      - name: Audits de la chaine d'approvisionnement (cargo vet)
+        run: |
+          cargo vet --locked
+          git diff --exit-code -- supply-chain/
+
       # Le CRA impose un SBOM lisible par machine dans la documentation
       # technique (Annexe I partie II), et le document 07 le veut a chaque
       # build. C'est le premier pas: il est PRODUIT et depose. L'attacher aux
