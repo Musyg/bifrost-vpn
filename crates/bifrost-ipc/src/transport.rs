@@ -2717,6 +2717,153 @@ mod tests_acceptation {
         assert!(servi, "le client qui attendait n'a pas ete servi");
     }
 
+    /// Pairs dont l'identite est illisible, avant le pair servi. Chacun est
+    /// une vraie connexion: une place de la file d'ecoute et un descripteur
+    /// cote client. Tous se connectent avant la premiere acceptation. Linux
+    /// ramene l'arriere-plan d'ecoute du produit (-1) a `somaxconn`; avec le
+    /// pair servi, ils restent sous 128, sa valeur par defaut avant Linux 5.4
+    /// (4096 depuis; listen(2), man-pages 6.19, lu le 07/10/2026), et loin de
+    /// 1024, la limite souple usuelle des descripteurs.
+    #[cfg(unix)]
+    const IDENTITES_ILLISIBLES: usize = 64;
+
+    /// Au-dela, l'acceptation a attendu entre deux identites illisibles.
+    /// `tokio::time::sleep` n'expire jamais avant sa duree (tokio 1.53,
+    /// `runtime/time/source.rs`: l'echeance est arrondie a la milliseconde
+    /// superieure), si bien qu'une pause de 1 ms par erreur y suffit, quelle
+    /// que soit la charge. Sans pause, un intervalle tient en quelques
+    /// microsecondes, quelques dizaines au plus sous charge de calcul; c'est
+    /// l'intervalle median qui s'y compare, qu'une preemption isolee ne
+    /// deplace pas.
+    #[cfg(unix)]
+    const ENTRE_DEUX_AU_PLUS: Duration = Duration::from_millis(1);
+
+    /// Unix: apres l'identite illisible d'un pair deja accepte,
+    /// l'acceptation reprend AUSSITOT, sans la pause d'un epuisement.
+    /// Soixante-quatre pairs dont l'identite est illisible (`ENOTCONN` et
+    /// `ENOMEM` a tour de role: l'identite d'un pair ne touche que lui, meme
+    /// sur un code qu'`accept(2)` rendrait pour un epuisement), connectes
+    /// avant la premiere acceptation, puis le pair suivant est servi:
+    /// l'intervalle median entre deux lectures d'identite sous
+    /// `ENTRE_DEUX_AU_PLUS`, le tout dans `SANS_ATTENTE_AU_PLUS`. Chaque pair
+    /// abandonne est ferme sans reponse, sa requete encore non lue, et une
+    /// ligne de journal vaut pour les soixante-quatre: celle du premier
+    /// incident, les suivants comptes pour la ligne d'apres.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn une_identite_illisible_reprend_sans_attendre() {
+        let (capture, _journal) = capturer();
+        let (mut serveur, chemin) = serveur("identite-illisible").await;
+        let lectures = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let l = lectures.clone();
+        serveur.panne = Some(Box::new(move |etape| {
+            if etape != imp::Etape::Identite {
+                return None;
+            }
+            let mut lectures = l.lock().unwrap();
+            lectures.push(Instant::now());
+            let n = lectures.len();
+            if n > IDENTITES_ILLISIBLES {
+                return None;
+            }
+            let code = match n % 2 {
+                1 => libc::ENOTCONN,
+                _ => libc::ENOMEM,
+            };
+            Some(std::io::Error::from_raw_os_error(code))
+        }));
+        // Chacun ecrit sa requete avant la premiere acceptation, et la file
+        // d'ecoute les rend dans l'ordre de leur connexion: les
+        // soixante-quatre premiers sont abandonnes, le dernier est servi.
+        let mut abandonnes = Vec::new();
+        for _ in 0..IDENTITES_ILLISIBLES {
+            let mut pair = ouvrir(&chemin).await.expect("pair abandonne");
+            demander(&mut pair).await;
+            abandonnes.push(pair);
+        }
+        let mut suivant = ouvrir(&chemin).await.expect("pair servi");
+        demander(&mut suivant).await;
+
+        let debut = Instant::now();
+        let issue = tokio::time::timeout(AU_PLUS, serveur.accept()).await;
+        let duree = debut.elapsed();
+        let mesure = decrire(&issue);
+        servir(issue).await;
+        let servi = repondu(&mut suivant).await;
+        // ECONNRESET sans un octet: Linux le pose sur le pair d'un socket
+        // ferme avec des donnees non lues (`unix_release_sock`), ici sa
+        // requete. Une requete lue en entier rendrait une fin de flux, une
+        // reponse des octets. Lu avant que le serveur ne parte: la fermeture
+        // de l'ecoute poserait ECONNRESET aussi sur un pair jamais accepte.
+        let borne = tokio::time::Instant::now() + AU_PLUS;
+        let mut ecarts = Vec::new();
+        for (rang, pair) in abandonnes.iter_mut().enumerate() {
+            let mut lu = Vec::new();
+            let fin =
+                tokio::time::timeout_at(borne, tokio::io::AsyncReadExt::read_to_end(pair, &mut lu))
+                    .await;
+            let reinitialise =
+                matches!(&fin, Ok(Err(e)) if e.raw_os_error() == Some(libc::ECONNRESET));
+            if !reinitialise || !lu.is_empty() {
+                ecarts.push(format!("pair {rang}: {fin:?}, {} octets", lu.len()));
+            }
+        }
+        let lectures = lectures.lock().unwrap().clone();
+        let mut intervalles: Vec<Duration> = lectures
+            .windows(2)
+            .map(|deux| deux[1].duration_since(deux[0]))
+            .collect();
+        intervalles.sort();
+        let median = intervalles.get(IDENTITES_ILLISIBLES / 2).copied();
+        let plus_long = intervalles.last().copied();
+        let (lignes, tus) = (serveur.journal.lignes, serveur.journal.tus);
+        drop(serveur);
+        nettoyer(&chemin);
+        let journal = capture.0.lock().unwrap().clone();
+        let abandons: Vec<&String> = journal
+            .iter()
+            .filter(|l| l.contains("connexion abandonnee"))
+            .collect();
+        println!(
+            "mesure identite illisible sans attente: accept={mesure} apres {duree:?}, lectures d'identite={}, intervalle median={median:?}, plus long={plus_long:?}, pairs hors forme={}, lignes={lignes}, tus={tus}, servi={servi}, journal={abandons:?}",
+            lectures.len(),
+            ecarts.len()
+        );
+        assert_eq!(mesure, "acceptee");
+        assert_eq!(lectures.len(), IDENTITES_ILLISIBLES + 1);
+        assert!(
+            median.is_some_and(|m| m < ENTRE_DEUX_AU_PLUS),
+            "intervalle median entre deux identites illisibles {median:?}: l'acceptation a attendu entre deux"
+        );
+        assert!(
+            duree < SANS_ATTENTE_AU_PLUS,
+            "{IDENTITES_ILLISIBLES} identites illisibles en {duree:?}: l'acceptation a attendu"
+        );
+        assert!(
+            ecarts.is_empty(),
+            "chaque pair abandonne doit etre ferme sans reponse, sa requete non lue: {ecarts:#?}"
+        );
+        assert_eq!(lignes, 1, "soixante-quatre incidents, une ligne");
+        assert_eq!(
+            tus,
+            (IDENTITES_ILLISIBLES - 1) as u64,
+            "les incidents suivants sont comptes pour la ligne d'apres"
+        );
+        assert_eq!(
+            abandons.len(),
+            1,
+            "une ligne recue par le journal: {journal:?}"
+        );
+        // Le daemon journalise `bifrost_ipc` au niveau info par defaut: une
+        // ligne emise plus bas n'y figurerait pas.
+        assert!(
+            abandons[0].starts_with("WARN "),
+            "l'abandon doit etre un avertissement: {}",
+            abandons[0]
+        );
+        assert!(servi, "le pair suivant n'a pas ete servi");
+    }
+
     /// La reponse que le client a recue dans `AU_PLUS`, s'il en a recu une.
     #[cfg(unix)]
     async fn reponse_recue<C: tokio::io::AsyncRead + Unpin>(client: &mut C) -> Option<Response> {
