@@ -11,7 +11,7 @@ VPN auto-heberge pour Windows 11 et Linux. Trois objectifs, dans cet ordre de pr
 2. **Ne pas etre bloque.** Resistance active au DPI et a la censure, du FAI europeen au reseau d'entreprise jusqu'aux censures etatiques.
 3. **Ne pas laisser l'OS parler.** Blocage de la telemetrie du systeme d'exploitation avant qu'elle n'entre dans le tunnel.
 
-Le produit s'appelle Bifrost. Les documents de conception ont porte le nom de travail "Hyper VPN" jusqu'au 21 aout 2026; il ne subsiste que dans l'historique git, ou une recherche sur ce nom retrouve les versions d'origine.
+Le logiciel s'appelle Bifrost. Les documents de conception ont porte le nom de travail "Hyper VPN" jusqu'au 21 aout 2026; il ne subsiste que dans l'historique git, ou une recherche sur ce nom retrouve les versions d'origine.
 
 ## Statut : MVP de l'objectif 1
 
@@ -31,7 +31,7 @@ Le premier objectif est implemente. Daemon et CLI uniquement, pas d'interface gr
 
 Bifrost vise la confidentialite, le controle et la resistance a la censure. Il ne promettra pas l'anonymat en configuration mono-saut, pour une raison technique documentee : une IP de sortie unique et non partagee est un identifiant stable, donc potentiellement moins protectrice qu'un pool commercial partage. L'anonymat reel n'est revendique que pour les modes de chainage vers Tor ou vers le mixnet Nym, et avec leurs limites explicitees.
 
-Aucune architecture reseau ne rend anonyme un utilisateur connecte a ses comptes ou dont le navigateur n'est pas durci. Le produit le dira.
+Aucune architecture reseau ne rend anonyme un utilisateur connecte a ses comptes ou dont le navigateur n'est pas durci. Le logiciel le dira.
 
 ## Architecture
 
@@ -50,7 +50,7 @@ Deux principes de conception structurent tout le reste.
 
 **La politique de blocage est une donnee, pas du code.** Le ruleset nftables et le plan des filtres WFP sont produits par des fonctions pures qui renvoient du texte et des structures. Ce qui protege l'utilisateur est donc verifiable en test unitaire, sans privileges, sans interface reseau, et sur une plateforme qui n'est pas la cible. Le plan WFP est teste sur Linux, ou personne ne peut l'executer mais ou tout le monde peut le lire.
 
-**La machine a etats ne fait rien elle-meme.** Elle transforme un couple `(etat, evenement)` en une liste d'actions que le daemon execute. L'invariant du produit se teste alors directement : pour chaque etat non deconnecte et chaque evenement possible, aucune action ne desarme le kill switch et aucun etat atteint ne se passe de lui. Seul un `disconnect` explicite le leve, et il est alors la derniere action executee, apres le demontage du tunnel.
+**La machine a etats ne fait rien elle-meme.** Elle transforme un couple `(etat, evenement)` en une liste d'actions que le daemon execute. L'invariant du logiciel se teste alors directement : pour chaque etat non deconnecte et chaque evenement possible, aucune action ne desarme le kill switch et aucun etat atteint ne se passe de lui. Seul un `disconnect` explicite le leve, et il est alors la derniere action executee, apres le demontage du tunnel.
 
 ## Construire
 
@@ -243,7 +243,7 @@ bifrost-cli --json prove nft --politique examples/politique-nft-v1.json --actif
 Sous Linux, `--politique` remplace `--attendu`. Le format v1 exige les sept
 champs de l'exemple, y compris les `null` explicites. Adapter interface, marque,
 DNS, LAN et identites a l'intention voulue; l'exemple n'est pas une detection de
-la configuration du poste. Le moteur produit engendre la reference en memoire.
+la configuration du poste. Le moteur de Bifrost engendre la reference en memoire.
 Un changement de ces parametres ou une table tierce devient un ecart; aucun
 objet tiers n'est ignore. Les parametres prives ne sont pas copies dans le
 rapport. `expected_source=bifrost-policy-v1-user-declared` distingue cette
@@ -301,7 +301,7 @@ lisible ne peut le defaire: pas une preuve d'etancheite du VPN.
 bifrost-cli --json prove routes --intention intention.json --actif
 ```
 
-L'intention dit quel chemin le produit a pose, avec les memes parametres que
+L'intention dit quel chemin le logiciel a pose, avec les memes parametres que
 la configuration. Les six champs sont obligatoires, `null` compris:
 
 ```json
@@ -315,7 +315,7 @@ fonctions rendent les commandes du daemon et la reference de la preuve.
 
 La commande lit le noyau du namespace courant deux fois, sans elevation et
 sans rien changer, puis compare les deux familles:
-- les regles du produit, et leur ordre;
+- les regles du logiciel, et leur ordre;
 - les regles tierces evaluees avant celle du tunnel;
 - la table du tunnel, dont la route doit etre utilisable: ni morte, ni sans
   porteuse, ni echue;
@@ -360,7 +360,7 @@ MATCH n'est pas une preuve d'etancheite du VPN. Voir
 bifrost-cli --json prove routes --intention intention.json --actif
 ```
 
-L'intention Windows dit quel plan le produit a pose. Les sept champs sont
+L'intention Windows dit quel plan le logiciel a pose. Les sept champs sont
 obligatoires:
 
 ```json
@@ -370,7 +370,7 @@ obligatoires:
 `familles` liste les familles adressees par le profil, IPv4 puis IPv6.
 `destinations` porte les prefixes autorises, masques et sous leur forme
 canonique. Pour le chemin par coeur, `chemin` vaut `coeur` et `destinations`
-vaut `null`: le produit pose la route par defaut de chaque famille.
+vaut `null`: le logiciel pose la route par defaut de chaque famille.
 
 La commande lit deux fois, sans elevation et sans rien changer, les routes,
 les lignes d'interface et les adresses de la table IP Helper, puis compare
@@ -396,7 +396,7 @@ preuve d'etancheite du VPN. Voir
 bifrost-cli --json prove dns --intention intention.json --actif
 ```
 
-L'intention dit quel plan DNS le produit a pose, avec les memes parametres que
+L'intention dit quel plan DNS le logiciel a pose, avec les memes parametres que
 la configuration, et quel backend le daemon a choisi. Les sept champs sont
 obligatoires, `null` compris:
 
@@ -416,7 +416,7 @@ port 53, le mode et le contenu de `/etc/resolv.conf`, et, par le bus systeme,
 les serveurs et les domaines de systemd-resolved, lien par lien, avec leurs
 portees LLMNR et mDNS. Elle signale:
 - un `/etc/resolv.conf` qui ne mene pas au stub de resolved, ou qui differe
-  du rendu du produit;
+  du rendu du logiciel;
 - une source `hosts` hors de la liste admise;
 - un lien du tunnel sans portee DNS, d'autres serveurs, ou autre chose que
   `~.`;
@@ -478,7 +478,7 @@ sudo ./scripts/mort-daemon-systemd-linux.sh # le daemon tue: le kill switch tien
 
 `fuzz-linux.sh` demande une chaine nightly et `cargo-fuzz` (`cargo install --locked cargo-fuzz --version 0.13.2`), et ne tourne que sous Linux. Le harnais vit dans `fuzz/`, un espace de travail cargo separe du workspace racine : son verrou, ses graines (`fuzz/graines/<cible>`) et sa politique de dependances (`fuzz/deny.toml`) n'entrent dans aucun binaire livre. `--duree N` fixe le temps par cible, `--rejouer` s'arrete apres la relecture des graines, `--cible NOM` restreint a cette cible (option repetable). Les binaires suivent `CARGO_TARGET_DIR` comme cargo (defaut `fuzz/target`); corpus de travail et entrees qui font tomber une cible restent sous `fuzz/target/`. Les cibles, la frontiere de confiance de chaque parseur et ce qui n'est pas couvert sont dans `docs/07-programme-securite-produit.md`, section 2.3.
 
-Cote Windows, `.\scripts\packaging-windows.ps1` (en administrateur) eprouve l'installateur en detournant `%ProgramFiles%` et `%ProgramData%` vers un bac a sable : ce qui est mesure est exactement ce qui se produirait a l'installation, sans rien laisser sur la machine. Le service, lui, ne se detourne pas - le gestionnaire de services est unique - donc la recette l'installe pour de bon, relit dans le **registre** ce que le SCM a enregistre, puis le retire ; elle refuse de tourner si un service `BifrostDaemon` existe deja, pour ne jamais defaire une installation reelle. Elle verifie que les quatre fichiers sont deposes - les deux binaires du produit, le resolveur chiffre et `wireguard.dll` -, que le repertoire de donnees a l'heritage coupe et ne laisse de droits qu'a SYSTEM et aux administrateurs - jamais a `S-1-5-19` -, que son sous-repertoire `resolveur` existe et est ouvert en lecture heritable a `S-1-5-19` sans aucun bit d'ecriture (un `Modify` la serait un echec : la configuration deviendrait reinscriptible par le resolveur), que `resolveur\etat` est ouvert en ecriture heritable, et que rejouer l'installation ne fait grossir ni l'un ni l'autre compte d'ACE, que le service depend de `BFE`, qu'il n'est pas demarre, et que sa ligne **nomme le resolveur avec son chemin cite et le compte `LocalService`, cite lui aussi, apres le binaire**. Sans droits administrateur elle rend `SKIPPED` avec sa raison, apres avoir tout de meme fait analyser l'installateur.
+Cote Windows, `.\scripts\packaging-windows.ps1` (en administrateur) eprouve l'installateur en detournant `%ProgramFiles%` et `%ProgramData%` vers un bac a sable : ce qui est mesure est exactement ce qui se produirait a l'installation, sans rien laisser sur la machine. Le service, lui, ne se detourne pas - le gestionnaire de services est unique - donc la recette l'installe pour de bon, relit dans le **registre** ce que le SCM a enregistre, puis le retire ; elle refuse de tourner si un service `BifrostDaemon` existe deja, pour ne jamais defaire une installation reelle. Elle verifie que les quatre fichiers sont deposes - les deux binaires du logiciel, le resolveur chiffre et `wireguard.dll` -, que le repertoire de donnees a l'heritage coupe et ne laisse de droits qu'a SYSTEM et aux administrateurs - jamais a `S-1-5-19` -, que son sous-repertoire `resolveur` existe et est ouvert en lecture heritable a `S-1-5-19` sans aucun bit d'ecriture (un `Modify` la serait un echec : la configuration deviendrait reinscriptible par le resolveur), que `resolveur\etat` est ouvert en ecriture heritable, et que rejouer l'installation ne fait grossir ni l'un ni l'autre compte d'ACE, que le service depend de `BFE`, qu'il n'est pas demarre, et que sa ligne **nomme le resolveur avec son chemin cite et le compte `LocalService`, cite lui aussi, apres le binaire**. Sans droits administrateur elle rend `SKIPPED` avec sa raison, apres avoir tout de meme fait analyser l'installateur.
 
 Ce qu'elle n'etablit pas : que le service **sert**. Elle ne le demarre pas, et c'est delibere - le demarrer armerait le kill switch sur la machine de recette. C'est le role de `.\scripts\service-windows.ps1`, pendant de `service-systemd-linux.sh` : il installe pour de bon, demarre le service, `connect`, et mesure ce que la machine fait entre `connect` et `disconnect` - le tunnel transporte (une banniere du pair, verifiee muette avant le montage, et non des compteurs qu'un endpoint mort ferait monter), le vrai dnscrypt-proxy tourne comme ENFANT du service depuis le binaire que sa ligne nomme et sous `S-1-5-19` (decide sur le SID du proprietaire, jamais sur son nom traduit), l'interface du tunnel pointe le resolveur local, un vrai nom y resout, `permit-resolveur-dns` et `block-dns` sont poses pendant qu'une requete en clair vers un resolveur public n'aboutit pas, le DNS de la machine n'a pas bouge, puis le resolveur s'arrete avec le tunnel et le service tient sans redemarrer.
 
@@ -508,7 +508,7 @@ Il repond a une requete, il tourne sous le compte annonce, il ne garde que `CAP_
 
 Ce dernier temoin a trouve un conflit entre deux proprietes de securite. Le noyau efface `pdeath_signal` des qu'un processus change d'identifiants, donc laisser dnscrypt-proxy baisser ses privileges lui-meme par `user_name` desarmait la garde anti-orphelin, sans un mot : le resolveur survivait alors au daemon et gardait son ecoute sur le `:53`. Le daemon prend desormais les identifiants lui-meme avant l'`exec`, ne transmet que `CAP_NET_BIND_SERVICE` en capacite ambiante, et arme la garde apres.
 
-**Et `sudo` ne suffit pas a l'eprouver.** Root y garde toutes ses capacites et tous les repertoires sont accessibles : une recette qui n'y tourne que sous `sudo` mesure un environnement que le produit ne connaitra jamais. `resolveur-systemd-linux.sh` relit le durcissement dans l'unite INSTALLEE - il ne le recopie pas, sans quoi il verifierait sa propre copie - et rejoue l'autotest sous un service transitoire qui porte exactement les memes directives. Trois defauts qu'il a trouves, tous verts sous `sudo` :
+**Et `sudo` ne suffit pas a l'eprouver.** Root y garde toutes ses capacites et tous les repertoires sont accessibles : une recette qui n'y tourne que sous `sudo` mesure un environnement que le logiciel ne connaitra jamais. `resolveur-systemd-linux.sh` relit le durcissement dans l'unite INSTALLEE - il ne le recopie pas, sans quoi il verifierait sa propre copie - et rejoue l'autotest sous un service transitoire qui porte exactement les memes directives. Trois defauts qu'il a trouves, tous verts sous `sudo` :
 
 - le daemon donnait le repertoire de travail au resolveur AVANT d'y ecrire sa configuration, ce que l'absence de `CAP_DAC_OVERRIDE` lui interdisait ensuite ;
 - le `CapabilityBoundingSet` de l'unite ne contenait ni `CAP_SETUID` ni `CAP_NET_BIND_SERVICE`, donc la bascule etait impossible ;
@@ -632,13 +632,13 @@ Deux profils, poses par `dns.anti_telemetrie` dans le profil de tunnel :
 | `equilibre` | Ce qui n'a d'autre fonction que de mesurer l'utilisateur ou de lui vendre quelque chose : le pipeline `events.data`, Watson et Windows Error Reporting, la plateforme d'experimentation `iris`, les regies publicitaires | Windows Update, le Store, Defender, l'activation, l'indicateur de connectivite, les certificats |
 | `strict` | En plus : ce qui porte aussi du contenu ou de la configuration - Spotlight et le fil MSN, `aria`, `settings.data`, les notifications poussees, la telemetrie d'Office | idem |
 
-Le troisieme profil du document, « parano », n'est pas livre : il coupe Windows Update, le Store et l'activation, ce qui n'est pas un durcissement mais une machine deconnectee. `aucun` est le defaut, pour la meme raison que le resolveur embarque est desactive par defaut - un produit qui se met a refuser des noms sans qu'on le lui ait demande est un produit dont on ne sait plus ce qu'il fait. Demander un profil sans resolveur embarque est une erreur de configuration refusee a la validation, et non un reglage sans effet.
+Le troisieme profil du document, « parano », n'est pas livre : il coupe Windows Update, le Store et l'activation, ce qui n'est pas un durcissement mais une machine deconnectee. `aucun` est le defaut, pour la meme raison que le resolveur embarque est desactive par defaut - un logiciel qui se met a refuser des noms sans qu'on le lui ait demande est un logiciel dont on ne sait plus ce qu'il fait. Demander un profil sans resolveur embarque est une erreur de configuration refusee a la validation, et non un reglage sans effet.
 
 **Le piege que ce module existe pour fermer.** `dnscrypt-proxy` documente qu'un nom ecrit nu bloque toute sa zone : `example.com` est identique a `*.example.com`. Un `microsoft.com` egare couperait Update, le Store, Defender et l'activation d'un seul coup. La liste n'emploie donc que deux formes, `*.zone` et `=nom` ; une recette refuse toute autre forme, et le motif est INTERPRETE pour verifier qu'aucun ne touche un plancher de vingt-quatre noms releves sur la page Microsoft. Une comparaison de chaines aurait laisse passer `*.microsoft.com` ; le test de mutation, lui, nomme sa victime.
 
 **Ce qu'elle mesure.** `--resolveur-selftest` interroge le resolveur vivant : `v10.events.data.microsoft.com` ne doit rendre aucune adresse pendant que `www.msftconnecttest.com` en rend dans la MEME execution. La question de controle n'est pas decorative - un resolveur casse et un resolveur qui bloque bien rendent la meme reponse vide -, et son echec rend `SKIPPED`, jamais `PASSED`.
 
-**Ce qu'elle ne fait pas, et qu'il faut dire.** Le document 03 est net sur ce point et le produit ne promettra pas mieux : le filtrage par nom ne couvre ni les adresses codees en dur dans `diagtrack.dll`, documentees par le BSI, ni un composant qui resoudrait par son propre DoH. Il faut pour cela le blocage par service, c'est-a-dire la couche 2 ci-dessous.
+**Ce qu'elle ne fait pas, et qu'il faut dire.** Le document 03 est net sur ce point et le logiciel ne promettra pas mieux : le filtrage par nom ne couvre ni les adresses codees en dur dans `diagtrack.dll`, documentees par le BSI, ni un composant qui resoudrait par son propre DoH. Il faut pour cela le blocage par service, c'est-a-dire la couche 2 ci-dessous.
 
 ### La couche 1 : registre, services, taches planifiees
 
@@ -674,7 +674,7 @@ bifrost-daemon --telemetrie-reseau-retirer                           # la sortie
 
 Les filtres vivent dans leur PROPRE provider et leur propre sublayer, persistants et distincts de ceux du kill switch : ils valent aussi quand le tunnel est baisse. Quelqu'un qui coupe son VPN ne demande pas a rallumer la telemetrie de son systeme.
 
-**Le retrait ne depend d'aucune connaissance de ce qui a ete pose.** Il rejoue une suite de cles fixes et supprime chacune en tolerant les absentes, donc il marche apres un plantage, apres un changement de profil, ou depuis un desinstalleur. Ce n'est pas du confort : un filtre WFP survit au processus qui l'a pose, et sans cette commande, desinstaller le produit laisserait une machine filtree par un logiciel absent.
+**Le retrait ne depend d'aucune connaissance de ce qui a ete pose.** Il rejoue une suite de cles fixes et supprime chacune en tolerant les absentes, donc il marche apres un plantage, apres un changement de profil, ou depuis un desinstalleur. Ce n'est pas du confort : un filtre WFP survit au processus qui l'a pose, et sans cette commande, desinstaller le logiciel laisserait une machine filtree par un logiciel absent.
 
 **Une cible qui ne peut pas etre bloquee est dite `SANS OBJET`, jamais posee.** Trois cas, et le troisieme est le piege de la couche : le service n'existe pas ; le binaire n'existe pas - sur Windows 11 25H2, `MusNotification.exe` et `WaaSMedicAgent.exe` ont disparu de `System32` ; ou le service est configure en `SERVICE_SID_TYPE NONE`, auquel cas son jeton ne porte aucun SID de service et le filtre se poserait sans jamais mordre.
 
@@ -713,7 +713,7 @@ Les filtres vivent dans leur PROPRE provider et leur propre sublayer, persistant
 
 **La cause est documentee, et elle est mesuree.** `FWPM_CONDITION_ALE_USER_ID` n'est pas une comparaison de SID : c'est un controle d'acces contre le jeton **capture a la creation de la socket**. Si le thread usurpe l'identite d'un client a cet instant, le jeton capture est celui du client, le SID de service n'y est pas, et le filtre ne matche pas. Microsoft l'ecrit de son propre mecanisme. Et le champ `userId` d'un net event WFP le confirme sur cette machine : `W32Time` rend `S-1-5-19`, son propre compte ; `DoSvc` rend un `S-1-5-21-...-1001`, un compte **utilisateur**, alors que le service tourne sous `NetworkService`. Attribution au bon processus etablie par jointure avec l'evenement 5157, qui porte le PID - sur dix refus imputes a la regle, quatre seulement etaient de la cible.
 
-**Ce que le produit a donc le droit de dire.** La couche 2 pose et retire des blocages, et le mecanisme par SID de service mord sur un service qui porte son propre binaire. Mais **les quatre cibles `ALE_USER_ID` qui restent au catalogue sont toutes des services heberges dans `svchost.exe`** - `DiagTrack`, `dmwappushservice`, `DoSvc`, `CDPSvc` - deux sont mesurees echappant et deux n'ont pas pu etre eprouvees faute de temoin qui emette. **Aucune des quatre n'est annoncee comme bloquee.** Ce qui eteint la telemetrie aujourd'hui, c'est la couche 1, et le document 03 le disait avant l'enquete : << l'eteindre est plus sur que d'esperer le filtrer >>.
+**Ce que le logiciel a donc le droit de dire.** La couche 2 pose et retire des blocages, et le mecanisme par SID de service mord sur un service qui porte son propre binaire. Mais **les quatre cibles `ALE_USER_ID` qui restent au catalogue sont toutes des services heberges dans `svchost.exe`** - `DiagTrack`, `dmwappushservice`, `DoSvc`, `CDPSvc` - deux sont mesurees echappant et deux n'ont pas pu etre eprouvees faute de temoin qui emette. **Aucune des quatre n'est annoncee comme bloquee.** Ce qui eteint la telemetrie aujourd'hui, c'est la couche 1, et le document 03 le disait avant l'enquete : << l'eteindre est plus sur que d'esperer le filtrer >>.
 
 **Deux defauts de catalogue trouves en chemin. Le premier est CORRIGE.** `service-wersvc` visait a cote : le reseau de Windows Error Reporting n'est pas fait par le service mais par `WerFault.exe`, un processus distinct portant son propre jeton, qu'un filtre sur le SID du service ne peut pas matcher par construction - trois sorties relevees, dont deux pendant que les filtres etaient poses. L'entree est devenue `binaire-werfault`, une cible `ALE_APP_ID` sur `System32\WerFault.exe`, des que ce mecanisme a ete mesure mordant. **Le pendant 32 bits, `SysWOW64\WerFault.exe`, existe et n'est PAS vise** : aucune sortie n'en a ete relevee, et poser un filtre sans mesure serait annoncer une protection sans preuve. C'est ecrit dans le code, a cote de l'entree. Le second defaut tient : `CDPUserSvc`, nomme dans le document 03, est absent des catalogues, son nom portant un suffixe propre a l'installation qu'une derivation de SID a partir d'un nom fixe ne peut pas atteindre.
 
@@ -721,7 +721,7 @@ Les filtres vivent dans leur PROPRE provider et leur propre sublayer, persistant
 
 **Mais sa couverture reelle sur 25H2 est maigre, et il faut le dire : une cible et demie.** `MusNotification.exe` et `WaaSMedicAgent.exe` ont disparu du systeme, `SIHClient.exe` n'a de declencheur dans aucune des 274 taches de la machine, `DeviceCensus.exe` est muet, et `CompatTelRunner.exe` n'emet qu'au premier passage de l'appraiser. Le mecanisme fonctionne ; ce qu'il protege ici, non.
 
-**Ce que le produit promet, apres tout cela.** Le blocage par SID de service **n'est pas une garantie et ne peut pas en etre une** : ce n'est pas une prudence de notre part, c'est ce que la plateforme dit de son propre mecanisme, et ce qu'on a mesure avec l'outil de la plateforme. Il reste utile la ou il mord, comme defense en profondeur, jamais la couche qui porte la promesse. Ce qui eteint la telemetrie, c'est la couche 1 et la couche DNS, toutes deux mesurees efficaces.
+**Ce que le logiciel promet, apres tout cela.** Le blocage par SID de service **n'est pas une garantie et ne peut pas en etre une** : ce n'est pas une prudence de notre part, c'est ce que la plateforme dit de son propre mecanisme, et ce qu'on a mesure avec l'outil de la plateforme. Il reste utile la ou il mord, comme defense en profondeur, jamais la couche qui porte la promesse. Ce qui eteint la telemetrie, c'est la couche 1 et la couche DNS, toutes deux mesurees efficaces.
 
 **Deux pieges de methode ont ete payes pour arriver a cette phrase, et ils valent d'etre notes.** `CompatTelRunner.exe` etait le declencheur evident : mesure avec l'audit des succes actif, aucun 5156 ne le citait, meme sans aucun filtre - un temoin muet aurait certifie n'importe quoi. Et DiagTrack n'emet qu'une fois par redemarrage : un banc qui aurait compare « sans filtre » puis « avec filtre » dans cet ordre aurait attribue au filtre un simple epuisement de file. D'ou les passages alternes, commences par le cas filtre.
 
@@ -795,7 +795,7 @@ Ce qui manque : le DoH des navigateurs n'est desactive par aucune policy, et l'e
 | `docs/04-anti-censure-dpi.md` | Resistance DPI : VLESS et REALITY, XHTTP, Hysteria2, AmneziaWG, bascule automatique, etat mesure de la censure |
 | `docs/05-anonymat-chainage.md` | Modeles de menace, architectures de sortie comparees, multi-hop, Tor, Nym, defense contre la correlation de trafic |
 | `docs/06-architecture-logicielle-packaging.md` | Daemon Rust et interface Tauri, IPC privilegie, MSI et paquets Linux, signature, mise a jour TUF, provisioning serveur |
-| `docs/07-programme-securite-produit.md` | Modele de menace du produit, fuzzing, audit externe, divulgation coordonnee, conformite Cyber Resilience Act |
+| `docs/07-programme-securite-produit.md` | Modele de menace du logiciel, fuzzing, audit externe, divulgation coordonnee, conformite Cyber Resilience Act |
 | `docs/09-souverainete-verifiable.md` | Controle utilisateur, preuves locales, builds reproductibles, sorties reseau, ODoH et multihop: criteres mesurables et ordre de livraison |
 
 ## Decisions structurantes deja actees
@@ -931,7 +931,7 @@ t+0.009s  serveur -> client    868o DF   Handshake(741o), 1-RTT(91o)
 
 Aucun reglage ne corrige cela avec les binaires epingles. `initial_packet_size` n'existe que dans la branche `testing` de sing-box ; la version epinglee, 1.13.18, **refuse la configuration entiere** des qu'il apparait, emportant avec elle les transports qui n'avaient rien demande. Les champs qu'elle accepte ont ete etablis en soumettant chacun a `sing-box check`, et un test garde desormais cette liste. Cote serveur, hysteria n'expose que `disablePathMTUDiscovery`, qui coupe la sonde ascendante sans toucher a la taille de depart.
 
-Ce n'est pas un blocage produit : un chemin ordinaire fait 1500 octets. Cela mord sur les chemins a 1307 ou moins, c'est-a-dire tout tunnel WireGuard, Tailscale, et le minimum impose par IPv6 - **y compris le tunnel de Bifrost lui-meme**, ce qui est une contrainte reelle des qu'un coeur QUIC tourne a l'interieur.
+Ce n'est pas un blocage du logiciel : un chemin ordinaire fait 1500 octets. Cela mord sur les chemins a 1307 ou moins, c'est-a-dire tout tunnel WireGuard, Tailscale, et le minimum impose par IPv6 - **y compris le tunnel de Bifrost lui-meme**, ce qui est une contrainte reelle des qu'un coeur QUIC tourne a l'interieur.
 
 Ce qui a ete construit a la place d'un correctif introuvable : la sonde `sonder_chemin_quic`, qui pose DF et demande au noyau si un paquet de cette taille peut partir, arbitree par un temoin court pour ne pas confondre un chemin etroit avec une machine debranchee. La recette l'interroge avant d'essayer et annonce **`SKIPPED` avec les chiffres** au lieu d'expirer sans rien dire. Elle est eprouvee sur de vrais sockets, sous Windows et sous Linux, sur un chemin large comme sur un chemin a 1280 : sous Windows, ou le systeme fragmente par defaut, seule une pose de DF reellement effective peut rendre la bonne reponse.
 
@@ -1124,7 +1124,7 @@ La pile veut lire et ecrire sans bloquer. Sous Linux, `AsyncFd` suffit: le syste
 
 **Un fil dedie, et pas `spawn_blocking`.** La documentation de `spawn_blocking` est explicite: elle est faite pour du travail **borne**, et chaque appel immobilise un fil du bassin pour toute sa duree. Une boucle de lecture de TUN dure autant que le tunnel; l'y mettre reduirait durablement la capacite du bassin au detriment de tout ce que le daemon y fait par ailleurs.
 
-**Un canal plutot qu'un reveil de tache**, et c'est un echange assume. L'alternative fait moins de copies - le fil ne servirait que de sonneur, et la lecture se ferait dans l'anneau depuis la tache, ce qui ne bloque jamais. Mais elle demande une poignee de main entre le fil et la tache, parce que l'evenement reste declenche tant qu'il reste des paquets: sans elle le fil tournerait a vide. Le canal coute une allocation et une recopie par paquet, et rend la concurrence triviale - un fil qui produit, une tache qui consomme, `tokio` qui porte les reveils. Dans un produit de securite l'echange se fait dans ce sens, et c'est le meme raisonnement qui a fait prendre `ipstack` plutot qu'ecrire TCP a la main.
+**Un canal plutot qu'un reveil de tache**, et c'est un echange assume. L'alternative fait moins de copies - le fil ne servirait que de sonneur, et la lecture se ferait dans l'anneau depuis la tache, ce qui ne bloque jamais. Mais elle demande une poignee de main entre le fil et la tache, parce que l'evenement reste declenche tant qu'il reste des paquets: sans elle le fil tournerait a vide. Le canal coute une allocation et une recopie par paquet, et rend la concurrence triviale - un fil qui produit, une tache qui consomme, `tokio` qui porte les reveils. Dans un logiciel de securite l'echange se fait dans ce sens, et c'est le meme raisonnement qui a fait prendre `ipstack` plutot qu'ecrire TCP a la main.
 
 Le canal est **borne**: une pile qui n'avale plus fait remplir l'anneau, et le pilote jette - exactement ce qui arrive sous Linux quand le noyau ne peut plus mettre en file. Un canal sans borne remplacerait une perte de paquets par une consommation de memoire sans fin.
 
@@ -1184,7 +1184,7 @@ bifrost profil recuperer --depuis "bifrost1..."   # cote destinataire
 
 Une chaine unique, en base64url sans remplissage - ni `+`, ni `/`, ni `=` que les URL et les messageries transforment - et tout espace blanc est ignore a la lecture, parce qu'une messagerie replie une chaine de huit cents caracteres et que l'utilisateur qui recopie ajoute des espaces. Elle sert Telegram exactement comme Tor s'en sert, et sert aussi Signal, un courriel, un QR code, un SMS. Le prefixe porte un **numero de version** : un format qu'on colle traine dans des messages et des captures d'ecran, et le jour ou il faudra en changer, un lien de l'ancien monde doit etre refuse en le disant plutot que mal interprete.
 
-**Un lien nu est signe, pas chiffre.** La signature protege son authenticite quel que soit le chemin parcouru - c'est tout l'interet. Mais le profil y est en base64, c'est-a-dire *encode et non chiffre* : le base64 a l'apparence du secret sans en avoir l'effet. Et ce qui fuit alors n'est pas d'abord la cle privee, c'est **l'adresse du serveur** - un lien intercepte brule le serveur, ce qui est exactement le dommage que ce produit existe pour eviter. La commande le dit avant d'imprimer le lien, et non apres : ce qui suit un mur de huit cents caracteres ne se lit pas.
+**Un lien nu est signe, pas chiffre.** La signature protege son authenticite quel que soit le chemin parcouru - c'est tout l'interet. Mais le profil y est en base64, c'est-a-dire *encode et non chiffre* : le base64 a l'apparence du secret sans en avoir l'effet. Et ce qui fuit alors n'est pas d'abord la cle privee, c'est **l'adresse du serveur** - un lien intercepte brule le serveur, ce qui est exactement le dommage que ce logiciel existe pour eviter. La commande le dit avant d'imprimer le lien, et non apres : ce qui suit un mur de huit cents caracteres ne se lit pas.
 
 ### Le lien chiffre
 
@@ -1194,7 +1194,7 @@ C'est la seconde moitie du "signes **et chiffres**" du plan, qui ne disait pas c
 bifrost profil partager tunnel.toml --chiffrer
 ```
 
-La phrase de passe sort sur la sortie d'erreur, le lien sur la sortie standard - on peut donc rediriger le lien sans emporter la phrase avec lui. Elle est **engendree par le programme, jamais tapee par une personne** : une phrase choisie par un humain, dans un produit ou l'adversaire peut etre un Etat, ne vaut pas le scrypt qui la protege. Vingt-quatre caracteres de base32 Crockford - ni `I`, ni `L`, ni `O`, ni `U`, qui se confondent quand on dicte au telephone - soit 120 bits, bien au-dela de ce que le facteur de travail aurait a rattraper.
+La phrase de passe sort sur la sortie d'erreur, le lien sur la sortie standard - on peut donc rediriger le lien sans emporter la phrase avec lui. Elle est **engendree par le programme, jamais tapee par une personne** : une phrase choisie par un humain, dans un logiciel ou l'adversaire peut etre un Etat, ne vaut pas le scrypt qui la protege. Vingt-quatre caracteres de base32 Crockford - ni `I`, ni `L`, ni `O`, ni `U`, qui se confondent quand on dicte au telephone - soit 120 bits, bien au-dela de ce que le facteur de travail aurait a rattraper.
 
 La seule consigne qui compte accompagne la phrase : **la transmettre par un autre chemin que le lien**. Dans la meme conversation, elle ne protege de rien. Et la reciproque est signalee aussi : donner une phrase alors qu'aucun canal ne porte de lien chiffre declenche un avertissement, parce que croire avoir recu un lien protege quand il ne l'etait pas est un malentendu qui ne se rattrape plus - le lien est deja parti en clair.
 

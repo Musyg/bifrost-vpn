@@ -1,4 +1,4 @@
-# Programme de securite produit - Bifrost
+# Programme de securite du logiciel - Bifrost
 
 ## TL;DR
 - Bifrost est un produit important de classe I au sens du CRA (les VPN sont listes explicitement en Annexe III) : l'auto-evaluation (Module A) n'est ouverte que si une norme harmonisee est appliquee integralement ; or aucune norme harmonisee CRA n'est encore citee au Journal officiel au 4 juin 2026, donc au lancement il faut soit attendre une citation au JO, soit passer par un notified body (Module B+C ou H).
@@ -37,7 +37,7 @@
 
 **1.2 Adversaires et scenarios** - L'adversaire local non privilegie vise SYSTEM/root via IPC mal autorise, permissions de fichiers/repertoires laxistes (cf. Mullvad Windows PE), ou binaire plante a cote de l'installeur. Le serveur VPN malveillant : le client ne doit PAS faire confiance au serveur - toute donnee recue (routes poussees, DNS, config) est une entree non fiable a valider. Le profil malveillant est le vecteur le plus sous-estime, surtout via lien de subscription (parsing = RCE potentielle). L'attaquant reseau peut tenter TunnelVision (CVE-2024-3661) et TunnelCrack LocalNet (CVE-2023-36672, CVE-2023-35838) pour router du trafic hors tunnel via un faux serveur DHCP ; Mullvad desktop a mitige via des regles de pare-feu bloquant le trafic public hors tunnel. La supply chain : une crate/module Go trojanise s'execute avec les privileges du build puis du daemon.
 
-**1.3 Methodologie** - Recommandation : **STRIDE** pour la securite + **LINDDUN** pour la vie privee (produit VPN), documentes en **threat-model-as-code**.
+**1.3 Methodologie** - Recommandation : **STRIDE** pour la securite + **LINDDUN** pour la vie privee (logiciel VPN), documentes en **threat-model-as-code**.
 
 | Outil | Maintenu 2026 | Format | As-code / CI | Verdict |
 |---|---|---|---|---|
@@ -155,7 +155,7 @@ Ce que cela ne dit pas:
 sanitizer d'adresses). C'est un espace de travail cargo SEPARE: son
 `Cargo.lock` et sa politique de dependances (`fuzz/deny.toml`, celle de la
 racine plus une exception nominative pour `libfuzzer-sys`, sous licence NCSA)
-ne touchent ni le verrou ni les binaires du produit. Chaque cible appelle la
+ne touchent ni le verrou ni les binaires du logiciel. Chaque cible appelle la
 fonction de PRODUCTION du parseur par son chemin public. Les douze premieres
 n'ont demande d'exposer aucun symbole. Les cinq cibles des lecteurs de la CLI
 passent par la bibliotheque du paquet `bifrost-cli` (`src/lib.rs`): elle porte
@@ -490,7 +490,7 @@ Grille de primes indicative (si programme prive) : Critical (RCE daemon, PE vers
 
 Sanctions : selon le Reglement (UE) 2024/2847, Article 64(2), "Non-compliance with the essential cybersecurity requirements set out in Annex I and the obligations set out in Articles 13 and 14 shall be subject to administrative fines of up to EUR 15 000 000 or, if the offender is an undertaking, up to 2,5 % of its total worldwide annual turnover for the preceding financial year, whichever is higher."
 
-**Fraicheur incertaine : au 29 juin 2026 la plateforme SRP n'etait pas encore live alors que l'obligation demarre le 11 septembre 2026 ; une periode de test est prevue.** NIS2 : ne s'applique pas a un editeur de logiciel en tant que fabricant de produit (le CRA est la lex specialis pour le produit) sauf si l'entite est elle-meme entite essentielle/importante au sens NIS2 par son activite.
+**Fraicheur incertaine : au 29 juin 2026 la plateforme SRP n'etait pas encore live alors que l'obligation demarre le 11 septembre 2026 ; une periode de test est prevue.** NIS2 : ne s'applique pas a un editeur de logiciel en tant que fabricant de produit (le CRA est la lex specialis pour le logiciel) sauf si l'entite est elle-meme entite essentielle/importante au sens NIS2 par son activite.
 
 Organisation : designer plusieurs reporters autorises (l'exploitation peut etre decouverte un week-end), definir triggers et chaine d'escalade, preparer des templates alignes SRP, mettre en place une astreinte informelle. S'abonner aux flux CVE de chaque composant du SBOM + EUVD (European Vulnerability Database) pour detecter l'exploitation active dans les 24h.
 
@@ -532,7 +532,7 @@ Consequence operationnelle : au lancement, pour un produit classe I, la voie Mod
 - Bug bounty : VDP gratuite au depart ; si Intigriti/YesWeHack prive, prevoir frais de plateforme + budget primes selon la grille.
 - Assurance cyber, certification : optionnel, differable.
 
-**Qui fait quoi (1-3 pers) :** un lead securite produit (modele de menace, triage des vulns, decisions Article 14) ; un dev responsable CI/fuzzing/SBOM ; contact CVD partage avec astreinte informelle. En equipe de 1, le fondateur cumule, avec templates et automatisation maximale.
+**Qui fait quoi (1-3 pers) :** un responsable de la securite du logiciel (modele de menace, triage des vulns, decisions Article 14) ; un dev responsable CI/fuzzing/SBOM ; contact CVD partage avec astreinte informelle. En equipe de 1, le fondateur cumule, avec templates et automatisation maximale.
 
 **Indicateurs :** couverture de fuzzing (% code des parseurs) ; nombre de blocs unsafe (cargo-geiger, tendance decroissante) ; delai median de remediation ; taux d'alertes cargo-audit non traitees (doit rester 0) ; delai de reponse aux reports CVD ; presence des mitigations dans le binaire (winchecksec/checksec pass/fail) ; delai de production du SBOM (automatise a chaque build).
 

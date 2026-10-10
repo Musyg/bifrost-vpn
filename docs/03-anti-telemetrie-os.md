@@ -26,7 +26,7 @@ dnscrypt-proxy est toujours en **2.1.18**, publiee le 18 juillet 2026.
    ecrite dans le depot, entree par entree, a partir de la page Microsoft et de
    `WindowsSpyBlocker` (MIT).
 2. **blocky n'est pas necessaire.** La partie 6 le recommande comme resolveur
-   local, mais le produit en embarque deja un - dnscrypt-proxy, livre avec le
+   local, mais le logiciel en embarque deja un - dnscrypt-proxy, livre avec le
    chantier du resolveur chiffre - et il sait refuser des noms nativement
    (`[blocked_names]`). Mesure du 22/08 sur essai-windows: 2.1.18 accepte notre
    configuration avec cette section (`Configuration successfully checked`).
@@ -97,7 +97,7 @@ build 10.0.26200.9168**.
    C'est la politique de desinstallation dediee que le document disait "a
    verifier au moment de l'implementation". Sa correspondance de politique de
    groupe ne porte aucune ligne `Registry Key Name`: elle n'est atteignable que
-   par CSP, donc par une gestion de parc. Et elle exclut Pro. Un produit qui
+   par CSP, donc par une gestion de parc. Et elle exclut Pro. Un logiciel qui
    ecrit le registre ne peut pas la poser.
 
 4. **La page `manage-recall` porte `ms.date: 2025-12-10`**, plus ancienne que
@@ -413,7 +413,7 @@ Le SID porte par les filtres 91934 et 91935 est **exactement** celui que
 `D:(A;;CC;;;S-1-5-80-...)`, `CC` etant la facon dont `netsh` imprime le droit
 `0x1`, c'est-a-dire `FWP_ACTRL_MATCH_FILTER`.
 
-**Aucun ecart entre ce que le produit annonce et ce que le moteur porte.**
+**Aucun ecart entre ce que le logiciel annonce et ce que le moteur porte.**
 `--telemetrie-reseau-etat` dit POSABLE pour les quatre cibles avec le SID ou le
 chemin exact, et le moteur porte ces quatre cibles sur deux couches.
 
@@ -527,7 +527,7 @@ usurpent de facon DURABLE portent le SID actif. Trancher demanderait de capturer
 le jeton effectif a l'instant du `connect()` - un ETW sur
 `Microsoft-Windows-Kernel-Process`, ou une sonde en mode noyau.
 
-**Consequence pour le produit, et elle est nette: la couche 2 ne doit pas etre
+**Consequence pour le logiciel, et elle est nette: la couche 2 ne doit pas etre
 annoncee comme bloquant DiagTrack.** Ce qui eteint DiagTrack, c'est la couche 1,
 qui met son service en demarrage 4. Le present document le disait avant toute
 cette enquete, dans le catalogue lui-meme: << l'eteindre est plus sur que
@@ -747,7 +747,7 @@ couverture, et il doit etre dit.
 Pourquoi `DeviceCensus` est muet n'est **pas** mesure. Qu'il ecrive dans le
 magasin de telemetrie et que DiagTrack televerse est une hypothese.
 
-### Ce que le produit a le droit de dire, revise
+### Ce que le logiciel a le droit de dire, revise
 
 **Les quatre cibles `ALE_USER_ID` qui restent au catalogue sont TOUTES des
 services heberges dans `svchost.exe`**: `DiagTrack`, `dmwappushservice`,
@@ -757,7 +757,7 @@ mesurees echappant et deux n'ont pas pu etre eprouvees faute de temoin qui
 emette. **Aucune des quatre ne doit etre annoncee comme bloquee.** Ce qui eteint
 la telemetrie, aujourd'hui, c'est la couche 1.
 
-**Arbitrage du 05/09/2026:** la couche 2 reste posee et retirable, et le produit
+**Arbitrage du 05/09/2026:** la couche 2 reste posee et retirable, et le logiciel
 la presente comme << defense en profondeur, jamais la couche qui porte la
 promesse >>, parce que `ALE_USER_ID` fait un controle d'acces contre le jeton
 capture a la creation de la socket, que deux cibles (`DiagTrack`, `DoSvc`) y
@@ -965,7 +965,7 @@ nomme son propre defaut.** Les deux premieres versions du banc ne comptaient
 qu'au bout. La troisieme comptait a chaque etage, et les deux defauts suivants
 sont tombes en deux passages.
 
-### Ce que le produit a le droit de dire, revise une seconde fois
+### Ce que le logiciel a le droit de dire, revise une seconde fois
 
 La revision precedente disait: aucune des cinq cibles `ALE_USER_ID` ne doit etre
 annoncee comme bloquee. Elle tenait pour une limite de nos cibles. **C'est une
@@ -1130,7 +1130,7 @@ Ordre de priorite recommande: (1) registre/GPO + services desactives (source, re
 
 #### 2.3 Outils evalues honnetement
 
-| Outil | Version 2026 | Licence | Reutilisable dans le produit | Note |
+| Outil | Version 2026 | Licence | Reutilisable dans le logiciel | Note |
 |---|---|---|---|---|
 | O&O ShutUp10++ | 2.2.1024 (4 fev 2026); Free 3.2.1111 (15 juil 2026) | Freeware (usage perso/commercial/educatif gratuit) | Comme outil oui; code proprietaire (non forkable) | Ajoute controles Copilot/Recall/AI. Cree point de restauration. Premium reapplique apres updates. Reference de comportement |
 | WindowsSpyBlocker | actif (MIT) | MIT | Oui (listes reutilisables) | Listes spy/update/extra basees sur capture reseau QEMU/Proxmox. Meilleure source de listes |
@@ -1147,14 +1147,14 @@ Conclusion: reference technique = simplewall (logique WFP) + WindowsSpyBlocker (
 
 Comparatif operationnel 2026:
 
-| Solution | Licence | DoH/DoT/DoQ natif | Filtrage par client | Embarquement produit |
+| Solution | Licence | DoH/DoT/DoQ natif | Filtrage par client | Integration dans Bifrost |
 |---|---|---|---|---|
 | AdGuard Home | GPL-3.0 | Oui (les trois, natif UI) | Oui (UI) | Bon (binaire Go unique) |
 | Pi-hole | EUPL (+ marque) | Non (v6: HTTPS admin seulement; upstream chiffre via cloudflared/unbound) | Oui (groupes) | Moyen (stack dnsmasq+lighttpd+PHP) |
 | Technitium | GPL-3.0 | Oui (C#), clustering HA natif (v14) | Oui | Bon si stack .NET |
 | blocky | Apache-2.0 (Go) | Oui | Oui | Excellent (leger, embarque, permissive) |
 
-Recommandation d'embarquement dans le produit: blocky (Apache-2.0, permissive, leger, Go) pour eviter la contamination GPL du client MPL-2.0. AdGuard Home si l'on accepte GPL et l'on veut une UI riche + Blocked Services.
+Recommandation d'embarquement dans le logiciel: blocky (Apache-2.0, permissive, leger, Go) pour eviter la contamination GPL du client MPL-2.0. AdGuard Home si l'on accepte GPL et l'on veut une UI riche + Blocked Services.
 
 Listes de blocage Windows maintenues en 2026:
 - hagezi "Windows/Office Tracker DNS Blocklist" (wildcard/native.winoffice.txt). Titre officiel de la liste: "HaGeZi's Windows/Office Tracker DNS Blocklist" (719 entrees dans la version publiee d'octobre 2025). Basee en partie sur la liste BSI SiSyPHuS testee "pour plusieurs mois sans casse" (issue #8071). Faux positifs tres faibles (concu pour). Cible Vortex et Aria (vortex.data.microsoft.com, pipe.aria.microsoft.com).
@@ -1212,13 +1212,13 @@ Outils de capture:
 - Sysmon Event ID 3 (Network connection): correle processus/connexion/hash; ideal pour attribuer une connexion sortante a svchost + service precis.
 - Process Monitor: correlation process/reseau en temps reel.
 
-Tableau de bord produit (metrique avant/apres): nombre de connexions bloquees par destination, volume de donnees non exfiltrees (estime = taille moyenne de payload x connexions bloquees), liste des destinations bloquees avec categorie (telemetrie/pub/AI). Sources de comptage: logs WFP (filtres block) + logs du resolveur DNS local (requetes NXDOMAIN/sinkhole). Baseline "avant" = capture 24-48h sans blocage; "apres" = meme fenetre avec blocage.
+Tableau de bord de Bifrost (metrique avant/apres): nombre de connexions bloquees par destination, volume de donnees non exfiltrees (estime = taille moyenne de payload x connexions bloquees), liste des destinations bloquees avec categorie (telemetrie/pub/AI). Sources de comptage: logs WFP (filtres block) + logs du resolveur DNS local (requetes NXDOMAIN/sinkhole). Baseline "avant" = capture 24-48h sans blocage; "apres" = meme fenetre avec blocage.
 
 Etudes publiques serieuses (2024-2026): la reference methodologique reste le projet BSI SiSyPHuS Win10 ("Work Package 4: Telemetry" + "Telemetry Differential Analysis") - analyse de diagtrack.dll, ETW providers par niveau de telemetrie, implementation registre. Le test FB Pro (aout 2022, methodologie/outil BSI) fournit le chiffre de 448 paquets/semaine sur Win11 non durci. A signaler et eviter: la plupart des "mesures" en ligne (videos YouTube, blogs SEO) sont non methodologiques; ne pas les citer.
 
 Automatisation CI/VM: VM Windows en snapshot -> appliquer profil -> usage scripte ou attente idle -> capture pktmon -> parser les destinations observees vs liste attendue -> assertion (par ex. 0 connexion vers *.events.data.microsoft.com). Reutiliser la methodologie WindowsSpyBlocker (QEMU/Proxmox, dumps quotidiens compares aux regles).
 
-### PARTIE 6 - Implementation dans le produit
+### PARTIE 6 - Implementation dans le logiciel
 
 Architecture recommandee du module anti-telemetrie:
 1. Couche source (registre/GPO + services + taches): appliquee en premier, la plus efficace mais fragile aux updates. Integralement journalisee et reversible.
@@ -1232,7 +1232,7 @@ Reversibilite (obligatoire):
 - Sauvegarde de l'etat des services (StartupType) et des taches planifiees.
 - Commande WFP "disable filters" executee avant toute desinstallation.
 
-Gestion des updates qui reannulent: moteur de detection de derive (tache planifiee du produit) comparant l'etat effectif aux valeurs cibles; reapplication automatique. C'est le mecanisme d'O&O ShutUp10 Premium ("continuously monitors your selected settings and automatically restores them, even after Windows updates"). Winhance issue #281 illustre le risque de mal detecter l'etat (se fier au toggle plutot qu'a la valeur effective).
+Gestion des updates qui reannulent: moteur de detection de derive (tache planifiee du logiciel) comparant l'etat effectif aux valeurs cibles; reapplication automatique. C'est le mecanisme d'O&O ShutUp10 Premium ("continuously monitors your selected settings and automatically restores them, even after Windows updates"). Winhance issue #281 illustre le risque de mal detecter l'etat (se fier au toggle plutot qu'a la valeur effective).
 
 Profils recommandes:
 - Equilibre (rien ne casse): AllowTelemetry=0 + Advertising/Tailored off + DiagTrack disabled + blocage DNS des *.events.data.microsoft.com et endpoints pub. Store/Update/Defender/NCSI intacts.

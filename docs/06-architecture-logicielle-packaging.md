@@ -146,7 +146,7 @@ Configuration et secrets:
 | MSIX | oui depuis Win10 2004, admin requis | tres limite | non (sandbox) | Ecarte |
 | Inno Setup / NSIS | oui (scripts) | oui | oui | Alternative |
 
-MSIX gere les services depuis Windows 10 2004 (janvier 2020, MSIX Packaging Tool 1.2019.1220.0) mais avec des limites lourdes documentees par Microsoft: chemin de l'executable de service non editable, pas de dependances hors package, admin obligatoire, et le modele de virtualisation/sandbox est inadapte a un produit qui installe des filtres WFP persistants et un driver reseau. **MSIX est donc ecarte pour Bifrost.**
+MSIX gere les services depuis Windows 10 2004 (janvier 2020, MSIX Packaging Tool 1.2019.1220.0) mais avec des limites lourdes documentees par Microsoft: chemin de l'executable de service non editable, pas de dependances hors package, admin obligatoire, et le modele de virtualisation/sandbox est inadapte a un logiciel qui installe des filtres WFP persistants et un driver reseau. **MSIX est donc ecarte pour Bifrost.**
 
 Ce que font les acteurs: Tailscale distribue des `.msi` par architecture plus un `.exe` self-extracting; le driver Wintun n'est installable que par MSI/MSM ("MSI is the only supported method of installing Wintun"). Mullvad et Proton utilisent des installeurs classiques avec service. **Decision: WiX v5, MSI, avec un merge module (MSM) pour l'eventuel driver.**
 
@@ -390,7 +390,7 @@ Obligations CRA: le Cyber Resilience Act (Regulation (EU) 2024/2847) impose des 
 
 ### PARTIE 5 - BUILDS REPRODUCTIBLES ET CHAINE D'APPROVISIONNEMENT
 
-Pourquoi indispensable: pour un produit de securite open source, un tiers doit pouvoir verifier que le binaire distribue correspond au code publie (defense contre la compromission du pipeline, type SolarWinds/3CX).
+Pourquoi indispensable: pour un logiciel de securite open source, un tiers doit pouvoir verifier que le binaire distribue correspond au code publie (defense contre la compromission du pipeline, type SolarWinds/3CX).
 
 Etat de l'art 2026:
 - **Rust**: definir `SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)`, `CARGO_INCREMENTAL=0`, `--remap-path-prefix` pour effacer les chemins de build, `--locked`. Depuis rustc 1.69, `/Brepro` est passe automatiquement a link.exe sur PE quand `SOURCE_DATE_EPOCH` est defini (efface le timestamp PE).
@@ -423,7 +423,7 @@ Securisation du pipeline CI:
 
 Objectif: depuis le client, l'utilisateur fournit une cle API d'hebergeur et obtient un serveur VPN configure, durci, cles generees et profil client importe automatiquement.
 
-Outil IaC a embarquer: **ne pas embarquer Terraform** (binaire lourd, etat a gerer). Preferer des **appels API REST directs** depuis `hyper-provision` (Rust) + **cloud-init** pour la configuration du serveur. Terraform/OpenTofu reste pertinent en interne pour les tests, mais dans un produit desktop, l'appel API + cloud-init est plus simple et sans dependance externe. Ansible est trop lourd cote client.
+Outil IaC a embarquer: **ne pas embarquer Terraform** (binaire lourd, etat a gerer). Preferer des **appels API REST directs** depuis `hyper-provision` (Rust) + **cloud-init** pour la configuration du serveur. Terraform/OpenTofu reste pertinent en interne pour les tests, mais dans un logiciel desktop, l'appel API + cloud-init est plus simple et sans dependance externe. Ansible est trop lourd cote client.
 
 API des hebergeurs pertinents (2026):
 
@@ -531,7 +531,7 @@ Le probleme de la cle API cote client (risque majeur): une cle API d'hebergeur p
 
 ### PARTIE 7 - SUPPORT, DIAGNOSTIC ET CRASH REPORTING SANS TELEMETRIE
 
-Le paradoxe: un produit qui bloque la telemetrie ne peut pas en emettre. Modele Mullvad (a copier, documente dans `docs/logging-and-telemetry.md`):
+Le paradoxe: un logiciel qui bloque la telemetrie ne peut pas en emettre. Modele Mullvad (a copier, documente dans `docs/logging-and-telemetry.md`):
 - Logs ecrits **localement** par le service et le GUI, **jamais envoyes automatiquement**.
 - Envoi **uniquement** via le formulaire "Report a problem"; les logs sont **anonymises** avant envoi (l'utilisateur peut les visualiser via "View app logs"), et l'email est optionnel.
 - Ne jamais logger: numero de compte, device id, device name, cle WireGuard. Redaction automatique de: tout nombre a 16 chiffres, repertoire home (pour masquer le username), IP et adresses MAC, UUID v4 (IDs de compte/device, GUID d'interface sur Windows).
@@ -617,7 +617,7 @@ Pieges connus (issues GitHub des projets etudies):
 
 **Etape 4 (J7-J8):** Diagnostic local opt-in facon Mullvad (redaction automatique: 16 chiffres, home, IP/MAC, UUID) + crashpad/GlitchTip auto-heberge. Mettre en place la documentation technique et le processus de reporting CRA (early warning 24h, notification 72h, rapport final 14 jours) avant le 11 septembre 2026, et viser la conformite complete + CE avant le 11 decembre 2027.
 
-Seuils qui changent les recommandations: si le produit ajoute un driver kernel -> EV + Partner Center + attestation signing obligatoires. Si le volume de telechargements est faible -> anticiper des warnings SmartScreen prolonges (pas de raccourci EV). Si l'equipe est plus forte en Go qu'en Rust -> Wails + wireguard-go est une alternative validee par Tailscale/WireGuard.
+Seuils qui changent les recommandations: si le logiciel ajoute un driver kernel -> EV + Partner Center + attestation signing obligatoires. Si le volume de telechargements est faible -> anticiper des warnings SmartScreen prolonges (pas de raccourci EV). Si l'equipe est plus forte en Go qu'en Rust -> Wails + wireguard-go est une alternative validee par Tailscale/WireGuard.
 
 ## Caveats
 

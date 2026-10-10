@@ -1,9 +1,9 @@
 # Bifrost - Couche "anonymat reel": architecture de sortie, modeles de menace et implementation (etat au 25 juillet 2026)
 
 ## TL;DR
-- Un VPN auto-heberge mono-utilisateur ne fournit PAS d'anonymat: l'IP de sortie unique est un identifiant stable attribuable a une personne, ce qui le rend inferieur a un pool commercial partage face aux adversaires 1, 2 et 4. Il fournit de la confidentialite et du controle, pas de l'anonymat. Le produit doit refuser le mot "anonymat" pour le mono-saut et le reserver aux modes Tor/Nym.
+- Un VPN auto-heberge mono-utilisateur ne fournit PAS d'anonymat: l'IP de sortie unique est un identifiant stable attribuable a une personne, ce qui le rend inferieur a un pool commercial partage face aux adversaires 1, 2 et 4. Il fournit de la confidentialite et du controle, pas de l'anonymat. Le logiciel doit refuser le mot "anonymat" pour le mono-saut et le reserver aux modes Tor/Nym.
 - La recommandation par defaut pour "anonymat renforce" est l'architecture hybride client -> VPS perso (entree, resistance DPI, controle) -> Mullvad/IVPN (sortie, foule partagee), mais elle viole les CGU de Mullvad et n'echappe pas a la correlation par adversaire global. Le seul mode qui resiste reellement a la correlation de trafic est le mixnet Nym en mode Anonymous (5 sauts) ou Tor, au prix d'une latence multipliee.
-- En 2026, l'IP de sortie n'est plus le facteur limitant dominant pour la plupart des utilisateurs: le fingerprinting applicatif (JA4/JA4+, canvas, comptes connectes) domine. Un produit honnete doit dire que sans navigateur durci et sans discipline de compte, aucune architecture reseau ne rend anonyme.
+- En 2026, l'IP de sortie n'est plus le facteur limitant dominant pour la plupart des utilisateurs: le fingerprinting applicatif (JA4/JA4+, canvas, comptes connectes) domine. Un logiciel honnete doit dire que sans navigateur durci et sans discipline de compte, aucune architecture reseau ne rend anonyme.
 
 ## Key Findings
 
@@ -42,7 +42,7 @@ Definitions operationnelles:
 
 **Donnees publiques sur la taille des pools commerciaux:** les fournisseurs ne publient pas de compte d'utilisateurs simultanes par serveur en temps reel. On sait que des centaines a des milliers d'utilisateurs partagent une meme IP de sortie chez les grands fournisseurs, ce qui est structurellement superieur a 1. C'est une information dont la precision est incertaine et qui doit etre presentee comme telle.
 
-**L'IP de sortie est-elle le facteur limitant en 2026 ? Reponse honnete: non, pour la plupart des cas.** Le fingerprinting applicatif domine. En 2026, JA4+ est le standard universel de fingerprinting TLS adopte par Cloudflare, AWS, VirusTotal, Akamai (source: krowdev "How Websites Detect Bots in 2026", proxies.sx guide JA4+ 2026). Le blog Cloudflare "JA4 Signals" indique analyser "over 15 million unique JA4 fingerprints generated from more than 500 million user agents and billions of IP addresses" par jour, et correler JA4 contre le user-agent declare (une incoherence est un signal primaire). La correlation cross-session par canvas, WebGL, polices et surtout comptes connectes rend l'IP presque secondaire. Conclusion pour le produit: sans discipline navigateur et compte, changer d'IP ne rend pas anonyme.
+**L'IP de sortie est-elle le facteur limitant en 2026 ? Reponse honnete: non, pour la plupart des cas.** Le fingerprinting applicatif domine. En 2026, JA4+ est le standard universel de fingerprinting TLS adopte par Cloudflare, AWS, VirusTotal, Akamai (source: krowdev "How Websites Detect Bots in 2026", proxies.sx guide JA4+ 2026). Le blog Cloudflare "JA4 Signals" indique analyser "over 15 million unique JA4 fingerprints generated from more than 500 million user agents and billions of IP addresses" par jour, et correler JA4 contre le user-agent declare (une incoherence est un signal primaire). La correlation cross-session par canvas, WebGL, polices et surtout comptes connectes rend l'IP presque secondaire. Conclusion pour le logiciel: sans discipline navigateur et compte, changer d'IP ne rend pas anonyme.
 
 ### PARTIE 2 - ARCHITECTURES DE SORTIE COMPAREES
 
@@ -58,7 +58,7 @@ Tableau de synthese (latences ajoutees indicatives, a valider par mesure sur vot
 | 2.6 Pools tournants / residentiel | variable | variable | eleve | elevee | oui | detectable/ethiquement problematique | variable | non |
 
 #### 2.1 Mono-saut VPS proprietaire
-Suffisant contre A1 (FAI, traqueurs) et pour contourner la censure/geoblocage. Dangereux des que l'adversaire est A2 ou plus: l'IP unique devient un identifiant. A n'exposer dans le produit que comme "confidentialite/controle", jamais comme "anonymat".
+Suffisant contre A1 (FAI, traqueurs) et pour contourner la censure/geoblocage. Dangereux des que l'adversaire est A2 ou plus: l'IP unique devient un identifiant. A n'exposer dans le logiciel que comme "confidentialite/controle", jamais comme "anonymat".
 
 #### 2.2 Multi-hop entre VPS de juridictions differentes
 Construction par WireGuard chaine. Principe cle (documente par Pro Custodibus "Multi-Hop WireGuard", 2022): `AllowedIPs` definit ce qui est route vers chaque peer; pour tout envoyer via le dernier saut, on met `0.0.0.0/0, ::/0`. Sur le VPS intermediaire, activer le forwarding et le NAT (masquerade).
@@ -109,7 +109,7 @@ curl -sSL https://api.mullvad.net/app/v1/wireguard-keys \
 ```
 Le routage se fait comme en 2.2 (le peer Mullvad porte `AllowedIPs = 0.0.0.0/0`).
 
-**CGU: c'est un point bloquant pour une integration dans le produit.** Les CGU de Mullvad interdisent explicitement (verbatim): "You are prohibited from utilizing this service to provide a service similar to that provided by Mullvad or other services where VPN constitutes a significant part of the service." Un usage personnel sur son propre VPS n'est pas une revente, mais integrer Mullvad comme saut de sortie dans le produit distribue a des tiers viole ces CGU. **Recommandation: ne pas cabler Mullvad/IVPN en dur dans le produit; laisser l'utilisateur fournir son propre compte.** Note: Mullvad a mis fin a OpenVPN le 15 janvier 2026 (WireGuard only).
+**CGU: c'est un point bloquant pour une integration dans le logiciel.** Les CGU de Mullvad interdisent explicitement (verbatim): "You are prohibited from utilizing this service to provide a service similar to that provided by Mullvad or other services where VPN constitutes a significant part of the service." Un usage personnel sur son propre VPS n'est pas une revente, mais integrer Mullvad comme saut de sortie dans le logiciel distribue a des tiers viole ces CGU. **Recommandation: ne pas cabler Mullvad/IVPN en dur dans le logiciel; laisser l'utilisateur fournir son propre compte.** Note: Mullvad a mis fin a OpenVPN le 15 janvier 2026 (WireGuard only).
 
 **Est-ce le meilleur des deux mondes ? Partiellement, et avec des failles.** Gains: foule partagee cote sortie (bat partiellement A2 sur l'IP), controle et anti-DPI cote entree, protection contre A3 (Mullvad ne voit pas votre client, votre VPS ne voit pas la destination reelle en clair). Failles: (1) l'IP de sortie Mullvad est partagee mais largement bloquee/CAPTCHAee par les plateformes; (2) ne bat pas A4 (correlation globale); (3) viole les CGU; (4) ajoute un point de confiance (Mullvad); (5) l'obfuscation anti-censure de Mullvad est indisponible hors app officielle (WireGuard nu perd cet avantage).
 
@@ -152,8 +152,8 @@ AutomapHostsOnResolve 1
 
 #### 2.6 Pools d'IP tournants et sorties multiples
 - **Rotation d'IP entre plusieurs VPS:** faisable, mais cree un motif detectable (meme fingerprint applicatif surgissant depuis un jeu d'IP correlees) et n'augmente pas l'ensemble d'anonymat cote fingerprint. Amelioration d'anonymat marginale voire negative.
-- **Sortie residentielle (proxies residentiels):** techniquement efficace contre le blocage (hCaptcha, aout 2025: les principaux WAF/CDN detectent "less than 10% of requests in some attacks using residential proxies"), mais **ethiquement et legalement toxique**: une part majeure de l'offre provient de malware et de SDK revendant la bande passante d'utilisateurs a leur insu. Le PSA du FBI de juin 2025 sur BADBOX 2.0 decrit "millions of infected devices" maintenant des backdoors vers des services proxy (>1 million d'appareils selon HUMAN Satori mars 2025, jusqu'a 10 millions d'appareils AOSP selon Google); le botnet apparente mesure par Lumen Black Lotus Labs compte "between 1.5 million and 2.5 million distinct IP addresses each day". Alerte FBI 2026 sur les proxies residentiels. **A proscrire dans un produit qui se veut ethique.**
-- **Sortie mobile CGNAT:** meilleure foule theorique (enorme, blocage quasi impossible car IP partagee par des milliers d'abonnes), mais peu praticable et peu stable pour une petite structure (necessite SIM/modems, IP non routable entrante, gestion CGNAT). Interessant en theorie, marginal en pratique pour un produit.
+- **Sortie residentielle (proxies residentiels):** techniquement efficace contre le blocage (hCaptcha, aout 2025: les principaux WAF/CDN detectent "less than 10% of requests in some attacks using residential proxies"), mais **ethiquement et legalement toxique**: une part majeure de l'offre provient de malware et de SDK revendant la bande passante d'utilisateurs a leur insu. Le PSA du FBI de juin 2025 sur BADBOX 2.0 decrit "millions of infected devices" maintenant des backdoors vers des services proxy (>1 million d'appareils selon HUMAN Satori mars 2025, jusqu'a 10 millions d'appareils AOSP selon Google); le botnet apparente mesure par Lumen Black Lotus Labs compte "between 1.5 million and 2.5 million distinct IP addresses each day". Alerte FBI 2026 sur les proxies residentiels. **A proscrire dans un logiciel qui se veut ethique.**
+- **Sortie mobile CGNAT:** meilleure foule theorique (enorme, blocage quasi impossible car IP partagee par des milliers d'abonnes), mais peu praticable et peu stable pour une petite structure (necessite SIM/modems, IP non routable entrante, gestion CGNAT). Interessant en theorie, marginal en pratique pour un logiciel.
 
 #### 2.7 Decision finale par modele de menace
 
@@ -173,7 +173,7 @@ AutomapHostsOnResolve 1
 
 **Surcout mesure:** l'integration de padding a un cout non trivial. L'evaluation "State Machine Frameworks for Website Fingerprinting Defenses: Maybe Not" (arXiv:2310.10789) mesure, pour les portages RegulaTor sur Maybenot: "Maybenot RT-Light incurred 178.18% overhead... and Maybenot RT-Heavy's overhead was 212.96%", avec une latence de l'ordre de 15 a 22%, concluant qu'un surcout d'environ 108% en bande passante "makes Maybenot RegulaTor too costly for implementation in Tor". Mullvad limite donc DAITA au saut client<->serveur avec des defenses calibrees.
 
-**Integration dans un produit tiers: oui.** Maybenot (framework + simulateur) est sur crates.io "dual-licensed under either the MIT or Apache 2.0 license", avec un wrapper FFI (maybenot-ffi) de meme licence. Maturite: bibliotheque en production chez Mullvad. Effort: reutiliser le binding FFI dans votre wireguard-go; l'issue netbird #2366 documente le chemin ("Incorporate maybenot using maybenot's-ffi c binding into wireguard-go. Mullvad has done so with their wireguard-go-rs wrapper, meaning that most of the heavy lifting is done").
+**Integration dans un logiciel tiers: oui.** Maybenot (framework + simulateur) est sur crates.io "dual-licensed under either the MIT or Apache 2.0 license", avec un wrapper FFI (maybenot-ffi) de meme licence. Maturite: bibliotheque en production chez Mullvad. Effort: reutiliser le binding FFI dans votre wireguard-go; l'issue netbird #2366 documente le chemin ("Incorporate maybenot using maybenot's-ffi c binding into wireguard-go. Mullvad has done so with their wireguard-go-rs wrapper, meaning that most of the heavy lifting is done").
 
 **Autres defenses (cout/efficacite):**
 - Padding constant a debit fixe: efficace mais gaspilleur (bande passante constante).
@@ -254,15 +254,15 @@ find /var/log -type f -exec shred -u {} \; 2>/dev/null
 3. **Identifiants materiels / telemetrie OS**.
 4. **IP de sortie**: important seulement en l'absence des trois precedents.
 
-**Ce que le produit peut faire au niveau OS vs ce qui exige une VM/OS dedie:**
-- Au niveau OS/produit: tunnel, kill switch fail-closed, DNS local, anti-telemetrie (deja fait), routage multi-hop/Tor/Nym.
+**Ce que le logiciel peut faire au niveau OS vs ce qui exige une VM/OS dedie:**
+- Au niveau OS/logiciel: tunnel, kill switch fail-closed, DNS local, anti-telemetrie (deja fait), routage multi-hop/Tor/Nym.
 - Exige une VM ou un OS dedie: isolation reseau anti-fuite meme si l'appli est compromise (**Whonix 18**, base Debian 13, Gateway Tor + Workstation isolee, requiert Qubes 4.3; Kloak anti-fingerprint de frappe reecrit en Wayland; supporte jusqu'en 2026 par Power Up Privacy), amnesie (**Tails**, fusionne avec le Tor Project depuis septembre 2024), compartimentation (**Qubes OS 4.3**, event buffering par defaut), durcissement general sans anonymat force (**Kicksecure**).
 
-**Navigateur durci: recommander, ne pas reinventer.** N'integrez PAS un navigateur maison (vous heriteriez de tout le fardeau anti-fingerprint). Recommandez **Mullvad Browser** (fingerprint uniformise, sans Tor, pour usage VPN) et **Tor Browser** (pour anonymat reseau). C'est la position honnete: le produit gere le reseau, le navigateur gere l'application.
+**Navigateur durci: recommander, ne pas reinventer.** N'integrez PAS un navigateur maison (vous heriteriez de tout le fardeau anti-fingerprint). Recommandez **Mullvad Browser** (fingerprint uniformise, sans Tor, pour usage VPN) et **Tor Browser** (pour anonymat reseau). C'est la position honnete: le logiciel gere le reseau, le navigateur gere l'application.
 
-**Risque de fausse securite:** un utilisateur qui se croit anonyme en mono-saut et qui ne l'est pas est en danger accru (il baisse la garde). Le produit doit communiquer le niveau reel par mode (voir Partie 6 UI) et afficher explicitement "ceci ne vous rend pas anonyme envers les sites ou vous etes connecte".
+**Risque de fausse securite:** un utilisateur qui se croit anonyme en mono-saut et qui ne l'est pas est en danger accru (il baisse la garde). Le logiciel doit communiquer le niveau reel par mode (voir Partie 6 UI) et afficher explicitement "ceci ne vous rend pas anonyme envers les sites ou vous etes connecte".
 
-### PARTIE 6 - IMPLEMENTATION DANS LE PRODUIT
+### PARTIE 6 - IMPLEMENTATION DANS LE LOGICIEL
 
 **Architecture logicielle.** Vous avez deja sing-box et WireGuard. Modelez le chainage comme une pile d'"outbounds" ordonnee:
 - Entree: votre couche anti-DPI (VLESS+REALITY+Vision, XHTTP-CDN, Hysteria2, AmneziaWG) inchangee.
@@ -310,7 +310,7 @@ Afficher a chaque niveau la phrase honnete: "Aucun niveau ne vous rend anonyme s
 
 **Ce qu'aucune architecture ne protege:** les comptes connectes; le fingerprint applicatif si le navigateur n'est pas durci; la correlation par un adversaire global si le trafic est low-latency; les erreurs d'OpSec (paiement lie a l'identite, connexion depuis l'IP domestique); les metadonnees hors de votre controle (netflow datacenter, hyperviseur).
 
-**Un produit peut-il honnetement promettre l'anonymat ? Non.** Position argumentee: promettre l'anonymat serait mensonger car (1) l'IP de sortie unique d'un auto-heberge est un identifiant, (2) le fingerprint applicatif domine et echappe au reseau, (3) la correlation globale bat toute architecture low-latency, (4) sur infrastructure louee subsiste un residu de confiance irreductible. **Le produit doit promettre confidentialite, controle et resistance a la censure, et parler d'anonymat UNIQUEMENT pour les modes Tor/Nym Anonymous, en explicitant leurs limites.**
+**Un logiciel peut-il honnetement promettre l'anonymat ? Non.** Position argumentee: promettre l'anonymat serait mensonger car (1) l'IP de sortie unique d'un auto-heberge est un identifiant, (2) le fingerprint applicatif domine et echappe au reseau, (3) la correlation globale bat toute architecture low-latency, (4) sur infrastructure louee subsiste un residu de confiance irreductible. **Le logiciel doit promettre confidentialite, controle et resistance a la censure, et parler d'anonymat UNIQUEMENT pour les modes Tor/Nym Anonymous, en explicitant leurs limites.**
 
 **Risque de reputation et d'abus.** Un outil d'anonymat fort attire des usages illicites. Gestion par les projets existants: Tor assume et documente (transparence, recherche ouverte, cooperation limitee aux abus techniques); Mullvad refuse de detenir des donnees (rien a livrer, comme prouve en avril 2023) et communique honnetement ses limites; Njalla agit comme proxy de confidentialite mais se reserve de transmettre l'email/XMPP aux autorites en cas de violation grave de sa politique. **Recommandation produit:** politique d'usage acceptable claire, absence de logs par design (vous ne pouvez pas livrer ce que vous n'avez pas), communication honnete du niveau de protection, et refus explicite des sorties residentielles issues de malware.
 

@@ -152,7 +152,7 @@ monte, et de n'ouvrir NTP au demarrage que le temps d'une resynchronisation.
 - **Mise a jour, telemetrie, tout le reste.** Par defaut, le filtre de
   demarrage bloque; ce document ne liste que les trous.
 
-## 4. Deux decisions de produit qui ne sont pas des options
+## 4. Deux decisions de conception qui ne sont pas des options
 
 **Le filtre de demarrage est OPT-IN.** Mullvad ne pose ses filtres persistants
 que si l'utilisateur a active le mode lockdown ou la connexion automatique.
@@ -174,7 +174,7 @@ Machines jointes a un domaine: un blocage au demarrage retarde ou casse
 l'ouverture de session quand un controleur de domaine n'est pas joignable, et
 les strategies de groupe ne s'appliquent pas. Microsoft documente le probleme
 pour son propre Always On VPN, ou un filtre de trafic sur le tunnel machine
-produit ces symptomes. A traiter le jour ou le produit vise ce public, pas
+produit ces symptomes. A traiter le jour ou le logiciel vise ce public, pas
 avant.
 
 ## Sources

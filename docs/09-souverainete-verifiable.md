@@ -1,6 +1,6 @@
 # 09 - Souverainete verifiable
 
-Date: 27 septembre 2026. Specification de produit et criteres de livraison.
+Date: 27 septembre 2026. Specification du logiciel et criteres de livraison.
 Ce document complete 01 a 07, sans promouvoir leurs pistes en fonctions livrees.
 Le numero 08 est reserve au chantier d'interface maintenu separement.
 L'etat de reference PUBLIC est e983fb9. Voir ETAT.md pour les tranches suivantes.
@@ -172,7 +172,7 @@ cree son propre namespace sans lien externe sur runner Linux jetable: MATCH,
 regle ajoutee -> MISMATCH, droits retires -> UNMEASURED, table retiree ->
 MISMATCH. La capture avant/apres le controle doit rester identique.
 
-#### D1b.3a - Reference produit depuis une intention versionnee
+#### D1b.3a - Reference de Bifrost depuis une intention versionnee
 
 `bifrost-cli --json prove nft --politique intention.json --actif`
 
@@ -196,7 +196,7 @@ apres validation. Pour une capture de reference, `expected_source` vaut
 `user-supplied-snapshot` et `policy_schema_version` est null. Aucun parametre de
 l'intention n'est exporte. `network_security` reste `not-evaluated`.
 
-La reference couvre le ruleset produit complet (input/output/forward, DNS,
+La reference couvre le ruleset de Bifrost complet (input/output/forward, DNS,
 DHCP, NDP, marque, interface, LAN et exceptions par UID), pas les seules regles
 qui portent le nom Bifrost. Une table ou un objet nomme tiers rend MISMATCH;
 un type d'objet que le comparateur ne lit pas rend UNMEASURED. Aucun tri global
@@ -206,7 +206,7 @@ une difference de representation entre versions peut rendre un ecart et doit
 etre examinee, pas ignoree automatiquement.
 
 Acceptation: 64 combinaisons interface/marque/LAN/coeur/resolveur/DNS IPv6. Le
-banc jetable applique le rendu texte REEL du produit, puis le compare a la
+banc jetable applique le rendu texte REEL du logiciel, puis le compare a la
 reference pure, hors ligne et via la collecte active. Les captures avant/apres
 doivent rester identiques. Table tierce et permis non prevu deviennent MISMATCH.
 Les tests sans privileges couvrent aussi l'intention invalide, l'ordre des
@@ -246,7 +246,7 @@ resolveur root, compte partage entre les deux, ou moteur autre que nftables
 sortent du perimetre de la reference et rendent UNMEASURED, jamais MATCH. Un
 noyau different de la declaration rend MISMATCH. La declaration ne porte aucun
 objet nft nomme: un objet tiers, dans une table tierce ou dans celle du
-produit, rend MISMATCH avec sa categorie, comme une table tierce (voir D1b.3c).
+logiciel, rend MISMATCH avec sa categorie, comme une table tierce (voir D1b.3c).
 
 `--politique-daemon` exclut `--attendu`, `--politique` et `--observe`, et exige
 donc `--actif`. Le rapport garde `schema_version=1` et `policy_schema_version=1`,
@@ -354,7 +354,7 @@ valeurs ne vont qu'a un appelant admis sur le canal du daemon, et la preuve ne
 les recopie jamais dans son rapport. La projection nft des autres moteurs est
 inchangee; les deux ne se lisent jamais l'une pour l'autre.
 
-La reference est rendue par le plan WFP du produit et par la MEME traduction
+La reference est rendue par le plan WFP du logiciel et par la MEME traduction
 que la pose, jamais par une copie ecrite a la main: une condition inapplicable a
 sa couche fait echouer la reference comme elle fait echouer la pose. Elle a
 besoin de deux valeurs de l'hote qui prouve (identifiant d'application d'un
@@ -397,7 +397,7 @@ Objets nft nommes, livre. Constat avant, mesure le 30/09/2026 sur le client de
 `eb325b3`, nft 1.0.9, noyau 7.0, en namespace jetable a cote du ruleset que
 pose le daemon reel: un seul set, map, flowtable, counter, quota, limit,
 ct helper, ct timeout, ct expectation ou synproxy pose par un tiers, dans une
-table tierce ou dans celle du produit, rendait les trois modes UNMEASURED
+table tierce ou dans celle du logiciel, rendait les trois modes UNMEASURED
 (`type d'objet nft non pris en charge`), meme face a une reference qui portait
 l'objet identique; seule une table tierce vide rendait MISMATCH en
 `--politique-daemon`. Sur un hote ou un pare-feu tiers pose un set, la preuve
@@ -408,7 +408,7 @@ Apres: les dix types sont lus et compares (voir D1b.1). `--observe` et
 `--actif` correspondent, apres trafic, a une reference qui porte les memes
 objets. `--politique-daemon` rend MISMATCH avec la categorie de ce qui est en
 plus (`tables` et `sets` pour un set dans une table tierce, `counters` seul
-pour un counter ajoute a la table du produit): la declaration n'en porte aucun,
+pour un counter ajoute a la table du logiciel): la declaration n'en porte aucun,
 et un objet que le daemon n'a pas pose n'est pas ce qu'il declare, qu'une regle
 le reference ou non. Un type que le comparateur ne lit pas reste UNMEASURED,
 meme la ou une table tierce suffirait a conclure a un ecart.
@@ -427,7 +427,7 @@ objet de chaque type lu. Apres trafic et plus d'une seconde, chacune des six
 valeurs d'etat ignorees a change (temoin) et la collecte active correspond.
 Element ajoute, element retire, flag de set, valeur de map, priorite et
 peripheriques de flowtable, counter retire, limite de quota, debit de limit,
-set tiers ajoute, counter ajoute a la table du produit: chacun un ecart de sa
+set tiers ajoute, counter ajoute a la table du logiciel: chacun un ecart de sa
 seule categorie, puis correspondance une fois repose. Face au daemon reel, un
 set tiers rend `tables` et `sets`, un counter ajoute a sa table `counters`,
 puis correspondance une fois retires. Avec le client de `eb325b3`, le banc
@@ -445,7 +445,7 @@ daemon; sous Windows, la preuve n'admet que le pipe de LocalSystem, sans
 etablir non plus que son serveur est le daemon. Deux types d'objets nft
 (`secmark`, `tunnel`) ne sont pas lus. Une
 intention permissive ou obsolete n'est pas rendue fiable par le fait que le
-produit sait la representer, ni par le fait que le daemon la declare.
+logiciel sait la representer, ni par le fait que le daemon la declare.
 
 ### D1c - Routes, DNS et provenance (en cours)
 
@@ -464,24 +464,24 @@ L'intention v1 porte exactement `schema_version=1`, `chemin` (`wireguard` ou
 `coeur`), `interface`, `fwmark`, `table` et `coeur_uid`, tous obligatoires.
 WireGuard exige une marque non nulle et une table hors de celles que le noyau
 se reserve (0, 253, 254, 255), sans compte de coeur; le coeur n'a ni marque ni
-table (la sienne est fixee par le produit) et un compte non nul ou null. Le nom
-d'interface suit la regle du produit, sans `lo`. Champs inconnus ou manquants,
+table (la sienne est fixee par le logiciel) et un compte non nul ou null. Le nom
+d'interface suit la regle du logiciel, sans `lo`. Champs inconnus ou manquants,
 cles dupliquees, nombres non entiers et version inconnue sont refuses avant
 toute lecture du noyau, avec les plafonds de lecture de D1b.1. Les deux
-familles sont toujours attendues: le produit pose toujours les deux.
+familles sont toujours attendues: le logiciel pose toujours les deux.
 
-L'attendu est le plan que le produit pose, `bifrost_core::routage::Plan`: depuis
+L'attendu est le plan que le logiciel pose, `bifrost_core::routage::Plan`: depuis
 D1c.1, `netcfg::add_routing` (WireGuard) et `aiguillage::poser` (coeur) tirent
 leurs commandes `ip` de ce plan, au lieu de les ecrire chacun. Les commandes
 executees sont celles d'avant, dans le meme ordre, et depuis le 30/09/2026
-chacune porte en dernier l'etiquette du produit (`protocol 177` sur une regle,
+chacune porte en dernier l'etiquette du logiciel (`protocol 177` sur une regle,
 `proto 177` sur une route; recettes de reference du daemon). L'etiquette ne
 change aucune decision de routage et la preuve ne la compare pas: une regle ou
 une route tierce identique a celle du plan, sans etiquette, passe donc pour
-celle du produit. L'etiquette sert au demontage, qui tire du meme plan le
+celle du logiciel. L'etiquette sert au demontage, qui tire du meme plan le
 retrait exact de chaque commande de pose et ne retire rien qui ne la porte pas.
 Depuis le 02/10/2026 l'etiquette seule ne designe plus rien: chaque session du
-produit s'inscrit, avant sa premiere commande, au journal des sessions du
+logiciel s'inscrit, avant sa premiere commande, au journal des sessions du
 daemon, et le retrait ne vise que ce qu'une session inscrite a pose, par sa
 forme, la priorite que le noyau a donnee a chaque regle et son interface; un
 objet a l'etiquette qu'aucune session inscrite n'explique fait refuser le
@@ -512,7 +512,7 @@ s'annule entre les deux lectures echappe. `ip -j` est ecarte, car iproute2
 
 Comparaison, famille par famille, avec les ecarts dans cet ordre:
 - `<famille>-product-rules`: chaque regle du plan est presente une seule fois,
-  avec son contenu exact, sa priorite quand le produit la fixe, et dans l'ordre
+  avec son contenu exact, sa priorite quand le logiciel la fixe, et dans l'ordre
   d'evaluation du plan.
 - `<famille>-rules-before-tunnel`: une regle tierce evaluee avant celle du
   tunnel, qui consulte une autre table ou qui saute. La table `local` est
@@ -567,7 +567,7 @@ par le lien:
 - la multidiffusion part sur le lien. Le noyau pose `ff00::/8` sur chaque
   interface IPv6, dans `local`, consultee avant le tunnel: une destination de
   multidiffusion IPv6, de toute portee, sort par le lien physique avec la
-  seule pose du produit.
+  seule pose du logiciel.
 
 Le perimetre est `linux-routing-comparison`, la source
 `kernel-rtnetlink-read-twice`, et
@@ -589,7 +589,7 @@ Limites:
 MATCH n'est pas une preuve d'etancheite du VPN.
 
 Acceptation, banc jetable `scripts/preuve-routes-linux.sh` (un namespace par
-cas). Les commandes que le produit rend, appliquees telles quelles,
+cas). Les commandes que le logiciel rend, appliquees telles quelles,
 correspondent pour les deux chemins, en root comme sans privilege, et la preuve
 ne change pas l'etat du namespace. Un temoin d'emission accompagne les cas: un
 datagramme envoye dans le namespace, diffusion permise, et les compteurs
@@ -633,7 +633,7 @@ reussie de sa pose: egal par construction au plan dont les commandes sont
 tirees, ce n'est pas une capture des commandes elles-memes. Le superviseur le
 retient a chaque montage et demontage (`TunnelDevice::routage_pose`), sans rien
 recalculer d'un profil, et la preuve le reconstruit au meme constructeur que le
-produit. En mode daemon, l'etiquette du produit (`protocol`/`proto 177`) est
+logiciel. En mode daemon, l'etiquette du logiciel (`protocol`/`proto 177`) est
 EXIGEE sur les regles et la route du plan: un daemon reel pose avec elle, donc
 une regle ou une route identique a un autre originateur n'est pas la sienne; le
 mode `--intention` l'ignore. Rien pose: le rapport le dit (issue `aucun`), sans
@@ -649,7 +649,7 @@ deconnexion, l'hote inchange.
 `bifrost-cli --json prove routes --intention intention.json --actif` et
 `bifrost-cli --json prove routes --politique-daemon --actif`, sous Windows.
 
-Ce que le produit pose. Les deux chemins posent par les memes appels IP
+Ce que le logiciel pose. Les deux chemins posent par les memes appels IP
 Helper, sur le LUID de l'interface du tunnel, dans cet ordre: les adresses du
 profil (`CreateUnicastIpAddressEntry`); une ligne d'interface par famille
 adressee (`GetIpInterfaceEntry` puis `SetIpInterfaceEntry`: MTU du profil,
@@ -658,7 +658,7 @@ la famille, metrique automatique coupee et metrique a zero); puis les routes
 (`CreateIpForwardEntry2`, prochain saut non specifie, metrique zero).
 WireGuard pose une route par prefixe autorise, masquee et dedoublonnee; le
 chemin par coeur pose la route par defaut de chaque famille adressee sur son
-TUN. C'est le produit qui pose ces routes, pas le coeur, dont l'echappement
+TUN. C'est le logiciel qui pose ces routes, pas le coeur, dont l'echappement
 passe par sa socket liee a l'interface physique. Le plan vit dans
 `bifrost_core::routage_windows::PlanWindows`: `wgnt::ipcfg::apply` et `remove`
 en tirent chacun de leurs appels, les memes qu'avant, dans le meme ordre et
@@ -668,7 +668,7 @@ reconstruit au meme constructeur. Il n'y a pas de seconde implementation.
 L'intention Windows v1 est distincte de celle de Linux, dont `fwmark`,
 `table` et `coeur_uid` n'ont pas de sens ici. Elle porte exactement
 `schema_version` (1), `plateforme` (`windows`), `chemin` (`wireguard` ou
-`coeur`), `interface` (la regle de nom du produit), `mtu` (de 576 a 9000),
+`coeur`), `interface` (la regle de nom du logiciel), `mtu` (de 576 a 9000),
 `familles` (`ipv4`, `ipv6`, dans cet ordre, sans doublon, au moins une) et
 `destinations` (WireGuard: au moins un prefixe, masque, sous sa forme
 canonique, sans doublon; coeur: `null`). Champs inconnus ou manquants, cles
@@ -759,7 +759,7 @@ Limites:
 - un changement qui s'annule entre les deux collectes, ou ce qui est pose
   apres la collecte, n'est pas vu;
 - Windows ne porte aucune etiquette de proprietaire sur une route: une route
-  identique a celle du plan, posee par un tiers, passe pour celle du produit;
+  identique a celle du plan, posee par un tiers, passe pour celle du logiciel;
 - une route connectee est admise quelle que soit la largeur du reseau de son
   adresse, et la multidiffusion et la diffusion limitee partent sur le lien;
 - l'ordre de liaison n'est pas lu: une egalite rend UNMEASURED;
@@ -816,16 +816,16 @@ declaration du daemon, figent ce cas.
 
 L'intention v1 porte exactement `schema_version` (1), `backend`
 (`systemd-resolved` ou `resolv-conf`), `interface` (la regle de nom du
-produit, sans `lo`), `local_resolver`, `upstream` (1 a 16 adresses sous leur
+logiciel, sans `lo`), `local_resolver`, `upstream` (1 a 16 adresses sous leur
 forme canonique, sans doublon), `embarque` et `resolveur_uid` (`null`, ou le
 compte non nul du resolveur embarque, admis seulement avec lui), tous
-obligatoires, et doit passer la regle DNS du produit (`DnsPolicy::validate`).
+obligatoires, et doit passer la regle DNS du logiciel (`DnsPolicy::validate`).
 Le backend est declare: le daemon le choisit a l'execution et ne l'ecrit
 nulle part. Champs inconnus ou manquants, cles dupliquees, nombres non
 entiers et version inconnue sont refuses avant toute lecture du systeme, avec
 les plafonds de lecture de D1b.1.
 
-L'attendu est le plan DNS que le produit pose,
+L'attendu est le plan DNS que le logiciel pose,
 `bifrost_core::plan_dns::PlanDns`: le lien du tunnel et les serveurs a
 interroger, le resolveur embarque seul quand il y en a un, sinon les amonts
 dans l'ordre du profil. Depuis D1c.4, `bifrost_dns::linux` tire de ce plan
@@ -878,7 +878,7 @@ d'en-tete inconnu d'un type de base aussi, comme la specification l'exige.
 Le Manager rend chaque serveur sous l'index de l'interface par laquelle
 resolved l'interroge (`dns_server_ifindex`, systemd 255 et 262), pas sous sa
 portee: un serveur de bouclage y porte l'index de `lo` quel que soit le lien
-qui le porte. Mesure au banc: le resolveur embarque, pose par le produit sur
+qui le porte. Mesure au banc: le resolveur embarque, pose par le logiciel sur
 le lien du tunnel, figure sous `lo` dans le `DNSEx` du Manager. Chaque serveur
 est donc rattache a sa portee par le `DNSEx` de son lien: ceux de chaque lien
 sont retires un a un du Manager, sous l'index que le Manager doit leur
@@ -908,7 +908,7 @@ Ecarts, dans cet ordre:
   mesure au banc, ou ce montage rend le mode `stub` alors que glibc interroge
   l'adresse du fichier monte;
 - `resolv-conf-content` (resolv-conf): le fichier differe du rendu du
-  produit, au bit pres;
+  logiciel, au bit pres;
 - `hosts-sources`: un module de la ligne `hosts` qui n'est ni `files`, ni
   `myhostname`, ni `mymachines`, ni `dns`, ni (resolved seulement)
   `resolve`, ni un module mDNS de la limite nommee;
@@ -978,7 +978,7 @@ N2) et le plan reconstruit au meme constructeur.
 Acceptation, banc jetable (`scripts/preuve-dns-linux.sh`): un systemd-resolved
 255 reel, sur un bus D-Bus prive, dans un namespace de montage prive et des
 namespaces reseau jetables, sans toucher au resolveur ni au bus de l'hote. La
-pose du produit, rendue par le produit et appliquee telle quelle par
+pose du logiciel, rendue par le logiciel et appliquee telle quelle par
 `resolvectl`, correspond, en compte ordinaire comme en root, avec les memes
 comptes. Chaque categorie provoquee donne son seul ecart, et un temoin
 d'emission (un repondeur DNS par lien, et une resolution par glibc) dit par
@@ -1130,7 +1130,7 @@ pas effacee par ce plan. Chaque tranche met a jour ETAT.md et ses limites.
 - [Microsoft Learn, MIB_IPINTERFACE_ROW](https://learn.microsoft.com/en-us/windows/win32/api/netioapi/ns-netioapi-mib_ipinterface_row):
   `Metric`, `UseAutomaticMetric`, `NlMtu`, `DadTransmits`.
 - [Microsoft Learn, CreateIpForwardEntry2](https://learn.microsoft.com/en-us/windows/win32/api/netioapi/nf-netioapi-createipforwardentry2):
-  la pose d'une route que le produit emploie.
+  la pose d'une route que le logiciel emploie.
 
 ## Sources primaires relues le 2 octobre 2026, pour D1c.4
 
