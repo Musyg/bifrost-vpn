@@ -7,10 +7,17 @@
 # Le champ Policy ci-dessous pointe sur le SECURITY.md publie dans le depot du
 # code. Le marqueur Musyg/bifrost-vpn est remplace par le nom du depot public.
 #
-# Pas de champ Encryption: aucune cle PGP n'est publiee pour l'instant. Le jour
-# ou une cle existera, ajouter ici une ligne Encryption pointant sur la cle et
-# basculer le statut de cle dans SECURITY.md; la garde security_txt_a_jour.rs
-# exige alors les deux fichiers coherents.
+# Une cle OpenPGP de chiffrement est publiee: le fichier
+# packaging/bifrost-security.asc du depot du code, que le champ Encryption
+# ci-dessous designe par sa copie brute sur la branche main. Empreinte de la
+# cle primaire: EEC9 B157 0FC1 336B EA0B  96E9 1E5F 702B 41B3 976C; expiration
+# le 2028-10-09. Pour la renouveler (prolongation ou remplacement, avant
+# l'echeance): publier la cle mise a jour au meme chemin, reporter la date et
+# l'empreinte ici, dans SECURITY.md et dans packaging/SECURITY-TXT.md, puis
+# recopier ce fichier sur le site. Procedure, revocation comprise:
+# packaging/SECURITY-TXT.md. La garde security_txt_a_jour.rs exige que
+# SECURITY.md et ce fichier disent la meme chose de la cle, et que le fichier
+# designe par Encryption soit dans le depot.
 #
 # Le champ Expires ci-dessous est fixe a environ dix mois (echeance 2027-07-01)
 # pour rester sous la limite d'un an recommandee par la RFC 9116 et forcer un
@@ -18,6 +25,7 @@
 # 30 jours ou a plus de 365 jours de maintenant.
 Contact: mailto:security@inaricom.com
 Expires: 2027-07-01T00:00:00Z
+Encryption: https://raw.githubusercontent.com/Musyg/bifrost-vpn/main/packaging/bifrost-security.asc
 Preferred-Languages: fr, en
 Canonical: https://inaricom.com/.well-known/security.txt
 Policy: https://github.com/Musyg/bifrost-vpn/blob/main/SECURITY.md

@@ -519,7 +519,7 @@ Consequence operationnelle : au lancement, pour un produit classe I, la voie Mod
 
 ### PARTIE 7 - PROGRAMME DE MISE EN OEUVRE
 
-**Indispensable au lancement :** modele de menace Threagile en CI ; CI securite (clippy/audit/deny/vet, gosec/govulncheck) ; fuzzing cargo-fuzz des parseurs (pose: dix-huit cibles, lecteurs de fichiers de la CLI compris, section 2.3) ; security.txt + politique CVD ; SBOM CycloneDX a chaque build ; durcissement compilation + verification winchecksec/checksec ; process interne Article 14.
+**Indispensable au lancement :** modele de menace Threagile en CI ; CI securite (clippy/audit/deny/vet, gosec/govulncheck) ; fuzzing cargo-fuzz des parseurs (pose: dix-huit cibles, lecteurs de fichiers de la CLI compris, section 2.3) ; security.txt + politique CVD (poses: `SECURITY.md`, `packaging/security.txt`, et depuis le 10/10/2026 la cle OpenPGP `packaging/bifrost-security.asc` que designe le champ Encryption) ; SBOM CycloneDX a chaque build ; durcissement compilation + verification winchecksec/checksec ; process interne Article 14.
 **Ensuite :** audit externe (viser OTF/NLnet gratuit) ; VDP puis bug bounty prive ; ClusterFuzzLite continu ; audit crypto dedie ; ISO 27001/SOC 2 a envisager.
 
 **Calendrier :**
