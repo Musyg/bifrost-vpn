@@ -1,0 +1,1 @@
+{"result":"declaration-dns","schema_version":1,"instance":"000000000000000000000000000000000000000000000000","application":1,"issue":"pose","plan":{"backend":"systemd-resolved","interface":"wg0","local_resolver":"127.0.0.1","upstream":["9.9.9.9"],"embarque":false,"resolveur_uid":null}}

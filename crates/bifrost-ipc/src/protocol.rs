@@ -156,6 +156,26 @@ pub enum Command {
     /// version de contenu ([`DECLARATION_ROUTAGE_WINDOWS_VERSION`]). Chaque
     /// lecteur strict n'accepte que la forme de sa plateforme.
     DeclarationRoutage,
+    /// Le plan DNS que le daemon a pose en dernier, et le gestionnaire qui l'a
+    /// pose.
+    ///
+    /// # Pourquoi une commande a part des deux autres declarations
+    ///
+    /// Le plan DNS n'est remis ni au moteur de pare-feu ni au peripherique du
+    /// tunnel: c'est le GESTIONNAIRE DNS (`DnsManager`) qui le pose, et son
+    /// backend est choisi a l'execution, sans etre ecrit nulle part ailleurs.
+    /// L'ajouter aux sept cles du pare-feu ou aux six du routage melerait trois
+    /// sources de verite et elargirait des formes que des lecteurs stricts
+    /// refusent. Cette commande est donc distincte, avec sa propre version de
+    /// contenu ([`DECLARATION_DNS_VERSION`]).
+    ///
+    /// # Ce qu'un appelant y gagne: une lecture
+    ///
+    /// Aucun parametre, aucun effet, meme controle d'acces que `Status`. Elle ne
+    /// transporte ni cle ni profil: seulement ce qui suffit a reconstruire le
+    /// plan DNS pose (voir [`PoseDns`]), et l'etat (pose, rien, echec, non
+    /// applicable).
+    DeclarationDns,
 }
 
 impl Command {
@@ -192,6 +212,7 @@ impl Command {
             Command::Reprise => "reprise",
             Command::DeclarationPareFeu => "declaration-pare-feu",
             Command::DeclarationRoutage => "declaration-routage",
+            Command::DeclarationDns => "declaration-dns",
         }
     }
 }
@@ -205,6 +226,7 @@ pub enum Response {
     DeclarationPareFeu(Box<DeclarationPareFeu>),
     DeclarationRoutage(Box<DeclarationRoutage>),
     DeclarationRoutageWindows(Box<DeclarationRoutageWindows>),
+    DeclarationDns(Box<DeclarationDns>),
     Error { message: String },
 }
 
@@ -399,6 +421,80 @@ pub struct DeclarationRoutageWindows {
     pub plan: Option<PlanRoutageWindows>,
 }
 
+/// Version du contenu de [`DeclarationDns`], distincte de [`PROTOCOL_VERSION`]
+/// et des versions des deux autres declarations: un lecteur strict refuse une
+/// forme qu'il ne connait pas plutot que d'en comparer une partie.
+pub const DECLARATION_DNS_VERSION: u32 = 1;
+
+/// L'etat du DNS que le daemon declare.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EtatDns {
+    /// Cette plateforme ne declare pas de plan DNS (hors Linux): la preuve DNS
+    /// ne lit que le resolveur systeme de Linux.
+    NonApplicable,
+    /// Rien de pose: aucune application depuis le demarrage, ou le plan a ete
+    /// oublie au debut d'un demontage.
+    Aucun,
+    /// La derniere application a reussi: le plan est joint.
+    Pose,
+    /// La derniere operation du gestionnaire DNS (application ou restauration)
+    /// a echoue. Le daemon ne sait pas ce que porte le resolveur du systeme, et
+    /// le dit: aucun plan n'est joint, pas meme le precedent.
+    Echec,
+}
+
+/// Ce que le daemon a EFFECTIVEMENT pose: ce qui suffit a reconstruire le plan
+/// DNS de Bifrost (`bifrost_core::plan_dns::PlanDns::nouveau`) et l'attendu de
+/// la preuve, et rien d'autre. Present si et seulement si
+/// [`DeclarationDns::issue`] vaut [`EtatDns::Pose`].
+///
+/// Ni cle, ni point d'acces: le backend du gestionnaire en service, le lien du
+/// tunnel, les adresses de la politique DNS appliquee, et le compte que la
+/// restriction du :53 nomme. Ces adresses ne sont transmises qu'a un appelant
+/// admis sur le canal du daemon, et une preuve ne les recopie jamais dans son
+/// rapport.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PoseDns {
+    /// `DnsManager::backend` du gestionnaire qui a pose, lu juste apres son
+    /// application reussie: `systemd-resolved` ou `resolv.conf` sous Linux.
+    pub backend: String,
+    /// Le lien du tunnel auquel le plan a ete remis.
+    pub interface: String,
+    /// `DnsPolicy::local_resolver` de la politique appliquee.
+    pub local_resolver: std::net::IpAddr,
+    /// `DnsPolicy::upstream`, dans l'ordre de la politique appliquee.
+    pub upstream: Vec<std::net::IpAddr>,
+    /// `DnsPolicy::embarque`: le systeme interroge la boucle locale.
+    pub embarque: bool,
+    /// Le compte du resolveur embarque, celui que la restriction du :53 du
+    /// kill switch nomme pour ce profil; `null` sans resolveur embarque, ou
+    /// sans compte declare.
+    pub resolveur_uid: Option<u32>,
+}
+
+/// Declaration du daemon: le plan DNS que son gestionnaire a pose en dernier.
+///
+/// C'est une DECLARATION, jamais une observation: elle dit ce que le daemon a
+/// remis a son gestionnaire DNS et ce que celui-ci a repondu, pas ce que le
+/// resolveur du systeme porte. Seul un verificateur qui lit ce resolveur
+/// (`prove dns`) peut la confronter a la realite.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeclarationDns {
+    /// Toujours [`DECLARATION_DNS_VERSION`].
+    pub schema_version: u32,
+    /// Alea tire au demarrage du daemon, partage avec [`DeclarationPareFeu`]:
+    /// il distingue deux vies du daemon.
+    pub instance: String,
+    /// Numero de la derniere operation notee (application, oubli au
+    /// demontage, echec), monotone sur la vie du daemon; zero tant que rien
+    /// n'a ete note, et toujours zero en `non-applicable`.
+    pub application: u64,
+    pub issue: EtatDns,
+    /// Present si et seulement si `issue` vaut `pose`.
+    pub plan: Option<PoseDns>,
+}
+
 impl Response {
     pub fn error(message: impl Into<String>) -> Self {
         Self::Error {
@@ -553,6 +649,91 @@ mod tests {
         match serde_json::from_value::<Response>(v).unwrap() {
             Response::DeclarationRoutageWindows(relue) => assert_eq!(*relue, d),
             autre => panic!("attendu une declaration de routage Windows, recu {autre:?}"),
+        }
+    }
+
+    /// Le nom sur le fil de la declaration DNS est un contrat avec `prove dns
+    /// --politique-daemon`; la commande ne porte rien, et c'est une lecture.
+    #[test]
+    fn la_declaration_dns_a_son_nom_et_ne_porte_rien() {
+        let s = serde_json::to_string(&Request::new(Command::DeclarationDns)).unwrap();
+        assert_eq!(s, r#"{"version":1,"command":"declaration-dns"}"#);
+        let back: Request = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.command.name(), "declaration-dns");
+        assert!(matches!(back.command, Command::DeclarationDns));
+        // Une lecture, comme les deux autres declarations: elle ne pose rien et
+        // ne doit pas passer pour une action dans le journal d'audit.
+        assert!(!Command::DeclarationDns.is_mutating());
+    }
+
+    /// La forme de la reponse DNS, cle par cle: son propre nom de resultat, six
+    /// cles au niveau superieur, six dans le plan, les adresses ecrites en
+    /// texte. Le lecteur strict de `prove dns --politique-daemon` compare
+    /// exactement cela, et une cle ajoutee ici doit le faire tomber.
+    #[test]
+    fn la_reponse_de_declaration_dns_a_sa_forme() {
+        let d = DeclarationDns {
+            schema_version: DECLARATION_DNS_VERSION,
+            instance: "00".repeat(24),
+            application: 5,
+            issue: EtatDns::Pose,
+            plan: Some(PoseDns {
+                backend: "systemd-resolved".into(),
+                interface: "wg0".into(),
+                local_resolver: "127.0.0.1".parse().unwrap(),
+                upstream: vec![
+                    "192.0.2.53".parse().unwrap(),
+                    "2001:db8::53".parse().unwrap(),
+                ],
+                embarque: true,
+                resolveur_uid: Some(981),
+            }),
+        };
+        let v = serde_json::to_value(Response::DeclarationDns(Box::new(d.clone()))).unwrap();
+        let mut cles: Vec<_> = v.as_object().unwrap().keys().cloned().collect();
+        cles.sort();
+        assert_eq!(
+            cles,
+            [
+                "application",
+                "instance",
+                "issue",
+                "plan",
+                "result",
+                "schema_version"
+            ]
+        );
+        assert_eq!(v["result"], "declaration-dns");
+        assert_eq!(v["schema_version"], 1);
+        let mut cles: Vec<_> = v["plan"].as_object().unwrap().keys().cloned().collect();
+        cles.sort();
+        assert_eq!(
+            cles,
+            [
+                "backend",
+                "embarque",
+                "interface",
+                "local_resolver",
+                "resolveur_uid",
+                "upstream"
+            ]
+        );
+        assert_eq!(v["plan"]["local_resolver"], "127.0.0.1");
+        assert_eq!(
+            v["plan"]["upstream"],
+            serde_json::json!(["192.0.2.53", "2001:db8::53"])
+        );
+        match serde_json::from_value::<Response>(v).unwrap() {
+            Response::DeclarationDns(relue) => assert_eq!(*relue, d),
+            autre => panic!("attendu une declaration DNS, recu {autre:?}"),
+        }
+        for (issue, fil) in [
+            (EtatDns::NonApplicable, "non-applicable"),
+            (EtatDns::Aucun, "aucun"),
+            (EtatDns::Pose, "pose"),
+            (EtatDns::Echec, "echec"),
+        ] {
+            assert_eq!(serde_json::to_value(issue).unwrap(), fil);
         }
     }
 

@@ -21,10 +21,10 @@ use bifrost_core::routage::{Chemin, RoutagePose};
 use bifrost_core::state::{Action, Event, State, StateMachine, TunnelStatus};
 use bifrost_core::{Error, Result, TunnelConfig};
 use bifrost_ipc::protocol::{
-    CheminRoutage, DECLARATION_PARE_FEU_VERSION, DECLARATION_ROUTAGE_VERSION,
-    DECLARATION_ROUTAGE_WINDOWS_VERSION, DeclarationPareFeu, DeclarationRoutage,
-    DeclarationRoutageWindows, EtatRoutage, FamilleRoutage, IssueApplication, PlanRoutage,
-    PlanRoutageWindows,
+    CheminRoutage, DECLARATION_DNS_VERSION, DECLARATION_PARE_FEU_VERSION,
+    DECLARATION_ROUTAGE_VERSION, DECLARATION_ROUTAGE_WINDOWS_VERSION, DeclarationDns,
+    DeclarationPareFeu, DeclarationRoutage, DeclarationRoutageWindows, EtatDns, EtatRoutage,
+    FamilleRoutage, IssueApplication, PlanRoutage, PlanRoutageWindows, PoseDns,
 };
 
 use bifrost_evasion::course::{Course, Echec, Pas};
@@ -91,6 +91,10 @@ pub enum Cmd {
     /// thread, celui qui fait monter et demonter le tunnel: une lecture ne peut
     /// donc jamais tomber au milieu d'un montage.
     DeclarationRoutage(Reply<RoutageDeclare>),
+    /// Le plan DNS que le gestionnaire a pose en dernier. Servi sur CE thread,
+    /// celui qui applique et restaure le DNS: une lecture ne peut donc jamais
+    /// tomber au milieu d'une application ou d'un demontage.
+    DeclarationDns(Reply<DeclarationDns>),
     /// La machine sort d'une mise en veille. Sans reponse: personne n'attend
     /// derriere, et la source est un rappel du systeme qui ne doit surtout pas
     /// se retrouver a attendre le superviseur.
@@ -315,6 +319,80 @@ impl FormeRoutage {
     };
 }
 
+/// Ce que la derniere operation du gestionnaire DNS a laisse.
+enum RetenueDns {
+    /// Rien d'applique depuis le demarrage, ou le plan oublie au debut d'un
+    /// demontage.
+    Aucune,
+    /// Le plan EFFECTIVEMENT pose: le lien et la politique remis au
+    /// gestionnaire qui les a acceptes, son backend lu apres sa reponse, et le
+    /// compte que la restriction du :53 nomme pour ce profil.
+    Posee(PoseDns),
+    /// L'application ou la restauration a echoue. On ne garde PAS le plan
+    /// precedent: un gestionnaire qui echoue a pu en poser une partie
+    /// (`resolvectl` est une suite de commandes, l'ecriture de `resolv.conf`
+    /// suit une sauvegarde), et declarer encore un plan serait pretendre
+    /// savoir ce que porte le resolveur. Meme regle que [`Retenue::Echec`].
+    Echec,
+}
+
+/// Ce que le gestionnaire DNS a pose en dernier, pour `Command::DeclarationDns`.
+///
+/// Ecrit au seul endroit ou le superviseur appelle le gestionnaire (`apply`,
+/// `ApplyDns` et `RestoreDns`), avec ce qu'il lui a passe et ce qu'il a
+/// repondu. Rien n'y est recalcule depuis le profil ou l'etat. L'alea
+/// d'instance est celui de [`Declaration`]; ce suivi ne tient que son propre
+/// compteur.
+struct SuiviDns {
+    /// Numero de la derniere operation notee, monotone sur la vie du daemon;
+    /// zero tant que rien n'a ete note. Chaque note l'incremente, reussie ou
+    /// non: deux lectures qui voient le meme numero n'ont vu passer aucune
+    /// operation entre elles.
+    application: u64,
+    retenue: RetenueDns,
+}
+
+impl SuiviDns {
+    fn nouveau() -> Self {
+        Self {
+            application: 0,
+            retenue: RetenueDns::Aucune,
+        }
+    }
+
+    fn noter(&mut self, retenue: RetenueDns) {
+        self.application = self.application.saturating_add(1);
+        self.retenue = retenue;
+    }
+
+    /// La declaration. `applicable` dit si cette plateforme declare un plan
+    /// DNS ([`DNS_DECLARE_ICI`] en production): sinon un non-applicable
+    /// constant, sans numero ni plan, quoi que le gestionnaire ait pose.
+    fn publier(&self, instance: String, applicable: bool) -> DeclarationDns {
+        let (application, issue, plan) = if !applicable {
+            (0, EtatDns::NonApplicable, None)
+        } else {
+            match &self.retenue {
+                RetenueDns::Aucune => (self.application, EtatDns::Aucun, None),
+                RetenueDns::Posee(p) => (self.application, EtatDns::Pose, Some(p.clone())),
+                RetenueDns::Echec => (self.application, EtatDns::Echec, None),
+            }
+        };
+        DeclarationDns {
+            schema_version: DECLARATION_DNS_VERSION,
+            instance,
+            application,
+            issue,
+            plan,
+        }
+    }
+}
+
+/// Vrai la ou une preuve lit le plan DNS declare: Linux seulement. La preuve
+/// DNS ne lit que le resolveur systeme de Linux (systemd-resolved ou
+/// `/etc/resolv.conf`); ailleurs, la declaration le dit par `non-applicable`.
+const DNS_DECLARE_ICI: bool = cfg!(target_os = "linux");
+
 /// La reponse a `Command::DeclarationRoutage`, dans l'une des deux formes que
 /// le serveur transmet telles quelles (`declaration-routage` et
 /// `declaration-routage-windows`).
@@ -512,6 +590,9 @@ pub struct Supervisor {
     /// `Command::DeclarationRoutage`. Voir [`SuiviRoutage`]. Il partage l'alea
     /// d'instance de [`Declaration`]: une seule vie du daemon.
     routage: SuiviRoutage,
+    /// Ce que le gestionnaire DNS a pose en dernier, pour
+    /// `Command::DeclarationDns`. Voir [`SuiviDns`]. Meme alea d'instance.
+    dns_declare: SuiviDns,
 }
 
 /// Comment le superviseur tient le carnet des reseaux.
@@ -894,6 +975,7 @@ impl Supervisor {
             last_error: None,
             declaration: Declaration::nouvelle(),
             routage: SuiviRoutage::nouveau(routage_initial),
+            dns_declare: SuiviDns::nouveau(),
         }
     }
 
@@ -917,6 +999,9 @@ impl Supervisor {
                 }
                 Ok(Cmd::DeclarationRoutage(reply)) => {
                     let _ = reply.send(self.declaration_routage());
+                }
+                Ok(Cmd::DeclarationDns(reply)) => {
+                    let _ = reply.send(self.declaration_dns());
                 }
                 Ok(Cmd::Declaration(reply)) => {
                     let _ = reply.send(self.declaration());
@@ -1578,6 +1663,14 @@ impl Supervisor {
         )
     }
 
+    /// Le plan DNS retenu, sans rien interroger: ni le gestionnaire, ni le
+    /// resolveur du systeme. `&self` le garantit au compilateur. Meme alea
+    /// d'instance que les deux autres declarations: une seule vie du daemon.
+    fn declaration_dns(&self) -> DeclarationDns {
+        self.dns_declare
+            .publier(self.declaration.instance.clone(), DNS_DECLARE_ICI)
+    }
+
     fn status(&mut self) -> TunnelStatus {
         let engaged = self.firewall.is_engaged().unwrap_or(false);
         let cfg = self.machine.config().cloned();
@@ -2002,17 +2095,43 @@ impl Supervisor {
                 // c'est-a-dire sans resolution de noms, au moment precis de la
                 // connexion. `demarrer` n'a donc pas rendu la main tant qu'une
                 // requete n'a pas obtenu de reponse.
-                self.demarrer_resolveur(&cfg)?;
-                self.dns.apply(&cfg.interface, &cfg.dns)?;
+                let pose = self
+                    .demarrer_resolveur(&cfg)
+                    .and_then(|()| self.dns.apply(&cfg.interface, &cfg.dns));
+                // Retenu ICI, apres la reponse du gestionnaire: le lien et la
+                // politique qu'il a acceptes, son backend (celui du
+                // gestionnaire en service, pas une seconde detection), et le
+                // compte que la restriction du :53 nomme. Un echec, du
+                // resolveur ou du gestionnaire, n'est jamais note comme pose.
+                self.dns_declare.noter(match &pose {
+                    Ok(()) => RetenueDns::Posee(PoseDns {
+                        backend: self.dns.backend().to_owned(),
+                        interface: cfg.interface.clone(),
+                        local_resolver: cfg.dns.local_resolver,
+                        upstream: cfg.dns.upstream.clone(),
+                        embarque: cfg.dns.embarque,
+                        resolveur_uid: self.resolveur.identite.compte_restreint(cfg.dns.embarque),
+                    }),
+                    Err(_) => RetenueDns::Echec,
+                });
+                pose?;
                 Ok(Vec::new())
             }
             Action::RestoreDns => {
+                // Oublie AVANT de rendre la main au systeme: des que la
+                // restauration commence, le plan n'est plus garanti en place,
+                // et une restauration qui echoue ne doit pas le laisser
+                // declare comme pose.
+                self.dns_declare.noter(RetenueDns::Aucune);
                 // Et l'ordre inverse au demontage, pour la meme raison lue a
                 // l'envers: on rend d'abord au systeme sa configuration
                 // d'origine, ENSUITE on arrete le resolveur. Le tuer d'abord
                 // ouvrirait une fenetre ou `resolv.conf` designe un port mort.
                 let restauration = self.dns.restore();
                 self.arreter_resolveur();
+                if restauration.is_err() {
+                    self.dns_declare.noter(RetenueDns::Echec);
+                }
                 restauration?;
                 Ok(Vec::new())
             }
@@ -2669,6 +2788,262 @@ mod tests {
         let d = sup.declaration_routage();
         assert_eq!(d.issue(), EtatRoutage::Aucun);
         assert_eq!(matches!(d, RoutageDeclare::Windows(_)), cfg!(windows));
+    }
+
+    /// Ce que le gestionnaire DNS de doublure a recu: le lien et la politique.
+    type RecuDns = (String, bifrost_core::config::DnsPolicy);
+
+    /// Gestionnaire DNS de doublure: son backend est choisi, il accepte ses
+    /// `applications` premieres applications puis refuse, accepte ou refuse
+    /// chaque restauration, et note ce qu'il recoit. De quoi placer un refus
+    /// APRES une pose reussie, le seul cas ou une declaration pourrait garder
+    /// par erreur le plan precedent.
+    struct DnsDeRecette {
+        backend: &'static str,
+        applications: usize,
+        restauration: bool,
+        recus: Arc<Mutex<Vec<RecuDns>>>,
+    }
+
+    impl DnsDeRecette {
+        fn nouveau(backend: &'static str) -> Self {
+            Self {
+                backend,
+                applications: usize::MAX,
+                restauration: true,
+                recus: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+    }
+
+    impl DnsManager for DnsDeRecette {
+        fn apply(
+            &mut self,
+            interface: &str,
+            policy: &bifrost_core::config::DnsPolicy,
+        ) -> Result<()> {
+            self.recus
+                .lock()
+                .unwrap()
+                .push((interface.to_owned(), policy.clone()));
+            if self.applications == 0 {
+                return Err(Error::Dns("refus de la doublure".into()));
+            }
+            self.applications -= 1;
+            Ok(())
+        }
+        fn restore(&mut self) -> Result<()> {
+            if self.restauration {
+                Ok(())
+            } else {
+                Err(Error::Dns("restauration refusee par la doublure".into()))
+            }
+        }
+        fn backend(&self) -> &'static str {
+            self.backend
+        }
+    }
+
+    fn superviseur_dns(dns: DnsDeRecette, resolveur: Resolveur) -> Supervisor {
+        Supervisor::new(
+            // Un kill switch qui se dit desarme apres un retrait: la
+            // deconnexion le verifie.
+            Box::new(KillSwitchQuiCede {
+                acceptes: usize::MAX,
+                vues: Arc::new(Mutex::new(Vec::new())),
+            }),
+            Box::new(FauxTunnel { luid: Some(1) }),
+            Box::new(dns),
+            IdentiteCoeur::default(),
+            resolveur,
+            Equipement {
+                decision: Decision::default(),
+                carnetier: carnetier_muet(),
+                atelier: None,
+                chemin_coeur: None,
+            },
+        )
+    }
+
+    fn resolveur_sans_identite() -> Resolveur {
+        Resolveur {
+            verification: |_| Ok(()),
+            ..Default::default()
+        }
+    }
+
+    /// La declaration DNS telle que Linux la publie, quelle que soit la
+    /// plateforme de la recette.
+    fn dns_linux(s: &Supervisor) -> DeclarationDns {
+        s.dns_declare.publier(s.declaration.instance.clone(), true)
+    }
+
+    /// Avant toute application, le daemon ne declare aucun plan DNS. La
+    /// declaration de production est celle de la plateforme, et partage l'alea
+    /// d'instance des deux autres declarations.
+    #[test]
+    fn un_daemon_neuf_ne_declare_aucun_plan_dns() {
+        let s = superviseur_nu();
+        let d = dns_linux(&s);
+        assert_eq!(d.schema_version, DECLARATION_DNS_VERSION);
+        assert_eq!((d.issue, d.application), (EtatDns::Aucun, 0));
+        assert!(d.plan.is_none());
+        assert_eq!(d.instance, s.declaration().instance);
+        assert_eq!(DNS_DECLARE_ICI, cfg!(target_os = "linux"));
+        assert_eq!(
+            s.declaration_dns(),
+            s.dns_declare
+                .publier(s.declaration.instance.clone(), DNS_DECLARE_ICI)
+        );
+    }
+
+    /// Le coeur de la tranche, cote daemon: la declaration est le plan que le
+    /// gestionnaire a RECU et accepte, assez pour le reconstruire au meme
+    /// constructeur que la pose (`PlanDns::nouveau`), avec le backend de CE
+    /// gestionnaire.
+    #[test]
+    fn la_declaration_dns_est_le_plan_que_le_gestionnaire_a_pose() {
+        let dns = DnsDeRecette::nouveau("systemd-resolved");
+        let recus = dns.recus.clone();
+        let mut s = superviseur_dns(dns, resolveur_sans_identite());
+        s.connect(cfg()).expect("connexion");
+        let d = dns_linux(&s);
+        assert_eq!((d.issue, d.application), (EtatDns::Pose, 1));
+        let p = d.plan.expect("un plan pose est joint");
+        assert_eq!(p.backend, "systemd-resolved");
+        assert_eq!(p.interface, "wg0");
+        assert_eq!(p.local_resolver.to_string(), "127.0.0.1");
+        assert_eq!(p.upstream, ["9.9.9.9".parse::<std::net::IpAddr>().unwrap()]);
+        assert!(!p.embarque);
+        assert_eq!(p.resolveur_uid, None);
+        let recus = recus.lock().unwrap().clone();
+        assert_eq!(recus.len(), 1);
+        let (lien, politique) = &recus[0];
+        let reconstruite = bifrost_core::config::DnsPolicy {
+            local_resolver: p.local_resolver,
+            upstream: p.upstream.clone(),
+            embarque: p.embarque,
+            anti_telemetrie: bifrost_core::config::ProfilTelemetrie::Aucun,
+        };
+        assert_eq!(
+            bifrost_core::plan_dns::PlanDns::nouveau(&p.interface, &reconstruite),
+            bifrost_core::plan_dns::PlanDns::nouveau(lien, politique)
+        );
+    }
+
+    /// Le backend declare est celui du gestionnaire EN SERVICE, lu a sa
+    /// reponse: pas une valeur fixee, pas une seconde detection.
+    #[test]
+    fn le_backend_declare_est_celui_du_gestionnaire_en_service() {
+        for backend in ["resolv.conf", "systemd-resolved"] {
+            let mut s = superviseur_dns(DnsDeRecette::nouveau(backend), resolveur_sans_identite());
+            s.connect(cfg()).expect("connexion");
+            let p = dns_linux(&s).plan.expect("plan pose");
+            assert_eq!(p.backend, backend);
+        }
+    }
+
+    /// Le compte declare est celui que la restriction du :53 nomme pour ce
+    /// profil: le meme que la politique de pare-feu posee porte, et aucun pour
+    /// un profil qui n'embarque pas de resolveur, meme avec un compte declare.
+    #[test]
+    fn le_compte_declare_est_celui_que_la_restriction_du_53_nomme() {
+        let mut s = superviseur_declarant(Box::new(FauxKillSwitch {
+            vues: Arc::new(Mutex::new(Vec::new())),
+        }));
+        s.connect(cfg_embarque()).expect("connexion");
+        let p = dns_linux(&s).plan.expect("plan pose");
+        assert!(p.embarque);
+        assert_eq!(p.resolveur_uid, Some(981));
+        let politique = s.declaration().politique.expect("politique posee");
+        assert_eq!(politique["resolveur_uid"], 981);
+
+        let mut s = superviseur_declarant(Box::new(FauxKillSwitch {
+            vues: Arc::new(Mutex::new(Vec::new())),
+        }));
+        s.connect(cfg()).expect("connexion");
+        let p = dns_linux(&s).plan.expect("plan pose");
+        assert!(!p.embarque);
+        assert_eq!(p.resolveur_uid, None);
+    }
+
+    /// Une application qui echoue ne laisse rien de declare comme pose, pas
+    /// meme le plan precedent: le gestionnaire a pu en poser une partie, et le
+    /// daemon ne sait pas ce que porte le resolveur. Un resolveur embarque qui
+    /// ne repond pas fait echouer l'application avant le gestionnaire: meme
+    /// issue.
+    #[test]
+    fn une_application_dns_en_echec_ne_declare_rien_de_pose() {
+        let mut dns = DnsDeRecette::nouveau("systemd-resolved");
+        dns.applications = 1;
+        let mut s = superviseur_dns(dns, resolveur_sans_identite());
+        s.apply(Action::ApplyDns(cfg()))
+            .expect("premiere application");
+        assert_eq!(dns_linux(&s).issue, EtatDns::Pose);
+        assert!(s.apply(Action::ApplyDns(cfg())).is_err());
+        let d = dns_linux(&s);
+        assert_eq!((d.issue, d.application), (EtatDns::Echec, 2));
+        assert!(d.plan.is_none());
+
+        let dns = DnsDeRecette::nouveau("systemd-resolved");
+        let recus = dns.recus.clone();
+        let mut s = superviseur_dns(
+            dns,
+            Resolveur {
+                verification: |_| Err(Error::Dns("personne n'ecoute".into())),
+                ..Default::default()
+            },
+        );
+        assert!(s.apply(Action::ApplyDns(cfg_embarque())).is_err());
+        let d = dns_linux(&s);
+        assert_eq!((d.issue, d.application), (EtatDns::Echec, 1));
+        assert!(d.plan.is_none());
+        assert!(recus.lock().unwrap().is_empty(), "gestionnaire appele");
+    }
+
+    /// Le plan est oublie au DEBUT du demontage, avant la restauration: un
+    /// demontage reussi ne declare plus rien, et une restauration qui echoue ne
+    /// laisse jamais le plan declare pose.
+    #[test]
+    fn la_declaration_dns_est_oubliee_au_debut_du_demontage() {
+        let mut s = superviseur_dns(
+            DnsDeRecette::nouveau("systemd-resolved"),
+            resolveur_sans_identite(),
+        );
+        s.connect(cfg()).expect("connexion");
+        assert_eq!(dns_linux(&s).application, 1);
+        s.disconnect().expect("deconnexion");
+        let d = dns_linux(&s);
+        assert_eq!((d.issue, d.application), (EtatDns::Aucun, 2));
+        assert!(d.plan.is_none());
+        // Une seconde vie de connexion: le compteur continue de monter.
+        s.connect(cfg()).expect("reconnexion");
+        assert_eq!(
+            (dns_linux(&s).issue, dns_linux(&s).application),
+            (EtatDns::Pose, 3)
+        );
+
+        let mut dns = DnsDeRecette::nouveau("systemd-resolved");
+        dns.restauration = false;
+        let mut s = superviseur_dns(dns, resolveur_sans_identite());
+        s.apply(Action::ApplyDns(cfg())).expect("application");
+        assert!(s.apply(Action::RestoreDns).is_err());
+        let d = dns_linux(&s);
+        assert_eq!((d.issue, d.application), (EtatDns::Echec, 3));
+        assert!(d.plan.is_none());
+    }
+
+    /// Hors Linux, la declaration est un non-applicable constant: ni numero,
+    /// ni plan, quoi que le gestionnaire ait pose.
+    #[test]
+    fn hors_linux_la_declaration_dns_est_non_applicable() {
+        let mut s = superviseur_dns(DnsDeRecette::nouveau("netsh"), resolveur_sans_identite());
+        s.connect(cfg()).expect("connexion");
+        assert_eq!(dns_linux(&s).issue, EtatDns::Pose);
+        let d = s.dns_declare.publier(s.declaration.instance.clone(), false);
+        assert_eq!((d.issue, d.application), (EtatDns::NonApplicable, 0));
+        assert!(d.plan.is_none());
+        assert_eq!(d.instance, s.declaration().instance);
     }
 
     /// Une poignee de sonde dont les deux autres bouts restent tenus.

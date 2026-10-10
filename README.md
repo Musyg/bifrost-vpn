@@ -473,6 +473,7 @@ sudo ./scripts/packaging-linux.sh      # empaquetage, dans une racine jetable
 sudo ./scripts/resolveur-systemd-linux.sh   # le resolveur sous l'unite reelle
 sudo ./scripts/service-systemd-linux.sh     # connect complet par le service installe
 sudo ./scripts/mort-daemon-systemd-linux.sh # le daemon tue: le kill switch tient-il, sous l'unite reelle
+sudo ./scripts/preuve-dns-daemon-linux.sh   # prove dns --politique-daemon face au vrai daemon, en namespaces jetables
 ./scripts/fuzz-linux.sh                # rejoue les graines de fuzzing, puis fuzze chaque parseur 30 s
 ```
 

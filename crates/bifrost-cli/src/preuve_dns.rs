@@ -7,6 +7,13 @@
 //! (`preuve_dns_linux`) et compare. Rien n'est pose, retire ou change; aucun
 //! programme externe n'est lance; aucune elevation n'est demandee.
 //!
+//! `prove dns --politique-daemon --actif` prend pour attendu le plan que le
+//! daemon declare avoir pose (`declaration-dns`: le backend de son
+//! gestionnaire, le lien, la politique appliquee, le compte du resolveur),
+//! lu par le lecteur commun des declarations (`declaration::lire_dns`), relu
+//! apres la collecte, et juge par le meme comparateur. Hors Linux, un
+//! non-applicable nomme, sans lecture.
+//!
 //! # Ce qui est lu
 //!
 //! - `/etc/nsswitch.conf`: les sources de la ligne `hosts`; et, seulement si
@@ -112,6 +119,7 @@ use bifrost_core::plan_dns::PlanDns;
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::declaration::IdentiteDaemon;
 use crate::preuve_nft::{Unique, heure};
 
 /// Le lecteur D-Bus minimal, pur: public pour le harnais de fuzzing.
@@ -129,8 +137,9 @@ pub(crate) const INSTABLE: &str =
 // L'intention, et le plan qu'elle designe.
 // ---------------------------------------------------------------------------
 
-/// Le backend DNS que l'intention declare. La preuve ne le devine pas: le
-/// daemon le choisit a l'execution, et ce choix n'est ecrit nulle part.
+/// Le backend DNS que l'intention, ou le daemon, declare. La preuve ne le
+/// devine pas: le daemon le choisit a l'execution, et ce choix n'est ecrit
+/// que dans sa declaration (`--politique-daemon`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Backend {
     /// `systemd-resolved`: `resolvectl` sur le lien du tunnel.
@@ -175,6 +184,17 @@ fn adresse_canonique(v: &Value) -> Result<IpAddr, &'static str> {
     Ok(a)
 }
 
+/// La regle d'interface de Bifrost, pour l'intention comme pour le plan
+/// declare: 1 a 15 caracteres, alphanumeriques, `-` et `_`, sans `lo`.
+fn interface_admise(interface: &str) -> bool {
+    !interface.is_empty()
+        && interface.len() <= 15
+        && interface != "lo"
+        && interface
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
 /// L'intention DNS v1: exactement les sept cles. `backend` vaut
 /// `systemd-resolved` ou `resolv-conf`; l'interface suit la regle du produit
 /// (1 a 15 caracteres, alphanumeriques, `-` et `_`), sans `lo`; les adresses
@@ -199,13 +219,7 @@ pub fn intention_dns(v: Value) -> Result<Intention, &'static str> {
     let interface = objet["interface"]
         .as_str()
         .ok_or("types d'intention DNS invalides")?;
-    if interface.is_empty()
-        || interface.len() > 15
-        || interface == "lo"
-        || !interface
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-    {
+    if !interface_admise(interface) {
         return Err("interface d'intention DNS invalide");
     }
     let local_resolver = adresse_canonique(&objet["local_resolver"])?;
@@ -981,6 +995,11 @@ pub struct Rapport {
     live_system: bool,
     collection_verified: bool,
     network_security: &'static str,
+    /// Le nom de la regle qui a admis le serveur de la declaration, en mode
+    /// daemon; absent en mode intention (pas de serveur), `null` tant qu'elle
+    /// n'est pas etablie. Jamais un uid, un pid ou un SID.
+    #[serde(skip_serializing_if = "IdentiteDaemon::hors_perimetre")]
+    daemon_identity: IdentiteDaemon,
     expected_counts: Option<Attendus>,
     observed_counts: Option<Observes>,
     named_limits: Option<Limites>,
@@ -1001,10 +1020,11 @@ impl Rapport {
 
     pub fn texte(&self) -> String {
         format!(
-            "{}  {}\n{}\nentree non mesuree: {}\necarts: {}\n\n{}\n",
+            "{}  {}\n{}\n{}entree non mesuree: {}\necarts: {}\n\n{}\n",
             self.verdict,
             self.scope,
             self.reason,
+            self.daemon_identity.ligne(),
             self.failed_input.unwrap_or("aucune"),
             self.differences.join(", "),
             self.limitation
@@ -1027,6 +1047,7 @@ fn commencer() -> Rapport {
         live_system: false,
         collection_verified: false,
         network_security: "not-evaluated",
+        daemon_identity: IdentiteDaemon::HorsPerimetre,
         expected_counts: None,
         observed_counts: None,
         named_limits: None,
@@ -1106,5 +1127,190 @@ pub fn verifier(intention: &Path) -> Rapport {
         verifier_avec(intention, false, |_| {
             Err("collecte DNS disponible uniquement sous Linux")
         })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Mode face au daemon.
+// ---------------------------------------------------------------------------
+
+impl crate::declaration::Suivi for Rapport {
+    fn entree_manquante(&mut self, entree: &'static str) {
+        self.failed_input = Some(entree);
+    }
+    fn identite(&mut self, identite: IdentiteDaemon) {
+        self.daemon_identity = identite;
+    }
+}
+
+/// La limite propre au mode daemon: l'attendu est declare par le daemon, pas
+/// par l'appelant, et une declaration n'est jamais une observation.
+const LIMITE_DAEMON: &str = "Plan DNS declare par le daemon, relu avant et apres la collecte, pas observe: une correspondance dit que le resolveur du systeme porte le plan que le daemon dit avoir pose, par le gestionnaire qu'il nomme. Le compte du resolveur embarque declare est celui que le kill switch laisse emettre. Etat du resolveur du namespace courant, lu deux fois de suite: un changement qui s'annule entre deux lectures echappe, et ce qui change apres la collecte n'est pas vu. Limites nommees, ou du trafic DNS peut sortir hors du tunnel alors que la preuve correspond: .local par mDNS (resolved ou nsswitch); la recherche inverse d'une adresse du reseau d'un lien; les noms a une etiquette quand ResolveUnicastSingleLabel=yes, que le bus ne dit pas. La garde d'espace de noms est une heuristique (ecoute du stub sous le compte de resolved). Ni les caches (resolved, nscd, applications), ni les connexions ouvertes, ni les resolveurs propres aux applications, ni le pare-feu ne sont prouves ici; le mode DNS sur TLS n'est pas compare. Pas une preuve d'etancheite du VPN.";
+
+/// L'attendu que la declaration du daemon designe: la meme [`Intention`] que
+/// celle d'un fichier aux memes valeurs, plan reconstruit par le MEME
+/// constructeur que la pose (`PlanDns::nouveau`). La declaration a deja ete
+/// lue strictement (cles, graphie des adresses, coherence etat/plan) par
+/// `declaration::analyser_dns`; il reste a rejeter ce qui sort du perimetre de
+/// la reference, avec les regles du lecteur d'intention, et un backend que la
+/// preuve ne sait pas lire.
+///
+/// Le backend declare est `DnsManager::backend` du gestionnaire en service:
+/// `systemd-resolved`, ou `resolv.conf` pour celui qui ecrit le fichier (le
+/// `resolv-conf` de l'intention et du rapport).
+pub fn intention_de_la_declaration(
+    d: &bifrost_ipc::protocol::DeclarationDns,
+) -> Result<Intention, &'static str> {
+    use bifrost_ipc::protocol::EtatDns;
+    let p = match d.issue {
+        EtatDns::NonApplicable => {
+            return Err("le daemon ne declare pas de plan DNS sur sa plateforme");
+        }
+        EtatDns::Aucun => return Err("aucun plan DNS pose par ce daemon: rien a comparer"),
+        EtatDns::Echec => {
+            return Err(
+                "derniere operation DNS du daemon en echec: il ne sait pas ce que porte le resolveur, rien a comparer",
+            );
+        }
+        EtatDns::Pose => d.plan.as_ref().ok_or(crate::declaration::HORS_SCHEMA)?,
+    };
+    let backend = match p.backend.as_str() {
+        "systemd-resolved" => Backend::Resolved,
+        "resolv.conf" => Backend::ResolvConf,
+        _ => return Err("backend DNS declare hors perimetre de la reference"),
+    };
+    if !interface_admise(&p.interface) {
+        return Err("interface du plan DNS declare hors perimetre de la reference");
+    }
+    if p.upstream.is_empty() || p.upstream.len() > MAX_AMONTS {
+        return Err("nombre de serveurs amont declares hors perimetre de la reference");
+    }
+    if (1..p.upstream.len()).any(|k| p.upstream[..k].contains(&p.upstream[k])) {
+        return Err("serveur amont declare en double: plan DNS hors perimetre");
+    }
+    if p.resolveur_uid == Some(0) {
+        return Err("compte du resolveur root: plan DNS declare hors perimetre");
+    }
+    if p.resolveur_uid.is_some() && !p.embarque {
+        return Err("compte de resolveur declare sans resolveur embarque: plan DNS hors perimetre");
+    }
+    let politique = DnsPolicy {
+        local_resolver: p.local_resolver,
+        upstream: p.upstream.clone(),
+        embarque: p.embarque,
+        anti_telemetrie: ProfilTelemetrie::Aucun,
+    };
+    politique
+        .validate()
+        .map_err(|_| "plan DNS declare refuse par la regle de Bifrost: hors perimetre")?;
+    Ok(Intention {
+        backend,
+        plan: PlanDns::nouveau(&p.interface, &politique),
+        local_resolver: p.local_resolver,
+        embarque: p.embarque,
+        resolveur_uid: p.resolveur_uid,
+    })
+}
+
+/// Le rapport de depart du mode daemon, avant toute lecture.
+fn commencer_declaration() -> Rapport {
+    let mut r = commencer();
+    r.expected_source = "daemon-declared-active-dns-plan";
+    r.daemon_identity = IdentiteDaemon::NonVerifiee;
+    r.failed_input = Some("daemon-declaration");
+    r.reason = "declaration DNS du daemon non lue";
+    r.limitation = LIMITE_DAEMON;
+    r
+}
+
+/// Le protocole, separe de ses deux sources pour que les recettes le jouent
+/// avec un faux daemon et une fausse lecture du systeme: N1, la mesure
+/// encadree (deux lectures completes identiques), N2, par le protocole commun
+/// des preuves par declaration (`declaration::encadrer`), avec son exigence
+/// d'identite et ce qu'il en dit au rapport. L'attendu est juge par le MEME
+/// comparateur que le mode intention ([`comparer`]). `collecte` dit si cet
+/// hote a une collecte: sans elle, le rapport ne nomme aucune source.
+pub(crate) async fn verifier_declaration_avec<L, FL, S>(
+    collecte: bool,
+    lire_declaration: L,
+    mut lire_systeme: S,
+) -> Rapport
+where
+    L: FnMut() -> FL,
+    FL: std::future::Future<Output = Result<crate::declaration::LueDns, crate::declaration::Refus>>,
+    S: FnMut(&Intention) -> Result<Observation, &'static str>,
+{
+    let debut = Instant::now();
+    let mut r = commencer_declaration();
+    let resultat = async {
+        let (i, obs) = crate::declaration::encadrer(
+            &mut r,
+            lire_declaration,
+            intention_de_la_declaration,
+            async |r: &mut Rapport, i: Intention| {
+                // Pas d'`intention_schema_version`: en mode daemon il n'y a pas
+                // d'intention lue; la source de l'attendu est dite par
+                // `expected_source` et `daemon_identity`.
+                r.backend = Some(match i.backend {
+                    Backend::Resolved => "systemd-resolved",
+                    Backend::ResolvConf => "resolv-conf",
+                });
+                if collecte {
+                    r.source = Some(source(i.backend));
+                }
+                r.failed_input = Some("observed");
+                let obs = encadrer(|| lire_systeme(&i))?;
+                r.live_system = true;
+                r.collection_verified = true;
+                Ok((i, obs))
+            },
+        )
+        .await?;
+        let (attendus, observes, limites, ecarts) = comparer(&i, &obs)?;
+        r.expected_counts = Some(attendus);
+        r.observed_counts = Some(observes);
+        r.named_limits = Some(limites);
+        r.failed_input = None;
+        r.differences = ecarts;
+        Ok(())
+    }
+    .await;
+    r.verdict = match &resultat {
+        Ok(()) if r.differences.is_empty() => "MATCH",
+        Ok(()) => "MISMATCH",
+        Err(_) => "UNMEASURED",
+    };
+    r.reason = match resultat {
+        Ok(()) => "etat du resolveur systeme compare au plan DNS declare par le daemon",
+        Err(raison) => raison,
+    };
+    r.completed_at_unix_ms = heure();
+    r.duration_ms = debut.elapsed().as_millis();
+    r
+}
+
+/// `prove dns --politique-daemon --actif`: l'attendu est le plan DNS que le
+/// daemon joint par `socket` declare avoir pose, relu avant et apres la
+/// collecte, par le lecteur COMMUN de `declaration`. Hors Linux, un
+/// non-applicable nomme, sans aucune lecture: ni le daemon, ni le systeme.
+pub async fn verifier_declaration(socket: &str) -> Rapport {
+    #[cfg(target_os = "linux")]
+    {
+        verifier_declaration_avec(
+            true,
+            move || crate::declaration::lire_dns(socket),
+            crate::preuve_dns_linux::lire_une_fois,
+        )
+        .await
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = socket;
+        let debut = Instant::now();
+        let mut r = commencer_declaration();
+        r.reason = "declaration DNS non applicable sur cette plateforme: la preuve DNS par declaration ne lit que Linux";
+        r.completed_at_unix_ms = heure();
+        r.duration_ms = debut.elapsed().as_millis();
+        r
     }
 }

@@ -968,12 +968,46 @@ commande lit l'intention puis rend UNMEASURED, sans source.
 
 MATCH n'est pas une preuve d'etancheite du VPN.
 
-Mode face au daemon, non livre. `--politique-daemon` demanderait que le
-daemon declare, par une commande IPC distincte, le plan DNS qu'il a pose et
-le backend qu'il a choisi, retenus apres la derniere commande reussie et
-oublies au debut du demontage, avec le compte du resolveur embarque; la
-declaration serait lue par le lecteur commun (identite du serveur, N1, mesure,
-N2) et le plan reconstruit au meme constructeur.
+Mode face au daemon, livre (D1c.5).
+`bifrost-cli --json prove dns --politique-daemon --actif`, sous Linux, prend
+pour attendu le plan DNS que le daemon declare avoir pose, par une commande
+IPC distincte (`declaration-dns`, sa propre version de contenu): ni la
+declaration du pare-feu ni celle du routage ne s'elargissent, parce que ce
+plan est pose par le gestionnaire DNS, dont le backend est choisi a
+l'execution et n'est ecrit nulle part ailleurs. La declaration porte le
+backend du gestionnaire en service (`DnsManager::backend`, lu apres sa
+reponse: `systemd-resolved` ou `resolv.conf`, pas une seconde detection), le
+lien, `local_resolver`, `upstream` dans l'ordre, `embarque`, et le compte du
+resolveur embarque, celui que la restriction du :53 du kill switch nomme pour
+ce profil (une seule fonction pour les deux). Son etat est `pose` (plan
+joint), `aucun` (rien applique depuis le demarrage, ou plan oublie), `echec`
+ou `non-applicable` (hors Linux, au numero zero), avec un numero d'operation
+monotone et l'alea d'instance des autres declarations. Le superviseur la
+retient la ou il appelle le gestionnaire, sans rien recalculer du profil:
+apres une application reussie; il l'oublie au debut du demontage, avant la
+restauration; une application ou une restauration qui echoue declare
+`echec`, sans plan, pas meme le precedent, parce que le gestionnaire a pu en
+poser une partie. Une reconnexion ne restaure pas le DNS (machine a etats):
+le plan reste declare pose, et une preuve faite alors compare; ce cas n'est
+pas mesure au banc.
+
+La declaration est lue par le lecteur commun de `prove nft`, `prove wfp` et
+`prove routes` (identite du serveur exigee avant le premier octet, N1,
+collecte encadree, N2; deux declarations differentes rendent UNMEASURED),
+avec la limite de ce lecteur ecrite en D1b: sous Linux le serveur est un
+processus root, rien n'etablit que c'est le daemon. Elle est analysee
+strictement (cles exactes au niveau superieur et dans le plan, doublons,
+entiers, version, coherence de l'etat, du numero et du plan, adresses sous
+leur forme canonique), puis jugee avec les regles de l'intention v1
+(interface, amonts, compte, `DnsPolicy::validate`). L'attendu est reconstruit
+par `PlanDns::nouveau` et juge par le meme comparateur que `--intention`:
+memes categories, memes limites nommees. `expected_source` vaut
+`daemon-declared-active-dns-plan`, et `daemon_identity` nomme la regle qui a
+admis le serveur. Rien pose, ou une derniere operation en echec: le rapport
+le dit, UNMEASURED, sans lire le systeme ni comparer. `--politique-daemon`
+exclut `--intention` et exige `--actif`. Hors Linux, la commande IPC rend
+`non-applicable`, et la preuve rend UNMEASURED avec sa raison, sans lire ni le
+daemon ni le systeme.
 
 Acceptation, banc jetable (`scripts/preuve-dns-linux.sh`): un systemd-resolved
 255 reel, sur un bus D-Bus prive, dans un namespace de montage prive et des
@@ -988,8 +1022,30 @@ reseau et autre namespace de montage rendent UNMEASURED; un domaine qui
 bascule pendant la collecte aussi, jamais MATCH. La preuve ne change pas
 l'etat du resolveur, et l'hote est inchange apres chaque passage.
 
-D1c reste incomplet. Ne sont pas livres: la preuve DNS face au daemon, les
-resolveurs effectifs sous Windows et la provenance.
+Acceptation du mode face au daemon, banc jetable a part
+(`scripts/preuve-dns-daemon-linux.sh`, hors integration continue: il lui faut
+un daemon root qui monte un vrai tunnel WireGuard et arme son kill switch,
+comme `e2e-linux.sh`): le cadre du banc ci-dessus (systemd-resolved 255 reel,
+bus D-Bus prive, namespace de montage prive, namespaces reseau jetables, ni
+le resolveur ni le bus de l'hote), et le daemon reel lance a cote, /etc et
+/var/lib superposes. Un premier daemon, dont le gestionnaire en service est
+systemd-resolved, et un second, lance la ou le stub de resolved n'existe pas,
+dont le gestionnaire est resolv.conf: chacun correspond, sans puis avec
+resolveur embarque, et ne declare aucun plan avant la connexion ni apres la
+deconnexion, ce que la preuve dit sans comparer. Les dix categories d'ecart
+sont provoquees sous le daemon, chacune donne son seul ecart, et la
+declaration est la meme, a l'octet pres, avant et apres chaque cas. Des
+connexions et deconnexions en boucle pendant les preuves rendent UNMEASURED
+quand la declaration change pendant la collecte, jamais une correspondance ni
+un ecart sur un plan change. Un serveur non root est refuse sans recevoir de
+requete; une declaration hors schema servie par root (autre version, autre
+graphie d'une adresse) est refusee; le rejeu exact d'une declaration sous
+root est admis, ce qui est la limite de la regle d'identite. Le rapport ne
+porte ni adresse, ni interface, ni compte; l'hote est inchange apres chaque
+passage.
+
+D1c reste incomplet. Ne sont pas livres: les resolveurs effectifs sous
+Windows et la provenance.
 
 ## D2 - Distribution reproductible et mises a jour verifiables
 

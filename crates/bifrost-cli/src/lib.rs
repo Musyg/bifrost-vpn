@@ -16,17 +16,18 @@
 //! - pour le harnais, les lecteurs et rien de plus: `preuve_nft::Unique`, le
 //!   lecteur JSON strict de toutes ces entrees; `preuve_nft::verifier_avec`, le
 //!   comparateur nft hors ligne sans ses deux lectures de fichier;
-//!   `declaration::analyser`, `declaration::analyser_routage` (Linux) et
-//!   `declaration::analyser_routage_windows`, les lecteurs de la declaration
-//!   du daemon; `plan_de_l_intention` et `plan_de_la_declaration` de
-//!   `preuve_routes` (Linux pour le second) et de `preuve_routes_windows`;
-//!   `preuve_dns::dbus::lire_reponse`, le lecteur des trames D-Bus de
-//!   `prove dns`.
+//!   `declaration::analyser`, `declaration::analyser_routage` (Linux),
+//!   `declaration::analyser_routage_windows` et `declaration::analyser_dns`,
+//!   les lecteurs de la declaration du daemon; `plan_de_l_intention` et
+//!   `plan_de_la_declaration` de `preuve_routes` (Linux pour le second) et de
+//!   `preuve_routes_windows`; `intention_dns` et `intention_de_la_declaration`
+//!   de `preuve_dns`; `preuve_dns::dbus::lire_reponse`, le lecteur des trames
+//!   D-Bus de `prove dns`.
 
 #![forbid(unsafe_code)]
 
-/// Le lecteur de la declaration du daemon, commun a `prove nft`, `prove wfp`
-/// et `prove routes`: identite du serveur, N1, mesure, N2.
+/// Le lecteur de la declaration du daemon, commun a `prove nft`, `prove wfp`,
+/// `prove routes` et `prove dns`: identite du serveur, N1, mesure, N2.
 pub mod declaration;
 /// DNS: le plan du produit confronte au resolveur systeme. Pur et compile
 /// partout, sauf la collecte, qui est Linux.
