@@ -5,11 +5,21 @@
   crates/bifrost-evasion/tests/security_txt_a_jour.rs. Ne pas ecrire ailleurs
   dans ce fichier le jeton de l'etat oppose: la garde compte les deux et rougit
   si les deux apparaissent.
-  CLE-PGP=absente
-  Quand une cle PGP existera: basculer le jeton ci-dessus de absente vers l'autre
-  etat, publier la cle, et ajouter un champ Encryption dans
-  packaging/security.txt. La garde exige alors la coherence des deux fichiers:
-  cle annoncee des deux cotes, ou d'aucun.
+  CLE-PGP=presente
+  La cle publiee est packaging/bifrost-security.asc; le champ Encryption de
+  packaging/security.txt pointe sur sa copie brute dans la branche main. La
+  garde exige la coherence des deux fichiers (cle annoncee des deux cotes, ou
+  d'aucun) et que le fichier designe par Encryption soit dans le depot, en
+  ASCII, avec un seul bloc de cle publique et aucun bloc de cle privee.
+  Avant l'expiration (2028-10-09): prolonger la cle ou la remplacer, publier la
+  cle mise a jour au meme chemin, reporter la date (et l'empreinte si la cle
+  change) dans les deux sections ci-dessous, dans packaging/security.txt et
+  dans packaging/SECURITY-TXT.md, puis recopier packaging/security.txt sur le
+  site de l'editeur.
+  En cas de revocation sans cle de remplacement: publier la cle revoquee au
+  meme chemin, basculer le jeton ci-dessus vers l'autre etat, retirer le champ
+  Encryption de packaging/security.txt et reecrire les deux sections. La
+  procedure detaillee est dans packaging/SECURITY-TXT.md.
 -->
 
 <!--
@@ -24,10 +34,32 @@
 ### Signaler une vulnerabilite
 
 Ecrivez a security@inaricom.com. C'est un alias sur le domaine de l'editeur
-(Inaricom). Il n'y a ni programme de primes, ni cle PGP publiee pour l'instant:
-n'envoyez pas de secret que vous ne pourriez pas envoyer en clair. Une cle de chiffrement pourra
-etre ajoutee plus tard; quand elle existera, elle sera publiee et le champ
-Encryption de packaging/security.txt pointera dessus.
+(Inaricom). Il n'y a pas de programme de primes.
+
+### Chiffrer votre rapport
+
+Une cle OpenPGP est publiee pour ce canal. Chiffrez avec elle tout ce qui est
+sensible: details d'exploitation, preuve de concept, donnees personnelles,
+secrets. N'envoyez en clair que ce que vous pourriez publier.
+
+- Fichier: packaging/bifrost-security.asc dans ce depot. Le champ Encryption
+  de packaging/security.txt pointe sur sa copie brute:
+  https://raw.githubusercontent.com/Musyg/bifrost-vpn/main/packaging/bifrost-security.asc
+- Identite: `Bifrost security <security@inaricom.com>`.
+- Empreinte complete de la cle primaire (ed25519, signature et certification):
+  `EEC9 B157 0FC1 336B EA0B  96E9 1E5F 702B 41B3 976C`.
+- Sous-cle de chiffrement (cv25519):
+  `A671 C507 2265 A2C1 DF33  2D78 C4AC C377 A817 665B`.
+- Creee le 2026-10-10, expire le 2028-10-09.
+
+Verifiez l'empreinte avant de chiffrer, par exemple avec:
+
+    gpg --show-keys --with-fingerprint --with-subkey-fingerprints bifrost-security.asc
+
+et comparez-la a celle ecrite ici et a celle du security.txt servi par le site
+de l'editeur, qui vient d'une autre origine que ce depot. Si elles different, si
+la cle a expire ou si elle a ete revoquee, n'envoyez rien de sensible: ecrivez
+d'abord sans details.
 
 ### Ce qu'un bon rapport contient
 
@@ -63,10 +95,32 @@ n'est donc ecrite tant que cet engagement n'a pas ete tranche.
 ### Reporting a vulnerability
 
 Email security@inaricom.com. It is an alias on the publisher's domain
-(Inaricom). There is no bug bounty and no PGP key published for now: do not send
-any secret you could not send in the clear. An encryption key may be added later;
-when it exists it will be published and the Encryption field of
-packaging/security.txt will point to it.
+(Inaricom). There is no bug bounty.
+
+### Encrypting your report
+
+An OpenPGP key is published for this channel. Use it to encrypt anything
+sensitive: exploitation details, proof of concept, personal data, secrets. Only
+send in the clear what you could publish.
+
+- File: packaging/bifrost-security.asc in this repository. The Encryption field
+  of packaging/security.txt points to its raw copy:
+  https://raw.githubusercontent.com/Musyg/bifrost-vpn/main/packaging/bifrost-security.asc
+- Identity: `Bifrost security <security@inaricom.com>`.
+- Full fingerprint of the primary key (ed25519, signing and certification):
+  `EEC9 B157 0FC1 336B EA0B  96E9 1E5F 702B 41B3 976C`.
+- Encryption subkey (cv25519):
+  `A671 C507 2265 A2C1 DF33  2D78 C4AC C377 A817 665B`.
+- Created on 2026-10-10, expires on 2028-10-09.
+
+Check the fingerprint before encrypting, for instance with:
+
+    gpg --show-keys --with-fingerprint --with-subkey-fingerprints bifrost-security.asc
+
+and compare it with the one written here and with the one in the security.txt
+served by the publisher's site, which comes from a different origin than this
+repository. If they differ, or if the key has expired or been revoked, do not
+send anything sensitive: write first without details.
 
 ### What a good report contains
 

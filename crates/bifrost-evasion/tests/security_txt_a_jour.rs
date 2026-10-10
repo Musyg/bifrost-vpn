@@ -6,17 +6,21 @@
 //! La politique de signalement de vulnerabilites de Bifrost fixe le canal: un
 //! alias sur le domaine de l'editeur, `security@inaricom.com`, un `security.txt`
 //! RFC 9116 servi par le site de l'editeur, un `SECURITY.md` dans le depot qui y
-//! renvoie, et - pour l'instant - aucune cle PGP publiee. Deux fichiers ecrits a
-//! la main, qui peuvent deriver:
+//! renvoie, et une cle OpenPGP publiee dans le depot
+//! (`packaging/bifrost-security.asc`) que le champ `Encryption` designe. Deux
+//! fichiers ecrits a la main, qui peuvent deriver:
 //!
 //! 1. le champ `Expires` d'un `security.txt` se perime en silence; la RFC 9116
 //!    veut une date future, sous un an. Une garde qui refuse une date passee est
 //!    exactement ce que cette politique demande: une garde de source qui refuse
 //!    une date passee;
 //! 2. l'adresse de contact peut changer d'un cote et pas de l'autre;
-//! 3. le jour ou une cle PGP existera, l'un des deux fichiers peut l'annoncer
-//!    sans que l'autre suive: un `Encryption` sans cle joignable, ou une cle
-//!    annoncee dans `SECURITY.md` que `security.txt` ne pointe pas.
+//! 3. l'un des deux fichiers peut annoncer la cle sans que l'autre suive: un
+//!    `Encryption` sans cle declaree, ou une cle annoncee dans `SECURITY.md`
+//!    que `security.txt` ne pointe pas;
+//! 4. la cle peut etre annoncee des deux cotes sans etre joignable: une URL mal
+//!    ecrite, un fichier absent du chemin que l'URL nomme, un fichier qui porte
+//!    deux cles, ou une partie privee publiee par erreur.
 //!
 //! # Ce qu'elle verifie
 //!
@@ -26,12 +30,25 @@
 //! - il porte `Preferred-Languages`;
 //! - il ne porte `Encryption` que si `SECURITY.md` declare une cle, et l'inverse:
 //!   les deux fichiers doivent dire la meme chose de la cle;
+//! - chaque `Encryption` designe le fichier brut de ce depot sur la branche main
+//!   (`https://raw.githubusercontent.com/Musyg/bifrost-vpn/main/<chemin>`), et
+//!   ce fichier existe au chemin nomme, est en ASCII, porte exactement un bloc
+//!   armure `PGP PUBLIC KEY BLOCK` et aucun autre bloc armure, en particulier
+//!   aucun bloc de cle privee. Une URL d'une autre forme rougit: la garde ne sait
+//!   pas la verifier hors ligne, et une faute de frappe dans l'URL rendrait la
+//!   cle injoignable sans que rien ne le dise;
 //! - `SECURITY.md` contient l'adresse de contact.
 //!
 //! # Ce qu'elle ne fait pas
 //!
 //! Elle ne juge pas la politique de divulgation, ni les delais annonces (valeurs
 //! proposees, a confirmer). Elle garde les proprietes verifiables sans jugement.
+//!
+//! Elle ne calcule pas l'empreinte OpenPGP de la cle (il faudrait SHA-1 et
+//! l'analyse des paquets) et ne lit pas sa date d'expiration: l'une et l'autre
+//! se verifient par `gpg --show-keys`. Elle ne joint pas l'URL en ligne: elle lit
+//! dans l'arbre le fichier que GitHub servira a cette adresse une fois la
+//! branche fusionnee sur main.
 //!
 //! # Sans dependance de date
 //!
@@ -72,6 +89,20 @@ const CONTACT_ATTENDU: &str = "mailto:security@inaricom.com";
 /// avant l'echeance.
 const FENETRE_MIN: i64 = 30;
 const FENETRE_MAX: i64 = 365;
+
+/// Le prefixe des URL brutes de GitHub pour la branche main de ce depot. Le
+/// reste de l'URL est le chemin du fichier depuis la racine du depot.
+const PREFIXE_BRUT: &str = "https://raw.githubusercontent.com/Musyg/bifrost-vpn/main/";
+
+/// Les lignes d'armure ASCII d'une cle publique OpenPGP (RFC 9580, section
+/// 6.2.1, table 16), et le debut commun a toute ligne d'ouverture d'armure.
+const DEBUT_CLE_PUBLIQUE: &str = "-----BEGIN PGP PUBLIC KEY BLOCK-----";
+const FIN_CLE_PUBLIQUE: &str = "-----END PGP PUBLIC KEY BLOCK-----";
+const DEBUT_ARMURE: &str = "-----BEGIN PGP ";
+
+/// Le libelle d'armure d'une cle privee (meme table). Une ligne qui le porte,
+/// ouverture ou fermeture, signale une partie privee dans le fichier publie.
+const LIBELLE_PRIVE: &str = "PRIVATE KEY BLOCK";
 
 /// Les champs (nom en minuscules, valeur) d'un `security.txt`, commentaires et
 /// lignes vides exclus.
@@ -210,6 +241,95 @@ fn etat_cle_du_md(md: &str) -> EtatCle {
     }
 }
 
+/// Le chemin, relatif a la racine du depot, que designe une URL brute de ce
+/// depot sur main. Rend une explication si l'URL n'a pas cette forme, ou si le
+/// chemin n'est pas une suite de segments simples (lettres, chiffres, `.`, `_`,
+/// `-`; ni vide, ni `.`, ni `..`): ni remontee, ni requete, ni fragment, ni
+/// encodage `%`, pour que le fichier lu dans l'arbre soit celui que GitHub
+/// servira a cette adresse.
+fn chemin_de_l_url_brute(url: &str) -> Result<&str, String> {
+    let Some(chemin) = url.strip_prefix(PREFIXE_BRUT) else {
+        return Err(format!(
+            "{url:?} ne designe pas le fichier brut de ce depot sur main (attendu \
+             {PREFIXE_BRUT}<chemin>): la garde ne sait pas verifier hors ligne une \
+             cle servie ailleurs"
+        ));
+    };
+    let segment_simple = |segment: &str| {
+        !segment.is_empty()
+            && segment != "."
+            && segment != ".."
+            && segment
+                .bytes()
+                .all(|o| o.is_ascii_alphanumeric() || b"._-".contains(&o))
+    };
+    if !chemin.split('/').all(segment_simple) {
+        return Err(format!(
+            "{url:?}: le chemin {chemin:?} n'est pas une suite de segments simples \
+             (lettres, chiffres, `.`, `_`, `-`; ni vide, ni `.`, ni `..`)"
+        ));
+    }
+    Ok(chemin)
+}
+
+/// Les defauts d'un fichier de cle publie: octet non ASCII, nombre de blocs de
+/// cle publique different de un, fermeture absente ou avant l'ouverture, bloc
+/// de cle privee, autre bloc d'armure. Vide si le fichier porte exactement un
+/// bloc de cle publique et aucun autre bloc d'armure. Les lignes sont comparees
+/// sans leurs blancs de fin, pour qu'un fichier en CRLF se lise comme en LF.
+fn defauts_du_fichier_de_cle(octets: &[u8]) -> Vec<String> {
+    let mut defauts = Vec::new();
+    if let Some(rang) = octets.iter().position(|o| !o.is_ascii()) {
+        defauts.push(format!(
+            "octet non ASCII 0x{:02X} a la position {rang}",
+            octets[rang]
+        ));
+    }
+    let texte = String::from_utf8_lossy(octets);
+    let lignes: Vec<&str> = texte.lines().map(str::trim_end).collect();
+    let rangs_de = |attendue: &str| -> Vec<usize> {
+        lignes
+            .iter()
+            .enumerate()
+            .filter(|(_, ligne)| **ligne == attendue)
+            .map(|(i, _)| i)
+            .collect()
+    };
+    let ouvertures = rangs_de(DEBUT_CLE_PUBLIQUE);
+    let fermetures = rangs_de(FIN_CLE_PUBLIQUE);
+    if ouvertures.len() != 1 || fermetures.len() != 1 {
+        defauts.push(format!(
+            "{} ligne(s) `{DEBUT_CLE_PUBLIQUE}` et {} ligne(s) \
+             `{FIN_CLE_PUBLIQUE}`: exactement un bloc de cle publique est attendu",
+            ouvertures.len(),
+            fermetures.len()
+        ));
+    } else if fermetures[0] < ouvertures[0] {
+        defauts.push(format!(
+            "`{FIN_CLE_PUBLIQUE}` (ligne {}) precede `{DEBUT_CLE_PUBLIQUE}` \
+             (ligne {})",
+            fermetures[0] + 1,
+            ouvertures[0] + 1
+        ));
+    }
+    for (i, ligne) in lignes.iter().enumerate() {
+        if ligne.contains(LIBELLE_PRIVE) {
+            defauts.push(format!(
+                "ligne {}: bloc de cle privee ({ligne:?}); la partie privee ne se \
+                 publie jamais",
+                i + 1
+            ));
+        } else if ligne.starts_with(DEBUT_ARMURE) && *ligne != DEBUT_CLE_PUBLIQUE {
+            defauts.push(format!(
+                "ligne {}: autre bloc d'armure ({ligne:?}); le fichier ne doit \
+                 porter que la cle publique",
+                i + 1
+            ));
+        }
+    }
+    defauts
+}
+
 #[test]
 fn le_contact_est_l_alias_de_l_editeur() {
     let txt = lire(SECURITY_TXT);
@@ -304,6 +424,107 @@ fn encryption_coherent_avec_l_etat_de_la_cle() {
              {SECURITY_TXT} ne porte aucun champ Encryption. Incoherence: une cle \
              annoncee doit etre joignable."
         ),
+    }
+}
+
+#[test]
+fn la_cle_annoncee_est_joignable_dans_le_depot() {
+    let txt = lire(SECURITY_TXT);
+    let urls: Vec<String> = champs(&txt)
+        .into_iter()
+        .filter(|(nom, _)| nom == "encryption")
+        .map(|(_, valeur)| valeur)
+        .collect();
+    // Sans Encryption il n'y a rien a joindre; que ce soit voulu, c'est
+    // `encryption_coherent_avec_l_etat_de_la_cle` qui le juge, face au jeton de
+    // SECURITY.md.
+    for url in &urls {
+        let chemin =
+            chemin_de_l_url_brute(url).unwrap_or_else(|e| panic!("{SECURITY_TXT}: Encryption {e}"));
+        let complet = racine().join(chemin);
+        let octets = std::fs::read(&complet).unwrap_or_else(|e| {
+            panic!(
+                "{SECURITY_TXT}: Encryption designe {chemin}, illisible dans le \
+                 depot ({}: {e}). Une cle annoncee doit etre joignable.",
+                complet.display()
+            )
+        });
+        let defauts = defauts_du_fichier_de_cle(&octets);
+        assert!(
+            defauts.is_empty(),
+            "{chemin}, designe par Encryption dans {SECURITY_TXT}: {} defaut(s)\n  {}",
+            defauts.len(),
+            defauts.join("\n  ")
+        );
+    }
+}
+
+#[test]
+fn la_lecture_de_l_url_et_du_fichier_de_cle_se_comporte_bien() {
+    // L'URL brute de ce depot sur main rend son chemin; une autre forme, ou une
+    // faute de frappe, est refusee.
+    assert_eq!(
+        chemin_de_l_url_brute(&format!("{PREFIXE_BRUT}packaging/cle-1_a.asc")),
+        Ok("packaging/cle-1_a.asc")
+    );
+    for url in [
+        "https://example.com/pgp-key.txt",
+        "http://raw.githubusercontent.com/Musyg/bifrost-vpn/main/packaging/cle.asc",
+        "https://raw.githubusercontent.com/Musyg/bifrost-vpn/mian/packaging/cle.asc",
+        "https://github.com/Musyg/bifrost-vpn/blob/main/packaging/cle.asc",
+        "openpgp4fpr:eec9b1570fc1336bea0b96e91e5f702b41b3976c",
+    ] {
+        assert!(
+            chemin_de_l_url_brute(url).is_err(),
+            "{url:?} doit etre refusee"
+        );
+    }
+    // Un chemin qui ne nomme pas un fichier de l'arbre sans ambiguite est refuse.
+    for chemin in [
+        "",
+        "/packaging/cle.asc",
+        "packaging//cle.asc",
+        "packaging/",
+        "packaging/../SECURITY.md",
+        "packaging/./cle.asc",
+        "packaging/cle.asc?x=1",
+        "packaging/cle.asc#f",
+        "packaging/cl%65.asc",
+        "packaging\\cle.asc",
+    ] {
+        assert!(
+            chemin_de_l_url_brute(&format!("{PREFIXE_BRUT}{chemin}")).is_err(),
+            "le chemin {chemin:?} doit etre refuse"
+        );
+    }
+
+    // Un bloc de cle publique seul: aucun defaut, en LF comme en CRLF.
+    let bloc = format!("{DEBUT_CLE_PUBLIQUE}\n\nmDMEasqbjhYJ\n=4RsR\n{FIN_CLE_PUBLIQUE}\n");
+    assert_eq!(
+        defauts_du_fichier_de_cle(bloc.as_bytes()),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        defauts_du_fichier_de_cle(bloc.replace('\n', "\r\n").as_bytes()),
+        Vec::<String>::new()
+    );
+
+    // Chaque defaut garde rougit seul, avec un seul motif.
+    let prive = format!("-----BEGIN PGP {LIBELLE_PRIVE}-----\n\nAAAA\n");
+    let signature = "-----BEGIN PGP SIGNATURE-----\n\nAAAA\n-----END PGP SIGNATURE-----\n";
+    let inverse = format!("{FIN_CLE_PUBLIQUE}\n\nmDMEasqbjhYJ\n{DEBUT_CLE_PUBLIQUE}\n");
+    let non_ascii = bloc.replace("\n\n", "\n\u{e9}\n");
+    for (cas, contenu) in [
+        ("vide", String::new()),
+        ("deux blocs publics", format!("{bloc}\n{bloc}")),
+        ("fermeture absente", bloc.replace(FIN_CLE_PUBLIQUE, "")),
+        ("fermeture avant l'ouverture", inverse),
+        ("bloc prive ajoute", format!("{bloc}\n{prive}")),
+        ("autre bloc d'armure", format!("{bloc}\n{signature}")),
+        ("octet non ASCII", non_ascii),
+    ] {
+        let defauts = defauts_du_fichier_de_cle(contenu.as_bytes());
+        assert_eq!(defauts.len(), 1, "{cas}: {defauts:?}");
     }
 }
 
