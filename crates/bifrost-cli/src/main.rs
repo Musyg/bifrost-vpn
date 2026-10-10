@@ -237,17 +237,31 @@ enum CmdPreuve {
         #[arg(long, required = true)]
         actif: bool,
     },
-    /// Linux: compare le resolveur systeme au plan DNS qu'une intention decrit
-    /// (backend, interface, resolveur local, amonts, resolveur embarque):
-    /// systemd-resolved lu sur le bus systeme, ou le contenu de
-    /// /etc/resolv.conf, plus son mode et les sources hosts de nsswitch.conf.
-    /// Lecture seule, deux fois, sans elevation ni changement; le rapport ne
-    /// porte que des categories et des comptes. Ailleurs: NON MESURE.
+    /// Linux: compare le resolveur systeme au plan DNS, soit celui qu'une
+    /// intention decrit (--intention: backend, interface, resolveur local,
+    /// amonts, resolveur embarque), soit celui que le daemon declare avoir pose
+    /// (--politique-daemon): systemd-resolved lu sur le bus systeme, ou le
+    /// contenu de /etc/resolv.conf, plus son mode et les sources hosts de
+    /// nsswitch.conf. Lecture seule, deux fois, sans elevation ni changement;
+    /// le rapport ne porte que des categories et des comptes. Ailleurs: NON
+    /// MESURE.
     Dns {
         /// Intention DNS v1: schema_version, backend, interface,
-        /// local_resolver, upstream, embarque, resolveur_uid.
-        #[arg(long, required = true)]
-        intention: std::path::PathBuf,
+        /// local_resolver, upstream, embarque, resolveur_uid. Absente en mode
+        /// --politique-daemon.
+        #[arg(
+            long,
+            required_unless_present = "politique_daemon",
+            conflicts_with = "politique_daemon"
+        )]
+        intention: Option<std::path::PathBuf>,
+        /// L'attendu est le plan DNS que le daemon (--socket) declare avoir
+        /// pose, avec le backend de son gestionnaire (commande IPC distincte
+        /// des deux autres declarations), relu avant et apres la collecte, par
+        /// le lecteur commun des declarations. Hors Linux: non applicable, sans
+        /// lecture.
+        #[arg(long = "politique-daemon", conflicts_with = "intention")]
+        politique_daemon: bool,
         /// Lecture seule du systeme courant. Exigee pour que la ligne dise que
         /// le systeme est lu.
         #[arg(long, required = true)]
@@ -981,9 +995,18 @@ async fn run(args: Args) -> anyhow::Result<i32> {
             return Ok(rapport.code());
         }
         Cmd::Prove {
-            quoi: CmdPreuve::Dns { intention, .. },
+            quoi:
+                CmdPreuve::Dns {
+                    intention,
+                    politique_daemon,
+                    ..
+                },
         } => {
-            let rapport = preuve_dns::verifier(intention);
+            let rapport = if *politique_daemon {
+                preuve_dns::verifier_declaration(&args.socket).await
+            } else {
+                preuve_dns::verifier(intention.as_ref().expect("valide par clap"))
+            };
             if args.json {
                 println!("{}", serde_json::to_string_pretty(&rapport)?);
             } else {
@@ -1081,12 +1104,13 @@ async fn run(args: Args) -> anyhow::Result<i32> {
             }
         }
         // Aucune commande de ce chemin ne demande une declaration: elles ne
-        // sont lues que par `prove nft/wfp/routes --politique-daemon`, avec leur
-        // lecteur strict. Les recevoir ici est un daemon qui repond a cote, pas
-        // un resultat.
+        // sont lues que par `prove nft/wfp/routes/dns --politique-daemon`, avec
+        // leur lecteur strict. Les recevoir ici est un daemon qui repond a cote,
+        // pas un resultat.
         Response::DeclarationPareFeu(_)
         | Response::DeclarationRoutage(_)
-        | Response::DeclarationRoutageWindows(_) => {
+        | Response::DeclarationRoutageWindows(_)
+        | Response::DeclarationDns(_) => {
             bail!("reponse inattendue du daemon")
         }
     }

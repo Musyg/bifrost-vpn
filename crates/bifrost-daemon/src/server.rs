@@ -192,6 +192,13 @@ async fn dispatch(command: Command, tx: &Sender<Cmd>, profil: &std::path::Path) 
             }
             Err(e) => Response::error(e),
         },
+        // Meme voie que les deux autres declarations: la reponse vient du
+        // thread qui applique et restaure le DNS, donc elle ne peut pas etre
+        // lue au milieu d'une application ou d'un demontage.
+        Command::DeclarationDns => match ask(tx, Cmd::DeclarationDns).await {
+            Ok(declaration) => Response::DeclarationDns(Box::new(declaration)),
+            Err(e) => Response::error(e),
+        },
         // Rien a attendre: le superviseur range le verdict et poursuit. Lui
         // demander de confirmer ferait patienter le client derriere une
         // eventuelle connexion en cours, pour une reponse qui ne peut pas
@@ -418,6 +425,61 @@ upstream = ["10.2.0.1"]
         drop(rx);
         let reponse = dispatch(
             Command::DeclarationPareFeu,
+            &tx,
+            std::path::Path::new("/inexistant"),
+        )
+        .await;
+        assert!(matches!(reponse, Response::Error { .. }), "{reponse:?}");
+    }
+
+    /// La declaration DNS rendue est CELLE du superviseur, transmise sans
+    /// retouche, par sa propre commande: le faux superviseur ne repond qu'a
+    /// `Cmd::DeclarationDns`, et une branche qui passerait par une autre
+    /// declaration, ou fabriquerait la sienne, ne la recevrait pas.
+    #[tokio::test]
+    async fn la_declaration_dns_vient_du_superviseur_sans_retouche() {
+        use bifrost_ipc::protocol::{DeclarationDns, EtatDns, PoseDns};
+        let (tx, rx) = std::sync::mpsc::channel();
+        let attendue = DeclarationDns {
+            schema_version: 1,
+            instance: "cd".repeat(24),
+            application: 3,
+            issue: EtatDns::Pose,
+            plan: Some(PoseDns {
+                backend: "systemd-resolved".into(),
+                interface: "wg0".into(),
+                local_resolver: "127.0.0.1".parse().unwrap(),
+                upstream: vec!["192.0.2.53".parse().unwrap()],
+                embarque: false,
+                resolveur_uid: None,
+            }),
+        };
+        let envoyee = attendue.clone();
+        let fil = std::thread::spawn(move || match rx.recv() {
+            Ok(Cmd::DeclarationDns(reply)) => {
+                let _ = reply.send(envoyee);
+                true
+            }
+            _ => false,
+        });
+        let reponse = dispatch(
+            Command::DeclarationDns,
+            &tx,
+            std::path::Path::new("/inexistant"),
+        )
+        .await;
+        // Ferme le canal: un faux superviseur jamais interroge sort de son
+        // attente au lieu de bloquer la recette.
+        drop(tx);
+        assert!(fil.join().unwrap(), "le superviseur n'a pas ete interroge");
+        match reponse {
+            Response::DeclarationDns(d) => assert_eq!(*d, attendue),
+            autre => panic!("attendu une declaration DNS, recu {autre:?}"),
+        }
+        let (tx, rx) = std::sync::mpsc::channel::<Cmd>();
+        drop(rx);
+        let reponse = dispatch(
+            Command::DeclarationDns,
             &tx,
             std::path::Path::new("/inexistant"),
         )

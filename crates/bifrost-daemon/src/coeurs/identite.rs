@@ -128,6 +128,19 @@ impl IdentiteResolveur {
         self.utilisateur.is_none() && self.executable.is_none()
     }
 
+    /// Le compte que la restriction du :53 nomme pour un profil: celui du
+    /// resolveur quand le profil l'embarque, aucun sinon. Une seule fonction
+    /// pour [`IdentiteResolveur::restreindre`] et pour la declaration DNS du
+    /// superviseur: le compte declare a la preuve est celui que le kill switch
+    /// laisse emettre, et ils ne peuvent pas diverger.
+    pub fn compte_restreint(&self, embarque: bool) -> Option<u32> {
+        if embarque {
+            self.utilisateur.map(|u| u.uid)
+        } else {
+            None
+        }
+    }
+
     /// Inscrit la restriction dans une politique de pare-feu.
     ///
     /// Le nom dit le sens: `restreindre`, quand celui du coeur dit `exempter`.
@@ -156,7 +169,7 @@ impl IdentiteResolveur {
             politique.resolveur_sid = None;
             return;
         }
-        politique.resolveur_uid = self.utilisateur.map(|u| u.uid);
+        politique.resolveur_uid = self.compte_restreint(politique.resolveur_embarque);
         politique.resolveur_executable = self.executable.clone();
         // Le SID du compte de service, sous Windows uniquement. Sans compte
         // declare, `self.sid` est `None` et le permit garde `Identity::Current`

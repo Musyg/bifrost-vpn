@@ -1804,3 +1804,6 @@ fn hors_linux_la_preuve_n_est_pas_mesuree_et_ne_nomme_aucune_source() {
         assert_eq!(r.reason, "collecte DNS disponible uniquement sous Linux");
     }
 }
+
+/// Le mode daemon (`--politique-daemon`), sur les fabriques de ce module.
+mod daemon;

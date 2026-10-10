@@ -1,5 +1,6 @@
 //! La declaration du daemon, lue pour une preuve: le lecteur COMMUN a
-//! `prove nft --politique-daemon` et `prove wfp --politique-daemon`.
+//! `prove nft --politique-daemon` et `prove wfp --politique-daemon`, puis a
+//! `prove routes` et `prove dns` dans le meme mode.
 //!
 //! La declaration est ce que le daemon DIT avoir remis a son moteur: un
 //! attendu, jamais une observation. Ce lecteur ne lui fait donc aucune
@@ -83,6 +84,10 @@ pub(crate) type LueRoutageWindows = (
     &'static str,
 );
 
+/// La declaration DNS, et le nom de la regle qui a admis son serveur (voir
+/// `preuve_dns`).
+pub(crate) type LueDns = (bifrost_ipc::protocol::DeclarationDns, &'static str);
+
 pub(crate) const CLES: [&str; 7] = [
     "result",
     "schema_version",
@@ -95,8 +100,8 @@ pub(crate) const CLES: [&str; 7] = [
 
 pub(crate) const HORS_SCHEMA: &str = "declaration du daemon hors schema";
 
-/// L'exigence d'identite des lectures de preuve, une seule pour les trois
-/// lecteurs (pare-feu, routage Linux, routage Windows): sous Windows, le pipe
+/// L'exigence d'identite des lectures de preuve, une seule pour les quatre
+/// lecteurs (pare-feu, routage Linux, routage Windows, DNS): sous Windows, le pipe
 /// de LocalSystem et lui seul, jamais celui des Administrateurs, que la regle
 /// des commandes admet. Gardee par deux recettes: la decision de `bifrost_ipc`
 /// appliquee a cette constante, et une regle de forme sur ce source.
@@ -170,6 +175,25 @@ pub(crate) async fn lire_routage_windows_avec(
     ))
 }
 
+/// La lecture de production de `prove dns --politique-daemon`: meme exigence
+/// d'identite, meme echange borne, meme analyse stricte que les trois autres,
+/// mais la commande et la forme de la reponse sont celles du DNS.
+#[cfg(target_os = "linux")]
+pub(crate) async fn lire_dns(socket: &str) -> Result<LueDns, Refus> {
+    lire_dns_avec(socket, DELAI, EXIGENCE_PREUVE).await
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) async fn lire_dns_avec(
+    socket: &str,
+    delai: Duration,
+    attendu: ServerRequirement,
+) -> Result<LueDns, Refus> {
+    let (octets, regle) =
+        connecter_et_demander(socket, delai, attendu, Command::DeclarationDns).await?;
+    Ok((analyser_dns(&octets).map_err(Refus::Declaration)?, regle))
+}
+
 /// Le tronc commun aux deux lectures: l'identite du serveur exigee AVANT le
 /// premier octet, la requete, un echange borne dans le temps. Une SEULE copie
 /// de cette logique: la commande et l'analyse de la reponse sont propres a
@@ -236,10 +260,6 @@ pub fn analyser(octets: &[u8]) -> Result<DeclarationPareFeu, &'static str> {
         Ok(Response::DeclarationPareFeu(d)) => *d,
         _ => return Err(HORS_SCHEMA),
     };
-    let instance_valide = (32..=128).contains(&d.instance.len())
-        && d.instance
-            .bytes()
-            .all(|o| o.is_ascii_digit() || (b'a'..=b'f').contains(&o));
     let coherente = match d.issue {
         IssueApplication::Aucune => d.application == 0 && d.politique.is_none(),
         IssueApplication::Posee => {
@@ -250,7 +270,7 @@ pub fn analyser(octets: &[u8]) -> Result<DeclarationPareFeu, &'static str> {
         }
     };
     if d.schema_version != DECLARATION_PARE_FEU_VERSION
-        || !instance_valide
+        || !instance_valide(&d.instance)
         || d.moteur.is_empty()
         || !coherente
     {
@@ -324,10 +344,6 @@ pub fn analyser_routage(
         Ok(Response::DeclarationRoutage(d)) => *d,
         _ => return Err(HORS_SCHEMA),
     };
-    let instance_valide = (32..=128).contains(&d.instance.len())
-        && d.instance
-            .bytes()
-            .all(|o| o.is_ascii_digit() || (b'a'..=b'f').contains(&o));
     let coherente = match d.issue {
         EtatRoutage::NonApplicable | EtatRoutage::Aucun => d.plan.is_none(),
         EtatRoutage::Pose => d.application > 0 && d.plan.is_some(),
@@ -345,7 +361,7 @@ pub fn analyser_routage(
         },
     };
     if d.schema_version != DECLARATION_ROUTAGE_VERSION
-        || !instance_valide
+        || !instance_valide(&d.instance)
         || !coherente
         || !plan_coherent
     {
@@ -405,10 +421,6 @@ pub fn analyser_routage_windows(
         Ok(Response::DeclarationRoutageWindows(d)) => *d,
         _ => return Err(HORS_SCHEMA),
     };
-    let instance_valide = (32..=128).contains(&d.instance.len())
-        && d.instance
-            .bytes()
-            .all(|o| o.is_ascii_digit() || (b'a'..=b'f').contains(&o));
     let coherente = match d.issue {
         EtatRoutage::NonApplicable | EtatRoutage::Aucun => d.plan.is_none(),
         EtatRoutage::Pose => d.application > 0 && d.plan.is_some(),
@@ -421,13 +433,97 @@ pub fn analyser_routage_windows(
         },
     };
     if d.schema_version != DECLARATION_ROUTAGE_WINDOWS_VERSION
-        || !instance_valide
+        || !instance_valide(&d.instance)
         || !coherente
         || !plan_coherent
     {
         return Err(HORS_SCHEMA);
     }
     Ok(d)
+}
+
+/// Les cles du sous-objet `plan` de la declaration DNS, quand il est present.
+pub(crate) const PLAN_DNS_CLES: [&str; 6] = [
+    "backend",
+    "interface",
+    "local_resolver",
+    "upstream",
+    "embarque",
+    "resolveur_uid",
+];
+
+/// Analyse une trame de reponse `declaration-dns`, aussi strictement que
+/// [`analyser_routage`]: cles exactes au niveau superieur ET dans `plan`,
+/// doublons refuses en profondeur (par [`Unique`]), entiers, version, et
+/// coherence entre l'etat, le numero et le plan: `non-applicable` au numero
+/// zero et sans plan, `aucun` sans plan, `pose` numerote avec un plan,
+/// `echec` numerote sans plan. Chaque adresse est ecrite sous sa forme
+/// canonique, celle que le daemon rend: une autre graphie de la meme adresse
+/// vient d'un autre producteur. Le contenu du plan (backend, lien, regles de
+/// Bifrost) est juge ensuite, par `preuve_dns::intention_de_la_declaration`,
+/// avec les regles de l'intention. Rien de ce que la trame contient n'entre
+/// dans une raison.
+///
+/// Compilee partout, pour que ses recettes comptent sur les deux hotes; seule
+/// la preuve Linux l'appelle.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn analyser_dns(octets: &[u8]) -> Result<bifrost_ipc::protocol::DeclarationDns, &'static str> {
+    use bifrost_ipc::protocol::{DECLARATION_DNS_VERSION, EtatDns};
+    let Unique(v) =
+        serde_json::from_slice(octets).map_err(|_| "reponse du daemon tronquee ou illisible")?;
+    let objet = v.as_object().ok_or(HORS_SCHEMA)?;
+    erreur_declaree(objet)?;
+    if objet.len() != CLES_ROUTAGE.len() || CLES_ROUTAGE.iter().any(|c| !objet.contains_key(*c)) {
+        return Err(HORS_SCHEMA);
+    }
+    // Les cles du plan et la graphie des adresses, sur la valeur BRUTE: serde
+    // ignorerait une cle inconnue, et lit `2001:DB8::53` sans rien dire.
+    if let Some(plan) = objet.get("plan").filter(|p| !p.is_null()) {
+        let po = plan.as_object().ok_or(HORS_SCHEMA)?;
+        if po.len() != PLAN_DNS_CLES.len() || PLAN_DNS_CLES.iter().any(|c| !po.contains_key(*c)) {
+            return Err(HORS_SCHEMA);
+        }
+        let canonique = |a: &Value| {
+            a.as_str().is_some_and(|texte| {
+                texte
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|lue| lue.to_string() == texte)
+            })
+        };
+        let amonts = po
+            .get("upstream")
+            .and_then(Value::as_array)
+            .ok_or(HORS_SCHEMA)?;
+        if !po.get("local_resolver").is_some_and(canonique) || !amonts.iter().all(canonique) {
+            return Err(HORS_SCHEMA);
+        }
+    }
+    let d = match serde_json::from_value::<Response>(v) {
+        Ok(Response::DeclarationDns(d)) => *d,
+        _ => return Err(HORS_SCHEMA),
+    };
+    let coherente = match d.issue {
+        EtatDns::NonApplicable => d.application == 0 && d.plan.is_none(),
+        EtatDns::Aucun => d.plan.is_none(),
+        EtatDns::Pose => {
+            d.application > 0 && d.plan.as_ref().is_some_and(|p| !p.backend.is_empty())
+        }
+        EtatDns::Echec => d.application > 0 && d.plan.is_none(),
+    };
+    if d.schema_version != DECLARATION_DNS_VERSION || !instance_valide(&d.instance) || !coherente {
+        return Err(HORS_SCHEMA);
+    }
+    Ok(d)
+}
+
+/// L'alea d'instance d'une declaration: de 32 a 128 chiffres hexadecimaux en
+/// minuscules. Une instance vide (un daemon sans alea) ou d'une autre forme
+/// rend la declaration hors schema. Une seule regle pour les quatre lecteurs.
+fn instance_valide(instance: &str) -> bool {
+    (32..=128).contains(&instance.len())
+        && instance
+            .bytes()
+            .all(|o| o.is_ascii_digit() || (b'a'..=b'f').contains(&o))
 }
 
 /// Le moteur qu'une preuve sait comparer, et ce qu'elle dit des autres cas.
@@ -1014,14 +1110,14 @@ mod tests {
         p[ouvre + 1..fermeture(p, ouvre)].to_vec()
     }
 
-    /// Les trois lecteurs de preuve passent l'exigence nommee, et le code ne
+    /// Les quatre lecteurs de preuve passent l'exigence nommee, et le code ne
     /// nomme l'exigence d'identite qu'a sa definition: une regle de forme sur
     /// les jetons de production, commentaires et litteraux retires. Une autre
     /// exigence passee par un lecteur, ecrite en chemin complet, sous un alias
     /// ou par une autre constante, un etage qui remplace l'exigence recue, ou
     /// un client ouvert avec autre chose qu'elle, rougit.
     #[test]
-    fn les_trois_lecteurs_passent_l_exigence_nommee() {
+    fn les_quatre_lecteurs_passent_l_exigence_nommee() {
         let p = production(include_str!("declaration.rs"));
         let compte = |texte: &str| {
             let motif = jetons(texte);
@@ -1036,6 +1132,7 @@ mod tests {
             ("lire", "lire_avec"),
             ("lire_routage", "lire_routage_avec"),
             ("lire_routage_windows", "lire_routage_windows_avec"),
+            ("lire_dns", "lire_dns_avec"),
         ] {
             assert_eq!(
                 corps_de(&p, lecteur),
@@ -1045,8 +1142,8 @@ mod tests {
         }
         assert_eq!(
             p.iter().filter(|t| *t == "EXIGENCE_PREUVE").count(),
-            4,
-            "la definition et les trois lecteurs"
+            5,
+            "la definition et les quatre lecteurs"
         );
         // Le type ne se nomme que dans l'import groupe, la definition et les
         // parametres; sa seule valeur nommee est celle de la definition.
@@ -1069,6 +1166,7 @@ mod tests {
             "lire_avec",
             "lire_routage_avec",
             "lire_routage_windows_avec",
+            "lire_dns_avec",
             "connecter_et_demander",
         ] {
             assert_eq!(
@@ -1082,8 +1180,8 @@ mod tests {
         }
         assert_eq!(
             compte("connecter_et_demander(socket, delai, attendu,"),
-            3,
-            "les trois lectures transmettent l'exigence recue"
+            4,
+            "les quatre lectures transmettent l'exigence recue"
         );
         assert_eq!(compte("connect_verified("), 1, "un seul client");
         assert_eq!(

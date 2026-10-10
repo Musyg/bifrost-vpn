@@ -189,7 +189,7 @@ memes valeurs.
 | `politique_nft_cli` | `preuve_nft::Unique`, `Politique::lire`, `reference`, puis le comparateur de la CLI | intention de `prove nft --politique`; la CLI |
 | `intention_routes` | `Unique` et `preuve_routes::plan_de_l_intention`; pour les memes valeurs, `declaration::analyser_routage` et `plan_de_la_declaration` | intention de `prove routes --intention` sous Linux; la CLI |
 | `intention_routes_windows` | `Unique` et `preuve_routes_windows::plan_de_l_intention`; pour les memes valeurs, `analyser_routage_windows` et `plan_de_la_declaration` | intention de `prove routes --intention` sous Windows (lecteur pur, compile partout); la CLI |
-| `declaration_daemon` | `declaration::{analyser, analyser_routage, analyser_routage_windows}` | reponse du daemon (root, LocalSystem) que `prove nft`, `prove wfp` et `prove routes` prennent pour attendu; la CLI, une fois l'identite du serveur admise |
+| `declaration_daemon` | `declaration::{analyser, analyser_routage, analyser_routage_windows, analyser_dns}`; pour une declaration DNS posee, `preuve_dns::intention_de_la_declaration` et, aux memes valeurs, `intention_dns` | reponse du daemon (root, LocalSystem) que `prove nft`, `prove wfp`, `prove routes` et `prove dns` prennent pour attendu; la CLI, une fois l'identite du serveur admise |
 | `trames_dbus` | `bifrost_cli::preuve_dns::dbus::{lire_accord, lire_reponse}` | trames que le bus systeme relaie a `prove dns` (tout pair que le bus relaie), lues sous le compte de l'utilisateur; la CLI |
 
 Les graines (`fuzz/graines/<cible>`) viennent des recettes et des exemples du
