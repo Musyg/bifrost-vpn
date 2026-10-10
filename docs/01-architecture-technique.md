@@ -43,7 +43,7 @@ Conclusion operationnelle : integrer Maybenot cote client et serveur ; c'est le 
 
 Le consensus 2026 est le multi-protocole avec bascule automatique : le client teste chaque protocole et choisit le vivant. Shadowsocks-2022, Trojan, obfs4, Cloak, phantun, udp2raw restent utiles comme transports/replis mais ne sont plus des choix primaires.
 
-**Sing-box vs Xray-core.** Sing-box (SagerNet, Go) est le choix par defaut recommande pour un nouveau produit multi-plateforme en 2026 : configuration JSON unifiee identique sur toutes les plateformes (iOS et routeurs inclus), support protocolaire le plus large, maintenance active. Xray-core reste la reference REALITY historique et pour XHTTP, avec une maturite superieure sur certains cas. Certaines configs VLESS ne fonctionnent qu'avec l'un ou l'autre backend. Recommandation : sing-box comme coeur client universel, avec Xray-core disponible en option pour XHTTP.
+**Sing-box vs Xray-core.** Sing-box (SagerNet, Go) est le choix par defaut recommande pour un nouveau logiciel multiplateforme en 2026 : configuration JSON unifiee identique sur toutes les plateformes (iOS et routeurs inclus), support protocolaire le plus large, maintenance active. Xray-core reste la reference REALITY historique et pour XHTTP, avec une maturite superieure sur certains cas. Certaines configs VLESS ne fonctionnent qu'avec l'un ou l'autre backend. Recommandation : sing-box comme coeur client universel, avec Xray-core disponible en option pour XHTTP.
 
 **Etat du blocage etatique 2026.**
 - **Chine (GFW)** : censure SNI etendue a QUIC depuis janvier 2025 (le GFW extrait le SNI des connexions QUIC et bloque, d'apres le papier USENIX Security 2025 de GFW Report qui a mesure ~43,8K FQDN bloques par semaine sur la liste Tranco, 58 207 uniques sur trois mois) ; identification des connexions DoH externes ; cinq regles heuristiques (entropie, ratio ASCII) pour le trafic entierement chiffre ; sondage actif ; chasse active aux IP de sortie. L'episode RST+ACK du 20 aout 2025 (voir Key Findings) illustre l'imprevisibilite. WireGuard nu et Shadowsocks original sont morts.
@@ -73,7 +73,7 @@ Conclusion operationnelle : activer ECH cote client (via DoH) ; ne pas compter d
 Conclusion operationnelle : ne jamais presenter l'auto-heberge comme "anonymat maximal". Pour l'anonymat reel, la recommandation par defaut est VPN auto-heberge (entree, resistance DPI) -> Tor ou Nym (sortie, foule).
 
 **Plan de controle auto-heberge.** Comparatif 2026 :
-- **NetBird** (BSD-3/Apache-2.0, full open source client+serveur, SSO/OIDC, ACL, posture checks, ~13K etoiles, tres actif ; binaire serveur unifie depuis v0.65 fevrier 2026) : meilleur choix pour un produit auto-hebergeable de bout en bout.
+- **NetBird** (BSD-3/Apache-2.0, full open source client+serveur, SSO/OIDC, ACL, posture checks, ~13K etoiles, tres actif ; binaire serveur unifie depuis v0.65 fevrier 2026) : meilleur choix pour un logiciel auto-hebergeable de bout en bout.
 - **Headscale** (BSD-3) : reimplantation du serveur de coordination Tailscale ; utilise les clients Tailscale officiels ; ne gere pas l'identite.
 - **Nebula** (Slack, base certificats, passe a l'echelle).
 - **Defguard** (Rust, MFA au niveau protocole, WireGuard).
@@ -148,7 +148,7 @@ Recommandation : Mullvad Browser comme navigateur par defaut de l'utilisateur Bi
 - Sortie anonyme : chainage optionnel vers Tor/Nym.
 - Serveurs : noeuds RAM-only (Flatcar/Talos ou stboot), payes en Monero chez Njalla/Incognet/1984.
 
-**Langage et framework client.** Rust est le choix dominant en 2026 pour ce type de produit (Mullvad GotaTun en Rust, Rosenpass en Rust, Defguard en Rust, boringtun en Rust). Pour l'UI : Tauri (Rust + webview, MSI leger) ou une UI native. Go reste valable (sing-box, NetBird sont en Go) pour la partie reseau. Recommandation : coeur reseau en Go (reutiliser sing-box) OU Rust ; UI en Tauri.
+**Langage et framework client.** Rust est le choix dominant en 2026 pour ce type de logiciel (Mullvad GotaTun en Rust, Rosenpass en Rust, Defguard en Rust, boringtun en Rust). Pour l'UI : Tauri (Rust + webview, MSI leger) ou une UI native. Go reste valable (sing-box, NetBird sont en Go) pour la partie reseau. Recommandation : coeur reseau en Go (reutiliser sing-box) OU Rust ; UI en Tauri.
 
 **Packaging et distribution.**
 - Windows : MSI + service Windows ; exigences de signature de code (certificat EV pour eviter SmartScreen et pour la signature de driver si callout). WinTun deja signe par WireGuard LLC.

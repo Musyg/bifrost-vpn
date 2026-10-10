@@ -1,7 +1,7 @@
 # Servir et renouveler security.txt
 
 `packaging/security.txt` est la source versionnee du fichier RFC 9116 du
-produit. Le depot est prive; le fichier est publie a la main par le
+logiciel. Le depot est prive; le fichier est publie a la main par le
 proprietaire du projet, sur le site de l'editeur.
 
 ## Le servir sur le site
