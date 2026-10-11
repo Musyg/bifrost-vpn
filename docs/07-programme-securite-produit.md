@@ -379,8 +379,16 @@ l'autre enfant, bit 8 lu pour le bit 0, une seule des trois lectures forcee acti
 exigences sur la pile fantome ne rougissent que sur un processeur qui la porte; sur le runner,
 le job Windows du 11/10/2026 (run 38121398083) l'a jouee: 1703 annoncees et 23 abstentions comme
 sur la base, une mesure reelle de plus, et le budget signale sa ligne d'abstention absente du
-journal. Un vert sans abstention n'y vient que des lectures 1, 1 et 0; les `Flags` lus ne sont pas
-publies (l'artefact brut du job n'est depose qu'en cas d'echec).
+journal. Un vert sans abstention n'y vient que des lectures 1, 1 et 0. La ligne
+`pile fantome lue:` est dans le journal brut du job Windows, depose en artefact a chaque run vert
+ou rouge qui n'est pas annule (un run annule ou arrete par sa limite de temps ne depose rien), et
+conserve 7 jours; le job Linux, lance a chaque push et a chaque PR, ne depose le sien qu'en cas
+d'echec. Le premier journal depose sur un run vert (run 38128749328, 11/10/2026) la porte:
+CET_SS 1, `Flags` 0x105 (EnableUserShadowStack 1, mode strict 0) pour la recette et pour
+l'enfant marque, 0x100 (EnableUserShadowStack 0) pour l'enfant non marque. La feuille maximale
+de CPUID y vaut 0x1c, contre 0xd sous la sonde du 10/10/2026: le processeur, ou ce que
+l'hyperviseur en expose, n'etait pas le meme, ce qui illustre que le materiel du runner change
+d'un run a l'autre.
 
 **Politiques d'execution Windows, 02/10/2026.** Le daemon se pose cinq politiques par
 `SetProcessMitigationPolicy` (module `attenuation`), comme premiere instruction de `main` et
