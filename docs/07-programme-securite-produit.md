@@ -376,8 +376,11 @@ bit ou differe d'un octet, enfant lance dans le role de l'autre, executable de l
 comme temoin, variable du temoin posee dans l'environnement de la suite (avec ou sans role) ou
 absente de celui d'un enfant, enfant qui ne rend pas la main, lecture imprimee sous le role de
 l'autre enfant, bit 8 lu pour le bit 0, une seule des trois lectures forcee active. Les trois
-exigences sur la pile fantome ne rougissent que sur un processeur qui la porte; la recette n'a
-pas encore tourne sur le runner.
+exigences sur la pile fantome ne rougissent que sur un processeur qui la porte; sur le runner,
+le job Windows du 11/10/2026 (run 38121398083) l'a jouee: 1703 annoncees et 23 abstentions comme
+sur la base, une mesure reelle de plus, et le budget signale sa ligne d'abstention absente du
+journal. Un vert sans abstention n'y vient que des lectures 1, 1 et 0; les `Flags` lus ne sont pas
+publies (l'artefact brut du job n'est depose qu'en cas d'echec).
 
 **Politiques d'execution Windows, 02/10/2026.** Le daemon se pose cinq politiques par
 `SetProcessMitigationPolicy` (module `attenuation`), comme premiere instruction de `main` et
