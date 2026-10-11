@@ -179,13 +179,28 @@ jobs:
           RECETTES_JOURNAL_BRUT: recettes-brut.txt
         run: ./scripts/recettes-strict.sh | tee recettes-journal.txt
 
-      - name: Journal complet des recettes, en cas d'echec
-        if: failure()
+      # Le journal complet est depose a chaque run qui execute les recettes,
+      # vert ou rouge, et non en cas d'echec seulement: sur un run vert, les
+      # lignes que les recettes impriment (dont `pile fantome lue:` de
+      # `durcissement_binaire.rs`) n'etaient lisibles nulle part, le script
+      # n'imprimant que le compte et les abstentions. Windows seulement: ce
+      # job ne part que sur demande explicite, alors que le job Linux part a
+      # chaque push sur main et a chaque PR; lui garde `if: failure()`.
+      # Conservation de 7 jours au lieu des 90 du depot: le journal se lit le
+      # jour du run demande (le compte reste dans le log du job), et le
+      # stockage des artefacts reste borne. `!cancelled()` et non `always()`:
+      # un run annule n'est pas lu, et c'est la forme que recommande la
+      # documentation (<< Evaluate expressions >>, fonctions de statut,
+      # relevee le 11/10/2026). Si l'etape des recettes n'a pas tourne, il n'y
+      # a pas de fichier, et `if-no-files-found: ignore` ne depose rien.
+      - name: Journal complet des recettes, vert ou rouge
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: recettes-brut-windows
           path: recettes-brut.txt
           if-no-files-found: ignore
+          retention-days: 7
 
       # Palier vers --strict: voir le commentaire du job Linux et les en-tetes
       # des deux listes ci/abstentions-attendues-*.txt.
