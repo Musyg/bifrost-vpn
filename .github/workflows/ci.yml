@@ -555,6 +555,10 @@ jobs:
           # qui cesserait d'ecrire ou qui changerait de nom de fichier
           # laisserait un job vert et un depot vide.
           if-no-files-found: error
+          # Conservation de 30 jours au lieu des 90 du depot: ce SBOM se
+          # refabrique depuis l'arbre de son commit, celui d'une release ira
+          # avec la release, et le stockage des artefacts reste borne.
+          retention-days: 30
 
   fuzz:
     name: fuzzing des parseurs (Linux)
