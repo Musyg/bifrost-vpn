@@ -36,6 +36,14 @@
 Ecrivez a security@inaricom.com. C'est un alias sur le domaine de l'editeur
 (Inaricom). Il n'y a pas de programme de primes.
 
+Vous pouvez aussi signaler en prive sur GitHub, avec un compte GitHub: page
+Security de ce depot (https://github.com/Musyg/bifrost-vpn/security), bouton
+"Report a vulnerability", ou directement
+https://github.com/Musyg/bifrost-vpn/security/advisories/new. Le rapport va aux
+mainteneurs du depot, pas au public. Ce canal ne passe pas par la cle
+OpenPGP ci-dessous: le rapport est conserve par GitHub. Les engagements de la
+section "Notre engagement" valent pour les deux canaux.
+
 ### Chiffrer votre rapport
 
 Une cle OpenPGP est publiee pour ce canal. Chiffrez avec elle tout ce qui est
@@ -96,6 +104,14 @@ n'est donc ecrite tant que cet engagement n'a pas ete tranche.
 
 Email security@inaricom.com. It is an alias on the publisher's domain
 (Inaricom). There is no bug bounty.
+
+You can also report privately on GitHub, with a GitHub account: the Security
+page of this repository (https://github.com/Musyg/bifrost-vpn/security), button
+"Report a vulnerability", or directly
+https://github.com/Musyg/bifrost-vpn/security/advisories/new. The report goes to
+the repository maintainers, not to the public. This channel does not use the
+OpenPGP key below: the report is stored by GitHub. The commitments in "Our
+commitment" apply to both channels.
 
 ### Encrypting your report
 
