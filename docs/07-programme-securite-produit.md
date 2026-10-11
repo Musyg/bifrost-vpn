@@ -344,6 +344,41 @@ controles: GUARD_CF et la table restent poses), pile executable, RELRO coupe ou 
 relocation statique; lecture d'un mauvais champ ou d'un mauvais bit; propriete retiree de la
 lecture; repertoire absent, vide ou de profil de test; copie de la recette a la place d'un livre.
 
+**L'effet de la pile fantome, 11/10/2026.** Le marquage ne protege que sur un processeur qui porte
+la pile fantome (CET_SS) et sous un Windows qui l'applique; ni dev-windows ni essai-windows ne la
+portent. La seule sonde du runner `windows-2025-vs2026` (10/10/2026, run 38082815249, branche
+jetable non fusionnee) y a lu un AMD EPYC 7763 avec CET_SS a 1, et, dans un processus construit
+avec les options du depot, une politique `ProcessUserShadowStackPolicy` qui porte
+EnableUserShadowStack en mode de compatibilite (mode strict a 0). La recette
+`la_pile_fantome_s_applique_a_l_executable_marque_et_pas_a_sa_copie_non_marquee`
+(`durcissement_binaire.rs`, Windows x86_64) lit cet effet dans la suite. Son executable doit
+porter CET_COMPAT, lu par le lecteur PE de la recette. CPUID (feuille 7, sous-feuille 0, ECX bit
+7) dit si le processeur porte la pile fantome, avec un temoin de lecture: la feuille maximale
+l'atteint et ses registres ne sont pas tous nuls. La recette lit ensuite la politique de trois
+processus: le sien, lance par cargo, et deux copies de son executable, posees dans un repertoire
+temporaire a nom unique et lancees en processus enfants par le meme chemin, sur cette seule
+recette. Le temoin positif est la copie identique, qui garde le marquage; le temoin negatif, la
+copie dont seul le bit CET_COMPAT est retire. Chaque enfant recoit son role par une variable
+d'environnement, verifie que son image y correspond (bit present ou absent) et qu'il est la copie
+de ce role, puis lit et imprime sa propre politique. Sur un processeur qui porte la pile
+fantome, EnableUserShadowStack doit valoir 1 dans le processus de la recette et dans l'enfant
+marque, 0 dans l'enfant non marque: sans le temoin positif, le processus de la recette et le
+temoin negatif differeraient par le bit et par le chemin de lancement. Le mode strict est
+imprime, pas exige, et une ligne `pile fantome lue:` porte les trois lectures. Seuls le bit 0
+(EnableUserShadowStack) et le bit 4 (mode strict) de `Flags` repondent: le mot vaut 0x100 sans
+aucun materiel CET (CetDynamicApisOutOfProcOnly; mesure sur dev-windows dans les trois
+processus). Sans CET_SS, la recette construit, lance et lit quand meme les deux temoins, puis
+s'abstient nommement (ligne du budget d'abstention Windows); une politique active sans CET_SS la
+fait rougir, l'une des lectures etant alors fausse. Elle lit des etats et ne provoque aucune
+violation. Chaque lecture a ete vue rouge sur dev-windows: `/CETCOMPAT` retire, feuille 7 non
+lue, copie non marquee qui garde le bit ou differe hors de son mot, copie marquee qui perd le
+bit ou differe d'un octet, enfant lance dans le role de l'autre, executable de la recette lance
+comme temoin, variable du temoin posee dans l'environnement de la suite (avec ou sans role) ou
+absente de celui d'un enfant, enfant qui ne rend pas la main, lecture imprimee sous le role de
+l'autre enfant, bit 8 lu pour le bit 0, une seule des trois lectures forcee active. Les trois
+exigences sur la pile fantome ne rougissent que sur un processeur qui la porte; la recette n'a
+pas encore tourne sur le runner.
+
 **Politiques d'execution Windows, 02/10/2026.** Le daemon se pose cinq politiques par
 `SetProcessMitigationPolicy` (module `attenuation`), comme premiere instruction de `main` et
 avant la lecture de sa ligne de commande, en service comme en console: `ProcessImageLoadPolicy`
@@ -394,11 +429,15 @@ toujours pleine, refus sans nom, politique ecartee posee, lanceur qui se pose le
   statique compte les controles, pas leur effet. Un temoin d'execution devra empecher
   l'optimiseur de rendre l'appel direct (`std::hint::black_box`), sans quoi il ne prouve rien:
   c'est la cause de rust-lang/rust#135963, fermee le 24/01/2025 comme comportement attendu.
-- L'effet de la pile fantome: le processeur de dev-windows ne la porte pas, et le processus y
-  tourne sans elle; le marquage est mesure, pas son effet. wintun.dll et wireguard.dll ne sont
-  pas marquees; en mode de compatibilite, seule une violation dans un module marque est fatale
-  (documentation de PROCESS_MITIGATION_USER_SHADOW_STACK_POLICY), ce qu'aucune mesure sous le
-  service reel n'a encore confirme.
+- L'effet de la pile fantome n'est lu que par une recette, dans un executable de recette (profil
+  de test) et sur un processeur qui la porte: pas sous le service reel, pas dans les binaires
+  livres en `--release`, et ni sur dev-windows ni sur essai-windows, ou elle s'abstient. Elle
+  constate que Windows active la pile fantome, pas qu'elle arrete un retour detourne: aucune
+  violation n'est provoquee. Le materiel du runner peut changer d'un run a l'autre; sur un
+  processeur sans pile fantome, la recette s'abstient sans rougir. wintun.dll et wireguard.dll ne
+  sont pas marquees; en mode de compatibilite, seule une violation dans un module marque est
+  fatale (documentation de PROCESS_MITIGATION_USER_SHADOW_STACK_POLICY), ce qu'aucune mesure sous
+  le service reel n'a encore confirme.
 - La protection de pile de rustc (`-Z stack-protector`) n'existe que sur une chaine nightly
   (rustc 1.98.0 refuse toute option `-Z`): non posee. Le seul `__stack_chk_fail` des binaires
   Linux vient du code C d'une dependance de la CLI.

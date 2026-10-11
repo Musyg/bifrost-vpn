@@ -29,6 +29,31 @@
 //!   `/CETCOMPAT` pour la cible MSVC x86_64. C'est la seule partie que la CI
 //!   automatique, qui tourne sous Linux, execute pour Windows.
 //!
+//! # L'effet du marquage CET
+//!
+//! `la_pile_fantome_s_applique_a_l_executable_marque_et_pas_a_sa_copie_non_marquee`,
+//! Windows x86_64 seulement, lit l'effet du marquage et non plus le seul bit:
+//! son executable doit porter CET_COMPAT; CPUID (feuille 7, sous-feuille 0,
+//! ECX bit 7, CET_SS) dit si le processeur porte la pile fantome, avec un
+//! temoin de lecture (la feuille maximale l'atteint, ses registres ne sont pas
+//! tous nuls). Elle lit ensuite la politique `ProcessUserShadowStackPolicy` de
+//! trois processus: le sien, lance par cargo, et deux copies de son executable,
+//! posees dans un repertoire temporaire a nom unique et lancees en processus
+//! enfants par le meme chemin, sur cette seule recette. Le temoin positif est
+//! la copie identique, qui garde le marquage; le temoin negatif, la copie dont
+//! seul le bit CET_COMPAT est retire. Chaque enfant recoit son role dans
+//! `BIFROST_TEMOIN_CET`, controle que son image lui correspond (bit present ou
+//! absent) et qu'il est la copie de ce role, puis lit et imprime sa politique.
+//! Sur un processeur avec CET_SS, EnableUserShadowStack doit valoir 1 pour la
+//! suite et pour l'enfant marque, 0 pour l'enfant non marque: sans le temoin
+//! positif, la suite et le temoin negatif differeraient par le bit ET par le
+//! chemin de lancement. Le mode strict est imprime, pas exige. Sur un
+//! processeur sans CET_SS, la recette construit, lance et lit quand meme les
+//! deux temoins, puis s'abstient nommement; une politique active sur un tel
+//! processeur la fait rougir (CPUID ou le bit de la politique mal lu). Elle
+//! imprime ses trois lectures sur une ligne qui commence par
+//! `pile fantome lue:`.
+//!
 //! # Les binaires livres
 //!
 //! `les_binaires_livres_portent_le_durcissement` applique les memes lectures
@@ -63,7 +88,9 @@
 //! - L'execution: elle ne fait pas tomber un appel vers une cible invalide,
 //!   ni un retour detourne; elle constate que le controle est emis et que
 //!   l'image se declare. Le marquage CET n'a d'effet que sur un processeur qui
-//!   porte la pile fantome, sous un Windows qui l'applique.
+//!   porte la pile fantome, sous un Windows qui l'applique: la, la recette de
+//!   son effet lit que la pile fantome est active, pas qu'elle arrete un
+//!   retour detourne, et ni wintun.dll ni wireguard.dll ne sont lues.
 //! - Une construction faite ailleurs que dans la CI: lancee hors du depot, ou
 //!   avec RUSTFLAGS defini, elle ne lit pas `.cargo/config.toml`, et rien ici
 //!   ne la lit.
@@ -558,9 +585,22 @@ mod pe {
 
         /// Les caracteristiques etendues: le mot de 32 bits de l'entree de
         /// type 20 du repertoire de debogage, ou `None` si l'image n'en porte
-        /// pas. Une entree fait 28 octets; Type a l'octet 12, SizeOfData a 16,
-        /// PointerToRawData (position dans le fichier) a 24.
+        /// pas.
         pub fn caracteristiques_etendues(&self, fichier: &[u8]) -> Result<Option<u32>, String> {
+            match self.position_caracteristiques_etendues(fichier)? {
+                Some(donnees) => u32_le(fichier, donnees).map(Some),
+                None => Ok(None),
+            }
+        }
+
+        /// La position dans le fichier du mot des caracteristiques etendues,
+        /// ou `None` si l'image n'en porte pas. Une entree du repertoire de
+        /// debogage fait 28 octets; Type a l'octet 12, SizeOfData a 16,
+        /// PointerToRawData (position dans le fichier) a 24.
+        pub fn position_caracteristiques_etendues(
+            &self,
+            fichier: &[u8],
+        ) -> Result<Option<usize>, String> {
             let Ok((rva, taille)) = self.repertoire(REPERTOIRE_DEBOGAGE) else {
                 return Ok(None);
             };
@@ -577,7 +617,8 @@ mod pe {
                     ));
                 }
                 let donnees = u32_le(fichier, entree + 24)? as usize;
-                return u32_le(fichier, donnees).map(Some);
+                u32_le(fichier, donnees)?;
+                return Ok(Some(donnees));
             }
             Ok(None)
         }
@@ -887,6 +928,561 @@ fn un_appel_par_pointeur_de_ce_fichier_passe_par_le_controle_cfg() {
         code.len(),
         garde.pointeur_dispatch,
         garde.pointeur_controle
+    );
+}
+
+// --- L'effet du marquage CET: la pile fantome du processus -------------------
+
+/// Le nom de la recette de l'effet du marquage CET: le temoin le donne a sa
+/// copie (`--exact`), et l'abstention le porte.
+#[cfg(all(windows, target_env = "msvc", target_arch = "x86_64"))]
+const RECETTE_PILE_FANTOME: &str =
+    "la_pile_fantome_s_applique_a_l_executable_marque_et_pas_a_sa_copie_non_marquee";
+
+/// Posee par la recette pour chacune des deux copies qu'elle lance, avec le role
+/// de la copie pour valeur (`Role::valeur`): la copie lit alors sa propre
+/// politique, l'imprime, et s'arrete la. Une valeur qui ne declare aucun role,
+/// une image qui ne correspond pas au role declare, ou un executable qui n'est
+/// pas la copie de ce role, rougit (`temoin_de_pile_fantome`): posee dans
+/// l'environnement de la suite, elle ne fait pas passer la recette pour l'un de
+/// ses temoins.
+#[cfg(all(windows, target_env = "msvc", target_arch = "x86_64"))]
+const VARIABLE_TEMOIN_CET: &str = "BIFROST_TEMOIN_CET";
+
+/// Le role d'un enfant: la copie identique a l'executable, qui garde le
+/// marquage (temoin positif), ou la copie dont seul le bit CET_COMPAT est
+/// retire (temoin negatif). Les deux passent par le meme chemin: meme
+/// repertoire, meme lancement borne, meme lecture. Sans le temoin positif, la
+/// suite (lancee par cargo) et le temoin negatif differeraient par le bit ET
+/// par le chemin de lancement, et rien ne dirait lequel des deux compte.
+#[cfg(all(windows, target_env = "msvc", target_arch = "x86_64"))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Role {
+    Marque,
+    NonMarque,
+}
+
+#[cfg(all(windows, target_env = "msvc", target_arch = "x86_64"))]
+impl Role {
+    const TOUS: [Role; 2] = [Role::Marque, Role::NonMarque];
+
+    /// La valeur de `VARIABLE_TEMOIN_CET` qui declare ce role.
+    fn valeur(self) -> &'static str {
+        match self {
+            Role::Marque => "marque",
+            Role::NonMarque => "non-marque",
+        }
+    }
+
+    /// Le nom de la copie qui joue ce role, et elle seule.
+    fn fichier(self) -> String {
+        format!(
+            "temoin-cet-{}{}",
+            self.valeur(),
+            std::env::consts::EXE_SUFFIX
+        )
+    }
+
+    /// Ce que l'enfant de ce role imprime devant le mot `Flags` qu'il a lu.
+    fn marqueur(self) -> String {
+        format!("temoin cet {}, Flags ", self.valeur())
+    }
+
+    /// Le role que declare une valeur de la variable, s'il y en a un.
+    fn depuis(valeur: &std::ffi::OsStr) -> Option<Role> {
+        Role::TOUS.into_iter().find(|r| valeur == r.valeur())
+    }
+}
+
+/// Le nom de fichier de l'executable `chemin`, ou une chaine vide.
+#[cfg(all(windows, target_env = "msvc", target_arch = "x86_64"))]
+fn nom_de_fichier(chemin: &std::path::Path) -> String {
+    chemin
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// Le temps laisse au temoin pour rendre sa lecture; au-dela il est tue par sa
+/// poignee et la recette rougit.
+#[cfg(all(windows, target_env = "msvc", target_arch = "x86_64"))]
+const DELAI_TEMOIN_CET: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// EnableUserShadowStack, bit 0 de PROCESS_MITIGATION_USER_SHADOW_STACK_POLICY
+/// (winnt.h): la pile fantome est active pour le processus, au moins en mode de
+/// compatibilite.
+#[cfg(all(windows, target_env = "msvc", target_arch = "x86_64"))]
+const PILE_FANTOME_ACTIVE: u32 = 1 << 0;
+
+/// EnableUserShadowStackStrictMode, bit 4 de la meme structure: imprime, pas
+/// exige.
+#[cfg(all(windows, target_env = "msvc", target_arch = "x86_64"))]
+const PILE_FANTOME_STRICTE: u32 = 1 << 4;
+
+/// CET_SS: CPUID feuille 7, sous-feuille 0, ECX bit 7.
+#[cfg(all(windows, target_env = "msvc", target_arch = "x86_64"))]
+const CPUID_CET_SS: u32 = 1 << 7;
+
+/// La lecture de la politique, celle des recettes des politiques du daemon.
+/// Seule `lire` sert ici: la table et `manquantes` sont a ces recettes.
+#[cfg(all(windows, target_env = "msvc", target_arch = "x86_64"))]
+#[path = "commun/attenuation.rs"]
+#[allow(dead_code)]
+mod attenuation_commun;
+
+/// Le mot `Flags` de la politique de pile fantome du processus courant.
+#[cfg(all(windows, target_env = "msvc", target_arch = "x86_64"))]
+fn politique_pile_fantome() -> Result<u32, u32> {
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, ProcessUserShadowStackPolicy};
+
+    // SAFETY: GetCurrentProcess ne lit aucun argument et rend la pseudo-poignee
+    // du processus courant, qui n'a pas a etre fermee.
+    let moi = unsafe { GetCurrentProcess() };
+    attenuation_commun::lire(moi, ProcessUserShadowStackPolicy)
+}
+
+/// Ce que la recette lit de CPUID: la feuille maximale (feuille 0, EAX) et la
+/// feuille 7, sous-feuille 0.
+#[cfg(all(windows, target_env = "msvc", target_arch = "x86_64"))]
+struct FeuilleSept {
+    maximale: u32,
+    eax: u32,
+    ebx: u32,
+    ecx: u32,
+    edx: u32,
+}
+
+/// La feuille 7, sous-feuille 0, avec le temoin de sa lecture: la feuille
+/// maximale doit l'atteindre, et ses quatre registres ne peuvent pas etre tous
+/// nuls. Une lecture qui ne rend que des zeros n'a rien lu, et CET_SS y vaudrait
+/// 0: la recette s'abstiendrait sans avoir regarde.
+#[cfg(all(windows, target_env = "msvc", target_arch = "x86_64"))]
+#[allow(unused_unsafe)]
+fn lire_feuille_sept() -> Result<FeuilleSept, String> {
+    use std::arch::x86_64::{__cpuid, __cpuid_count};
+
+    // SAFETY: l'instruction CPUID existe sur tout processeur x86_64 et ne touche
+    // pas la memoire. Les intrinseques etaient `unsafe` sous rustc 1.89 et ne le
+    // sont plus sous 1.98 (mesure); le bloc garde le code valide pour les deux,
+    // d'ou `allow(unused_unsafe)`.
+    let (base, feuille) = unsafe { (__cpuid(0), __cpuid_count(7, 0)) };
+    if base.eax < 7 {
+        return Err(format!(
+            "CPUID: feuille maximale {:#x}, la feuille 7 n'existe pas: CET_SS ne se lit pas",
+            base.eax
+        ));
+    }
+    if feuille.eax | feuille.ebx | feuille.ecx | feuille.edx == 0 {
+        return Err(format!(
+            "CPUID: feuille 7 (feuille maximale {:#x}) lue toute nulle: rien n'a ete lu, et \
+             CET_SS a 0 ne dirait rien du processeur",
+            base.eax
+        ));
+    }
+    Ok(FeuilleSept {
+        maximale: base.eax,
+        eax: feuille.eax,
+        ebx: feuille.ebx,
+        ecx: feuille.ecx,
+        edx: feuille.edx,
+    })
+}
+
+/// Un temoin, dans la copie que la recette lance pour le role que declare
+/// `valeur`: il lit sa propre politique et l'imprime, sans rien exiger. Avant,
+/// il controle que la valeur declare un role, que son image correspond a ce
+/// role (CET_COMPAT present pour `marque`, absent pour `non-marque`), et qu'il
+/// est la copie de ce role; sinon il rougit, sans rien lire.
+#[cfg(all(windows, target_env = "msvc", target_arch = "x86_64"))]
+fn temoin_de_pile_fantome(valeur: &std::ffi::OsStr) {
+    let (chemin, fichier, image) = image();
+    let role = Role::depuis(valeur).unwrap_or_else(|| {
+        panic!(
+            "{}: {VARIABLE_TEMOIN_CET} vaut {valeur:?}, qui ne declare aucun role (attendus: \
+             {:?} ou {:?}). Seules les copies que lance `{RECETTE_PILE_FANTOME}` la posent.",
+            chemin.display(),
+            Role::Marque.valeur(),
+            Role::NonMarque.valeur()
+        )
+    });
+    let marque = role == Role::Marque;
+    match image.caracteristiques_etendues(&fichier) {
+        Ok(Some(etendues)) if (etendues & pe::CET_COMPAT != 0) == marque => {}
+        lu => panic!(
+            "{}: {VARIABLE_TEMOIN_CET} declare le role {:?}, et l'image ne lui correspond pas \
+             (caracteristiques etendues: {lu:?}, CET_COMPAT attendu {}). Seule la copie de ce \
+             role, lancee par `{RECETTE_PILE_FANTOME}`, lit sa politique sans rien exiger.",
+            chemin.display(),
+            role.valeur(),
+            if marque { "present" } else { "absent" }
+        ),
+    }
+    let nom = nom_de_fichier(&chemin);
+    assert!(
+        nom == role.fichier(),
+        "{}: {VARIABLE_TEMOIN_CET} declare le role {:?}, et cet executable ({nom}) n'est pas la \
+         copie de ce role ({}): posee dans l'environnement de la suite, la variable ne la fait \
+         pas passer pour l'un de ses temoins.",
+        chemin.display(),
+        role.valeur(),
+        role.fichier()
+    );
+    let drapeaux = politique_pile_fantome().unwrap_or_else(|code| {
+        panic!(
+            "temoin {:?}: politique de pile fantome illisible, code systeme {code}",
+            role.valeur()
+        )
+    });
+    println!("{}{drapeaux:#010x}", role.marqueur());
+}
+
+/// Un repertoire a nom unique pour les deux copies des temoins, retire quand il
+/// sort de la portee, rouge compris.
+#[cfg(all(windows, target_env = "msvc", target_arch = "x86_64"))]
+struct AtelierTemoin(PathBuf);
+
+#[cfg(all(windows, target_env = "msvc", target_arch = "x86_64"))]
+impl AtelierTemoin {
+    fn nouveau() -> AtelierTemoin {
+        let instant = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        let chemin = std::env::temp_dir().join(format!(
+            "bifrost-temoin-cet-{}-{instant}",
+            std::process::id()
+        ));
+        // `create_dir` et non `create_dir_all`: un repertoire deja la n'est pas
+        // celui de cette execution.
+        std::fs::create_dir(&chemin)
+            .unwrap_or_else(|e| panic!("{}: repertoire du temoin: {e}", chemin.display()));
+        AtelierTemoin(chemin)
+    }
+}
+
+#[cfg(all(windows, target_env = "msvc", target_arch = "x86_64"))]
+impl Drop for AtelierTemoin {
+    fn drop(&mut self) {
+        // Juste apres la sortie d'un processus, son image peut rester ouverte
+        // un instant: quelques essais avant de conclure.
+        let mut erreur = None;
+        for _ in 0..50 {
+            match std::fs::remove_dir_all(&self.0) {
+                Ok(()) => return,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+                Err(e) => {
+                    erreur = Some(e);
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+            }
+        }
+        let message = format!(
+            "{}: repertoire du temoin non retire ({erreur:?})",
+            self.0.display()
+        );
+        if std::thread::panicking() {
+            eprintln!("{message}");
+        } else {
+            panic!("{message}");
+        }
+    }
+}
+
+/// Ecrit `octets` dans `atelier` sous le nom de la copie du role `role`, et rend
+/// son chemin avec ce que le systeme de fichiers en relit.
+#[cfg(all(windows, target_env = "msvc", target_arch = "x86_64"))]
+fn ecrire_copie(atelier: &std::path::Path, role: Role, octets: &[u8]) -> (PathBuf, Vec<u8>) {
+    let chemin = atelier.join(role.fichier());
+    std::fs::write(&chemin, octets)
+        .unwrap_or_else(|e| panic!("{}: copie du temoin: {e}", chemin.display()));
+    let relue = std::fs::read(&chemin)
+        .unwrap_or_else(|e| panic!("{}: copie du temoin illisible: {e}", chemin.display()));
+    (chemin, relue)
+}
+
+/// La copie de `fichier` qui garde le marquage, ecrite dans `atelier` et relue:
+/// octet pour octet l'original.
+#[cfg(all(windows, target_env = "msvc", target_arch = "x86_64"))]
+fn copie_marquee(fichier: &[u8], atelier: &std::path::Path) -> PathBuf {
+    let (chemin, relue) = ecrire_copie(atelier, Role::Marque, fichier);
+    let ecarts = fichier.iter().zip(&relue).filter(|(a, b)| a != b).count();
+    assert!(
+        relue.len() == fichier.len() && ecarts == 0,
+        "{}: la copie marquee ({} octets) n'est pas octet pour octet l'original ({} octets): \
+         {ecarts} octet(s) differents",
+        chemin.display(),
+        relue.len(),
+        fichier.len()
+    );
+    chemin
+}
+
+/// La copie de `fichier` sans le bit CET_COMPAT, ecrite dans `atelier` et
+/// relue par le meme lecteur: elle ne differe de l'original que par ce bit.
+#[cfg(all(windows, target_env = "msvc", target_arch = "x86_64"))]
+fn copie_non_marquee(fichier: &[u8], image: &pe::Image, atelier: &std::path::Path) -> PathBuf {
+    let position = image
+        .position_caracteristiques_etendues(fichier)
+        .unwrap_or_else(|e| panic!("repertoire de debogage illisible: {e}"))
+        .expect("la precondition a lu les caracteristiques etendues de cette image");
+    let mut copie = fichier.to_vec();
+    let mot = u32_le(&copie, position).expect("mot lu par la precondition");
+    copie[position..position + 4].copy_from_slice(&(mot & !pe::CET_COMPAT).to_le_bytes());
+    let (chemin, relue) = ecrire_copie(atelier, Role::NonMarque, &copie);
+
+    let etendues = pe::Image::lire(&relue).and_then(|i| i.caracteristiques_etendues(&relue));
+    let attendues = pe::Image::lire(fichier)
+        .and_then(|i| i.caracteristiques_etendues(fichier))
+        .map(|lu| lu.map(|mot| mot & !pe::CET_COMPAT));
+    assert!(
+        matches!(etendues, Ok(Some(_))) && etendues == attendues,
+        "{}: la copie ne porte pas les caracteristiques etendues de l'original sans \
+         CET_COMPAT (lues {etendues:?}, attendues {attendues:?})",
+        chemin.display()
+    );
+    let ecarts = fichier.iter().zip(&relue).filter(|(a, b)| a != b).count();
+    let hors_du_mot = fichier
+        .iter()
+        .zip(&relue)
+        .enumerate()
+        .filter(|(i, (a, b))| a != b && !(position..position + 4).contains(i))
+        .count();
+    assert!(
+        relue.len() == fichier.len() && ecarts > 0 && hors_du_mot == 0,
+        "{}: la copie ({} octets) ne differe pas de l'original ({} octets) par le seul mot des \
+         caracteristiques etendues a {position:#x}: {ecarts} octet(s) differents, dont \
+         {hors_du_mot} hors de ce mot",
+        chemin.display(),
+        relue.len(),
+        fichier.len()
+    );
+    chemin
+}
+
+/// Les sorties d'un temoin, citees dans un message de la recette. Chaque ligne
+/// est decalee, et le mot que `recettes-strict.sh` compte comme une abstention
+/// est ecrit en minuscules: le journal de la suite porte ce message, et une
+/// sortie citee ne doit y compter ni pour un binaire ni pour une abstention.
+#[cfg(all(windows, target_env = "msvc", target_arch = "x86_64"))]
+fn citer(sortie: &str, erreurs: &str) -> String {
+    sortie
+        .lines()
+        .chain(erreurs.lines())
+        .map(|l| format!("    temoin| {}", l.replace("SKIPPED", "skipped")))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Lance la copie en processus enfant, dans le role `role`, sur cette seule
+/// recette, et rend le mot `Flags` qu'elle a imprime, une fois et une seule.
+#[cfg(all(windows, target_env = "msvc", target_arch = "x86_64"))]
+fn lancer_temoin(copie: &std::path::Path, role: Role) -> Result<u32, String> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    use std::time::Instant;
+
+    let mut enfant = Command::new(copie)
+        .args([
+            RECETTE_PILE_FANTOME,
+            "--exact",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(VARIABLE_TEMOIN_CET, role.valeur())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            format!(
+                "{}: lancement du temoin {:?} refuse: {e}",
+                copie.display(),
+                role.valeur()
+            )
+        })?;
+    let mut flux_sortie = enfant.stdout.take().expect("sortie du temoin redirigee");
+    let mut flux_erreurs = enfant.stderr.take().expect("erreurs du temoin redirigees");
+    let fil_sortie = std::thread::spawn(move || {
+        let mut lu = Vec::new();
+        let _ = flux_sortie.read_to_end(&mut lu);
+        lu
+    });
+    let fil_erreurs = std::thread::spawn(move || {
+        let mut lu = Vec::new();
+        let _ = flux_erreurs.read_to_end(&mut lu);
+        lu
+    });
+    let limite = Instant::now() + DELAI_TEMOIN_CET;
+    let statut = loop {
+        match enfant.try_wait() {
+            Ok(Some(statut)) => break statut,
+            Ok(None) if Instant::now() < limite => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            attente => {
+                let _ = enfant.kill();
+                let _ = enfant.wait();
+                return Err(format!(
+                    "{}: le temoin {:?} n'a pas rendu la main en {} s ({attente:?}), tue",
+                    copie.display(),
+                    role.valeur(),
+                    DELAI_TEMOIN_CET.as_secs()
+                ));
+            }
+        }
+    };
+    let sortie = String::from_utf8_lossy(&fil_sortie.join().unwrap_or_default()).into_owned();
+    let erreurs = String::from_utf8_lossy(&fil_erreurs.join().unwrap_or_default()).into_owned();
+    let marqueur = role.marqueur();
+    let lectures: Vec<&str> = sortie
+        .match_indices(marqueur.as_str())
+        .map(|(i, _)| &sortie[i + marqueur.len()..])
+        .collect();
+    let mot = match lectures.as_slice() {
+        [suite] if statut.success() => suite
+            .strip_prefix("0x")
+            .and_then(|h| h.get(..8))
+            .and_then(|h| u32::from_str_radix(h, 16).ok()),
+        _ => None,
+    };
+    mot.ok_or_else(|| {
+        format!(
+            "{}: le temoin {:?} n'a pas rendu une lecture et une seule ({statut}, {} \
+             lecture(s)). Ce qu'il a ecrit:\n{}",
+            copie.display(),
+            role.valeur(),
+            lectures.len(),
+            citer(&sortie, &erreurs)
+        )
+    })
+}
+
+/// L'EFFET du marquage CET, la ou le processeur porte la pile fantome: Windows
+/// l'active pour l'executable de cette recette, marque, et pour sa copie
+/// identique lancee en processus enfant, et pas pour une copie dont seul le bit
+/// CET_COMPAT est retire, lancee par le meme chemin. La recette lit des etats
+/// (CPUID et la politique des trois processus); elle ne provoque aucune
+/// violation. Ou le processeur ne la porte pas, elle s'abstient nommement,
+/// apres avoir quand meme construit, lance et lu les deux temoins: cette
+/// chaine est eprouvee sur tout hote Windows x86_64, et seules les exigences
+/// sur la pile fantome attendent un processeur qui la porte.
+#[cfg(all(windows, target_env = "msvc", target_arch = "x86_64"))]
+#[test]
+fn la_pile_fantome_s_applique_a_l_executable_marque_et_pas_a_sa_copie_non_marquee() {
+    if let Some(valeur) = std::env::var_os(VARIABLE_TEMOIN_CET) {
+        temoin_de_pile_fantome(&valeur);
+        return;
+    }
+
+    // Une copie de temoin lancee sans role ne rejoue pas la recette: elle
+    // relancerait ses propres copies.
+    let (chemin, fichier, image) = image();
+    let nom = nom_de_fichier(&chemin);
+    if let Some(role) = Role::TOUS.into_iter().find(|r| nom == r.fichier()) {
+        panic!(
+            "{}: copie du temoin {:?} lancee sans {VARIABLE_TEMOIN_CET}: elle ne rejoue pas la \
+             recette, qui relancerait ses propres copies.",
+            chemin.display(),
+            role.valeur()
+        );
+    }
+
+    // a. L'executable de la recette porte le marquage: sans lui, la politique
+    // lue ne dirait rien de son effet.
+    if let Err(e) = verifier_cet(&image, &fichier) {
+        panic!(
+            "{}: {e}\nSans ce marquage, la politique de pile fantome de ce processus ne dirait \
+             rien de son effet.",
+            chemin.display()
+        );
+    }
+
+    // b. Le processeur, avec le temoin de sa lecture.
+    let feuille = lire_feuille_sept().unwrap_or_else(|e| panic!("{e}"));
+    let cet_ss = feuille.ecx & CPUID_CET_SS != 0;
+
+    // c. Le processus de la suite, marque, lance par cargo.
+    let suite = politique_pile_fantome().unwrap_or_else(|code| {
+        panic!("politique de pile fantome de ce processus illisible, code systeme {code}")
+    });
+
+    // d. Les deux temoins, par le meme chemin: la copie identique (positif) et
+    // la copie sans le bit (negatif), dans le meme repertoire, chacune lancee
+    // en processus enfant dans son role.
+    let atelier = AtelierTemoin::nouveau();
+    let copie_positive = copie_marquee(&fichier, &atelier.0);
+    let copie_negative = copie_non_marquee(&fichier, &image, &atelier.0);
+    let marque = lancer_temoin(&copie_positive, Role::Marque).unwrap_or_else(|e| panic!("{e}"));
+    let non_marque =
+        lancer_temoin(&copie_negative, Role::NonMarque).unwrap_or_else(|e| panic!("{e}"));
+    drop(atelier);
+
+    // e. Ce qui a ete lu, sur une ligne stable, avant tout verdict.
+    let lu = |mot: u32| {
+        format!(
+            "Flags {mot:#010x}, EnableUserShadowStack {}, mode strict {}",
+            u8::from(mot & PILE_FANTOME_ACTIVE != 0),
+            u8::from(mot & PILE_FANTOME_STRICTE != 0)
+        )
+    };
+    println!(
+        "pile fantome lue: CET_SS {} (feuille maximale {:#x}, feuille sept eax {:#x} ebx {:#x} \
+         ecx {:#x} edx {:#x}); suite: {}; enfant marque: {}; enfant non marque: {}",
+        u8::from(cet_ss),
+        feuille.maximale,
+        feuille.eax,
+        feuille.ebx,
+        feuille.ecx,
+        feuille.edx,
+        lu(suite),
+        lu(marque),
+        lu(non_marque),
+    );
+
+    if !cet_ss {
+        // Windows n'active pas la pile fantome sans le processeur: une politique
+        // active ici dirait que l'une des lectures est fausse, et l'abstention
+        // avec elle.
+        assert!(
+            (suite | marque | non_marque) & PILE_FANTOME_ACTIVE == 0,
+            "CPUID ne declare pas CET_SS, et la politique lue dit la pile fantome active \
+             (suite {suite:#010x}, enfant marque {marque:#010x}, enfant non marque \
+             {non_marque:#010x}): Windows ne l'active pas sans le processeur, l'une des \
+             lectures est fausse (CPUID, ou le bit lu dans la politique), et l'abstention le \
+             serait aussi"
+        );
+        println!(
+            "SKIPPED {RECETTE_PILE_FANTOME}: le processeur ne declare pas la pile fantome \
+             (CET_SS nul dans la feuille sept de CPUID), l'effet du marquage ne se mesure pas ici"
+        );
+        return;
+    }
+    let mut defauts = Vec::new();
+    if suite & PILE_FANTOME_ACTIVE == 0 {
+        defauts.push(format!(
+            "la pile fantome n'est pas active pour le processus de la suite, marque (Flags \
+             {suite:#010x}): Windows ne l'applique pas, ou la lecture est fausse"
+        ));
+    }
+    if marque & PILE_FANTOME_ACTIVE == 0 {
+        defauts.push(format!(
+            "l'enfant marque, copie identique lancee par le chemin du temoin, ne porte pas la \
+             pile fantome (Flags {marque:#010x}): ce chemin change la lecture, et le temoin \
+             negatif ne dirait rien du bit"
+        ));
+    }
+    if non_marque & PILE_FANTOME_ACTIVE != 0 {
+        defauts.push(format!(
+            "l'enfant non marque lit EnableUserShadowStack 1 (Flags {non_marque:#010x}): la \
+             lecture ne discrimine pas, elle ne dit rien de l'effet du marquage"
+        ));
+    }
+    assert!(
+        defauts.is_empty(),
+        "{}: le processeur declare CET_SS, et l'effet du marquage n'est pas celui attendu \
+         (suite 1, enfant marque 1, enfant non marque 0):\n{}",
+        chemin.display(),
+        defauts.join("\n")
     );
 }
 
