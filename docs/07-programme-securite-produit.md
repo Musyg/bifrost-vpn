@@ -429,9 +429,10 @@ bilan journalise juste apres l'ouverture du journal. `tests/attenuation_windows.
 politiques dans son propre processus apres la pose; `tests/attenuation_daemon_windows.rs` les
 relit de l'exterieur dans un daemon lance, depuis un processus qui n'en porte aucune, puisque la
 premiere passe aux enfants. Les deux lisent une table ecrite a part. Chaque recette a ete vue
-rouge: politique omise, mauvais bit, mauvaise valeur, un seul bit des poignees, mauvaise taille,
-pose apres le journal ou apres la lecture de la ligne de commande, journal retire, lecture
-toujours pleine, refus sans nom, politique ecartee posee, lanceur qui se pose les politiques.
+rouge, mesure du 02/10/2026: politique omise, mauvais bit, mauvaise valeur, un seul bit des
+poignees, mauvaise taille, pose apres le journal ou apres la lecture de la ligne de commande,
+journal retire, lecture toujours pleine, refus sans nom, politique ecartee posee, lanceur qui se
+pose les politiques.
 
 **Ce qui manque.**
 - La bibliotheque standard n'est pas instrumentee: elle est livree precompilee sans CFG, et seul
