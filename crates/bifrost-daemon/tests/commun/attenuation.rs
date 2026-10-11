@@ -1,6 +1,7 @@
 //! Ce que les recettes Windows des politiques d'attenuation attendent de
 //! relire, et la lecture elle-meme, partages par `attenuation_windows.rs` et
-//! `attenuation_daemon_windows.rs`.
+//! `attenuation_daemon_windows.rs`. `durcissement_binaire.rs` n'y prend que la
+//! lecture (`lire`), pour la politique de pile fantome de son propre processus.
 //!
 //! Inclus par `#[path = "commun/attenuation.rs"]`: un fichier sous
 //! `tests/commun/` n'est pas une cible de test pour cargo, et les deux
@@ -62,12 +63,14 @@ pub fn manquantes(pid: u32) -> Result<Vec<String>, u32> {
 }
 
 /// Le mot `Flags` d'une politique, par `GetProcessMitigationPolicy`. Chaque
-/// structure lue ici est une union d'un seul `DWORD`.
-fn lire(poignee: HANDLE, valeur: i32) -> Result<u32, u32> {
+/// structure lue ici est une union d'un seul `DWORD`, y compris
+/// PROCESS_MITIGATION_USER_SHADOW_STACK_POLICY (winnt.h).
+pub fn lire(poignee: HANDLE, valeur: i32) -> Result<u32, u32> {
     let mut drapeaux: u32 = 0;
     // SAFETY: `drapeaux` vit jusqu'a la fin de l'appel et la taille annoncee
-    // est la sienne; `poignee` est ouverte par `manquantes` et pas encore
-    // fermee.
+    // est la sienne; `poignee` est ouverte par l'appelant et pas encore
+    // fermee (`manquantes`), ou c'est la pseudo-poignee du processus courant,
+    // valide sans fermeture.
     let ok = unsafe {
         GetProcessMitigationPolicy(
             poignee,

@@ -36,6 +36,15 @@
 # forme nommee remplace l'anonyme. Confirme au run de CI de 5m', cite par
 # son numero dans ETAT.md.
 SKIPPED la_bascule_change_vraiment_de_sortie_et_le_dit: BIFROST_COEURS ne designe aucun repertoire: cette recette veut un vrai sing-box, que le depot ne distribue pas
+# Ligne propre au MATERIEL du runner, a ne pas retirer sur la foi d'un run: la
+# recette de l'effet du marquage CET (durcissement_binaire.rs) s'abstient sur un
+# processeur sans pile fantome (CET_SS nul) et mesure sur un processeur qui la
+# porte. Le materiel derriere windows-2025-vs2026 peut changer d'un run a
+# l'autre; un seul releve (sonde du 10/10/2026 sur une branche jetable):
+# AMD EPYC 7763, CET_SS a 1. Sur un tel runner, le budget signale
+# cette ligne comme un progres a retirer: c'est attendu, et ne la retire pas.
+# Elle part le jour ou la recette n'aura plus a s'abstenir nulle part.
+SKIPPED la_pile_fantome_s_applique_a_l_executable_marque_et_pas_a_sa_copie_non_marquee: le processeur ne declare pas la pile fantome (CET_SS nul dans la feuille sept de CPUID), l'effet du marquage ne se mesure pas ici
 SKIPPED la_poignee_rend_un_verdict_sans_jamais_faire_attendre_le_superviseur: BIFROST_COEURS ne designe aucun repertoire: cette recette veut un vrai sing-box, que le depot ne distribue pas
 SKIPPED les_quatre_issues_de_la_sonde_tiennent_face_a_un_vrai_coeur: BIFROST_COEURS ne designe aucun repertoire: cette recette veut un vrai sing-box, que le depot ne distribue pas
 SKIPPED un_chemin_etroit_est_vu_comme_tel: BIFROST_CHEMIN_ETROIT absent, aucune interface a MTU reduit a viser
