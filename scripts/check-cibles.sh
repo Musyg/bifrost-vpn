@@ -51,6 +51,9 @@
 # cible n'a pu etre verifiee, le script echoue au lieu de conclure: zero mesure
 # n'est pas zero probleme.
 #
+# Le journal de chaque cible va dans `${TMPDIR:-/tmp}/check-<cible>.log`: deux
+# passages sur le meme hote s'y reecrivent, sauf a donner a chacun son TMPDIR.
+#
 # Usage:
 #   scripts/check-cibles.sh            # abstentions tolerees
 #   scripts/check-cibles.sh --strict   # une abstention fait echouer
@@ -58,10 +61,20 @@
 set -uo pipefail
 
 CIBLES="x86_64-pc-windows-msvc x86_64-unknown-linux-gnu"
+JOURNAUX="${TMPDIR:-/tmp}"
 STRICT=0
 [ "${1:-}" = "--strict" ] && STRICT=1
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
+
+# Un repertoire de journaux absent fait tomber chaque redirection, et chaque
+# cible se lirait alors comme du code qui ne compile pas: le faux rouge que ce
+# script existe pour eviter. Il est refuse avant toute cible, et nomme.
+if [ ! -d "$JOURNAUX" ]; then
+    echo "ECHEC: '$JOURNAUX' (TMPDIR, ou /tmp a defaut) n'est pas un repertoire."
+    echo "       Les journaux des cibles y vont: aucune cible n'a ete lancee."
+    exit 1
+fi
 
 INSTALLEES=$(rustup target list --installed 2> /dev/null)
 if [ -z "$INSTALLEES" ]; then
@@ -81,8 +94,16 @@ for cible in $CIBLES; do
         abstentions=$((abstentions + 1))
         continue
     fi
+    # Le meme faux rouge vient d'un repertoire ferme en ecriture. Le droit se
+    # prouve en ouvrant le journal: Git Bash monte les disques sans ACL, et
+    # `[ -w ]` y repond vrai sur un repertoire que ses ACL ferment.
+    if ! : > "$JOURNAUX/check-$cible.log"; then
+        echo "ECHEC: '$JOURNAUX' (TMPDIR, ou /tmp a defaut) refuse l'ecriture du journal."
+        echo "       Arret avant de compiler $cible."
+        exit 1
+    fi
     if cargo check --workspace --all-targets --target "$cible" \
-        > "/tmp/check-$cible.log" 2>&1; then
+        > "$JOURNAUX/check-$cible.log" 2>&1; then
         echo "OK          $cible"
         verifiees=$((verifiees + 1))
         continue
@@ -91,7 +112,7 @@ for cible in $CIBLES; do
     # c'est une chaine C absente pour cette cible. Le compter comme un echec
     # apprendrait a ignorer le rouge, ce qui coute plus cher que l'abstention.
     natif=$(grep -oE "failed to run custom build command for .[a-z0-9_-]+" \
-        "/tmp/check-$cible.log" | sed -n 1p | sed 's/.*for .//')
+        "$JOURNAUX/check-$cible.log" | sed -n 1p | sed 's/.*for .//')
     if [ -n "$natif" ]; then
         echo "ABSTENTION  $cible"
         echo "            '$natif' compile du C et son script echoue d'ici."
@@ -100,7 +121,7 @@ for cible in $CIBLES; do
         continue
     fi
     echo "ECHEC       $cible"
-    grep -E "^error" -A 4 "/tmp/check-$cible.log" | sed -n 1,30p | sed 's/^/            /'
+    grep -E "^error" -A 4 "$JOURNAUX/check-$cible.log" | sed -n 1,30p | sed 's/^/            /'
     echecs=$((echecs + 1))
     verifiees=$((verifiees + 1))
 done
@@ -118,7 +139,7 @@ if [ "$verifiees" -eq 0 ]; then
 fi
 if [ "$echecs" -gt 0 ]; then
     echo
-    echo "ECHEC: $echecs cible(s) ne compilent pas. Journaux dans /tmp/check-<cible>.log"
+    echo "ECHEC: $echecs cible(s) ne compilent pas. Journaux dans $JOURNAUX/check-<cible>.log"
     exit 1
 fi
 if [ "$STRICT" = 1 ] && [ "$abstentions" -gt 0 ]; then
