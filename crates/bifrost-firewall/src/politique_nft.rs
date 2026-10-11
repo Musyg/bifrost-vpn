@@ -169,7 +169,7 @@ impl Politique {
                         regles.push(accepter(vec![meta("oifname", json!(i))]));
                     }
                     regles.push(accepter(vec![
-                        ipv4_seulement(),
+                        charge("ip", "daddr", json!("255.255.255.255")),
                         charge("udp", "sport", json!(68)),
                         charge("udp", "dport", json!(67)),
                     ]));
@@ -272,14 +272,18 @@ fn ndp() -> Vec<Value> {
     )])
 }
 /// `meta nfproto ipv4`, que `--numeric` rend par sa valeur: NFPROTO_IPV4, 2
-/// (forme mesuree sur nft 1.0.9). Le DHCPv4 du rendu ne vaut qu'en IPv4.
+/// (forme mesuree sur nft 1.0.9). La reponse DHCPv4 du rendu, qui ne nomme
+/// pas d'adresse, ne vaut qu'en IPv4 par elle. La sortie DHCPv4 nomme la
+/// diffusion par `ip daddr`, et nft relit `meta nfproto ipv4 ip daddr
+/// 255.255.255.255 udp sport 68 udp dport 67 accept` sans `meta nfproto`
+/// (mesure du 11/10/2026, nft 1.0.9).
 fn ipv4_seulement() -> Value {
     meta("nfproto", json!(2))
 }
-/// Les destinations du client DHCPv6, dans l'ordre ou nft les liste: le lien,
-/// puis ses deux groupes ff02::1:2 et ff05::1:3.
+/// Les destinations du client DHCPv6, ses deux groupes, dans l'ordre ou nft
+/// les liste: ff02::1:2 puis ff05::1:3.
 fn destinations_dhcpv6() -> Value {
-    json!({"set":[prefixe("fe80::",10),"ff02::1:2","ff05::1:3"]})
+    json!({"set":["ff02::1:2","ff05::1:3"]})
 }
 /// Les prefixes du LAN d'une famille, dans l'ordre ou nft les liste.
 fn prefixes_lan(famille: &str) -> Value {
@@ -644,12 +648,14 @@ mod tests {
         })
     }
 
-    /// Le DHCP de la reference suit le rendu, dans chaque sens: le DHCPv4 en
-    /// IPv4 seulement (`meta nfproto ipv4`, que `--numeric` rend 2), sortie et
-    /// entree; le client DHCPv6 vers le lien et ses deux groupes, et sa
+    /// Le DHCP de la reference suit le rendu, dans chaque sens: la sortie
+    /// DHCPv4 vers la diffusion seule, que nft relit `ip daddr` sans
+    /// `meta nfproto`, et sa reponse en IPv4 seulement (`meta nfproto ipv4`,
+    /// que `--numeric` rend 2); le client DHCPv6 vers ses deux groupes, et sa
     /// reponse depuis le lien. Formes ecrites ici en toutes lettres, telles
-    /// que nft 1.0.9 les rend (mesure du 02/10/2026), chacune dans sa chaine,
-    /// LAN ouvert comme ferme; aucune autre regle ne nomme un port du DHCP.
+    /// que nft 1.0.9 les rend (mesures du 02/10/2026 et du 11/10/2026),
+    /// chacune dans sa chaine, LAN ouvert comme ferme; aucune autre regle ne
+    /// nomme un port du DHCP.
     #[test]
     fn le_dhcp_de_la_reference_suit_le_rendu_dans_chaque_sens() {
         let egal = |gauche: Value, droite: Value| json!({"match":{"op":"==","left":gauche,"right":droite}});
@@ -661,12 +667,16 @@ mod tests {
             )
         };
         let accepte = json!({"accept": null});
-        let sortie_v4 = json!([famille, port("sport", 68), port("dport", 67), accepte]);
+        let diffusion = egal(
+            json!({"payload":{"protocol":"ip","field":"daddr"}}),
+            json!("255.255.255.255"),
+        );
+        let sortie_v4 = json!([diffusion, port("sport", 68), port("dport", 67), accepte]);
         let entree_v4 = json!([famille, port("sport", 67), port("dport", 68), accepte]);
         let sortie_v6 = json!([
             egal(
                 json!({"payload":{"protocol":"ip6","field":"daddr"}}),
-                json!({"set":[{"prefix":{"addr":"fe80::","len":10}},"ff02::1:2","ff05::1:3"]})
+                json!({"set":["ff02::1:2","ff05::1:3"]})
             ),
             port("sport", 546),
             port("dport", 547),

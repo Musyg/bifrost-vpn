@@ -840,10 +840,12 @@ else
 fi
 
 # Tout ce qui n'est pas du WireGuard chiffre vers l'endpoint, du multicast,
-# du broadcast, du DHCP ou du NDP est une fuite.
+# de la diffusion ou du NDP est une fuite: le DHCP n'y est exempte que par
+# une adresse, comme tout autre paquet, aucune clause ne nomme ses ports.
+# Meme liste que `capture::allowed()` dans
+# crates/bifrost-daemon/src/checks/capture.rs.
 LEAK_FILTER="(ip or ip6) and not ((udp port $WG_PORT and host $SRV_ADDR) \
  or (net 224.0.0.0/4) or (host 255.255.255.255) \
- or (udp port 67 or udp port 68) or (udp port 546 or udp port 547) \
  or (dst net ff00::/8) \
  or (icmp6 and icmp6[icmp6type] >= 133 and icmp6[icmp6type] <= 137))"
 

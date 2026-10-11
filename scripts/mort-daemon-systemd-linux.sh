@@ -66,9 +66,11 @@ WORK=$(mktemp -d /tmp/bifrost-mort.XXXXXX)
 PROFILE="$WORK/tunnel.toml"
 
 # Ce qui ne compte JAMAIS comme du clair: trafic WireGuard vers l'endpoint,
-# multicast, broadcast, DHCP, decouverte de voisins IPv6. Meme liste que
-# `capture::allowed()` dans crates/bifrost-daemon/src/checks/capture.rs.
-PERMIS="(udp port $WG_PORT and host $SRV_ADDR) or (net 224.0.0.0/4) or (host 255.255.255.255) or (udp port 67 or udp port 68) or (udp port 546 or udp port 547) or (dst net ff00::/8) or (icmp6 and icmp6[icmp6type] >= 133 and icmp6[icmp6type] <= 137)"
+# multicast, diffusion, decouverte de voisins IPv6; le DHCP n'y tombe que par
+# une adresse, comme tout autre paquet, aucune clause ne nomme ses ports.
+# Meme liste que `capture::allowed()` dans
+# crates/bifrost-daemon/src/checks/capture.rs.
+PERMIS="(udp port $WG_PORT and host $SRV_ADDR) or (net 224.0.0.0/4) or (host 255.255.255.255) or (dst net ff00::/8) or (icmp6 and icmp6[icmp6type] >= 133 and icmp6[icmp6type] <= 137)"
 FUITE="(ip or ip6) and not ($PERMIS)"
 # Les destinations de crates/bifrost-daemon/src/checks/probe.rs.
 INTERNET="dst host 8.8.8.8 or dst host 203.0.113.9 or dst host 2001:db8::1"

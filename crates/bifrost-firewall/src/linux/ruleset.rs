@@ -53,19 +53,19 @@ fn famille_et_adresse(adresse: IpAddr) -> (&'static str, String) {
 const NDP_TYPES: &str = "nd-router-solicit, nd-router-advert, nd-neighbor-solicit, \
                          nd-neighbor-advert, nd-redirect";
 
-/// Destinations du client DHCPv6 (port 546 vers 547): ses deux groupes et le
-/// lien.
+/// Destinations du client DHCPv6 (port 546 vers 547): ses deux groupes, et
+/// eux seuls.
 ///
 /// Un client emet tous ses messages vers `ff02::1:2`
 /// (All_DHCP_Relay_Agents_and_Servers, RFC 9915 sections 5 et 7.1), en regle
 /// generale depuis son adresse de lien; `ff05::1:3` (All_DHCP_Servers) est le
 /// groupe des serveurs du site, que `permit-dhcp-v6` ouvre aussi sous
-/// Windows, comme WireGuard for Windows. Le lien (`fe80::/10`) garde
-/// l'unicast vers un serveur ou un relais du lien. Aucune adresse globale ni
-/// unique-locale: l'unicast direct vers un serveur (option Server Unicast)
-/// est rendu obsolete par RFC 9915, et LAN ouvert l'acceptation du LAN
-/// couvre deja les unique-locales.
-const DHCPV6_DESTINATIONS: &str = "fe80::/10, ff02::1:2, ff05::1:3";
+/// Windows, comme WireGuard for Windows. Aucune adresse unicast, ni du lien,
+/// ni globale, ni unique-locale: RFC 9915 retire l'unicast du client vers le
+/// serveur (section 16; l'option Server Unicast est obsolete, section
+/// 21.12). LAN ouvert, l'acceptation du LAN laisse passer, comme tout trafic
+/// du LAN, un envoi vers une adresse de `fe80::/10` ou de `fc00::/7`.
+const DHCPV6_DESTINATIONS: &str = "ff02::1:2, ff05::1:3";
 
 /// Le ruleset complet, pret pour `nft -f -`.
 ///
@@ -131,11 +131,12 @@ fn render_output(s: &mut String, policy: &FirewallPolicy) {
         s.push_str(&format!("\t\toifname \"{iface}\" accept\n\n"));
     }
 
-    s.push_str("\t\t# client DHCPv4, en IPv4 seulement: le protocole n'existe pas\n");
-    s.push_str("\t\t# en IPv6. Toute adresse IPv4: le renouvellement (RFC 2131)\n");
-    s.push_str("\t\t# vise le serveur en unicast, ou qu'il soit.\n");
-    s.push_str("\t\tmeta nfproto ipv4 udp sport 68 udp dport 67 accept\n");
-    s.push_str("\t\t# client DHCPv6: ses groupes ff02::1:2 et ff05::1:3, et le lien\n");
+    s.push_str("\t\t# client DHCPv4: la diffusion seule, en IPv4 (ip daddr porte\n");
+    s.push_str("\t\t# la famille). Le renouvellement unicast et le RELEASE ne\n");
+    s.push_str("\t\t# passent pas par cette regle; RFC 2131 (section 4.4.5)\n");
+    s.push_str("\t\t# garde le bail par la redemande diffusee.\n");
+    s.push_str("\t\tip daddr 255.255.255.255 udp sport 68 udp dport 67 accept\n");
+    s.push_str("\t\t# client DHCPv6: ses groupes ff02::1:2 et ff05::1:3 (RFC 9915)\n");
     s.push_str(&format!(
         "\t\tip6 daddr {{ {DHCPV6_DESTINATIONS} }} udp sport 546 udp dport 547 accept\n"
     ));
@@ -689,25 +690,28 @@ mod tests {
         v
     }
 
-    /// Le client DHCPv6 sort vers ses deux groupes et le lien, et la reponse
-    /// du serveur ou du relais revient de son adresse de lien, dans TOUTE
-    /// politique: le DHCP n'est pas le LAN, il passe LAN ferme comme ouvert.
+    /// La regle de sortie du client DHCPv6 vise ses deux groupes, et eux
+    /// seuls, et la reponse du serveur ou du relais revient de son adresse de
+    /// lien, dans TOUTE politique: le DHCP n'est pas le LAN, ses regles valent
+    /// LAN ferme comme ouvert.
     ///
-    /// Le defaut que la regle de sortie ferme: le sortant 546 -> 547 n'etait
-    /// ouvert que vers `fe80::/10`. Mesure avant correction le 02/10/2026 sur
-    /// essai-linux, ruleset rendu par ce code dans des namespaces jetables:
-    /// une sollicitation vers `ff02::1:2` (la destination de tout message
-    /// d'un client, RFC 9915) et un envoi vers `ff05::1:3` tombaient, LAN
-    /// ouvert comme ferme. Apres: les deux passent et la reponse du serveur du
-    /// lien revient.
+    /// Le 02/10/2026, la regle de sortie s'est ouverte aux deux groupes:
+    /// avant, le sortant 546 -> 547 ne visait que `fe80::/10`, et une
+    /// sollicitation vers `ff02::1:2` (la destination de tout message d'un
+    /// client, RFC 9915) comme un envoi vers `ff05::1:3` tombaient, LAN ouvert
+    /// comme ferme (mesure sur essai-linux, ruleset rendu par ce code dans des
+    /// namespaces jetables). Le 11/10/2026, `fe80::/10` en est sorti: RFC 9915
+    /// retire l'unicast du client vers le serveur (section 16). Mesure sur
+    /// essai-linux, memes namespaces: avant, un envoi 546 -> 547 vers
+    /// l'adresse de lien du serveur arrivait, LAN ferme; apres, il est refuse
+    /// a l'emission, et les deux groupes obtiennent toujours la reponse.
     ///
     /// Regles entieres, ecrites ici en toutes lettres et non tirees de la
     /// constante du rendu, chacune dans la chaine de son sens; et aucune autre
     /// regle ne nomme les ports du DHCPv6.
     #[test]
     fn le_client_dhcpv6_sort_vers_ses_groupes_et_sa_reponse_revient_du_lien() {
-        let sortie =
-            "ip6 daddr { fe80::/10, ff02::1:2, ff05::1:3 } udp sport 546 udp dport 547 accept";
+        let sortie = "ip6 daddr { ff02::1:2, ff05::1:3 } udp sport 546 udp dport 547 accept";
         let entree = "ip6 saddr fe80::/10 udp sport 547 udp dport 546 accept";
         for p in matrice_dhcp() {
             let r = render(&p);
@@ -741,12 +745,18 @@ mod tests {
     /// depuis toute source IPv6. Mesure avant correction le 02/10/2026 sur
     /// essai-linux, en namespaces jetables: un envoi IPv6 68 -> 67 vers une
     /// adresse globale arrivait, comme une entree IPv6 67 -> 68 depuis une
-    /// adresse globale. Le DHCPv4 n'existe pas en IPv6. La largeur IPv4 est
-    /// voulue et ne change pas: toute adresse IPv4, pour le renouvellement
-    /// unicast vers le serveur (RFC 2131).
+    /// adresse globale. Le DHCPv4 n'existe pas en IPv6.
+    ///
+    /// En sortie, la famille est portee par `ip daddr`: nft pose lui-meme le
+    /// test de famille devant cette adresse. Mesure le 11/10/2026 sur essai-linux,
+    /// nft 1.0.9, en namespace jetable: `ip daddr 255.255.255.255 udp sport
+    /// 68 udp dport 67 accept` et la meme regle precedee de `meta nfproto
+    /// ipv4` donnent le meme code (`meta load nfproto`, `cmp eq 2`, puis
+    /// l'adresse), et nft les relit toutes deux sans `meta nfproto`. En
+    /// entree, la regle ne nomme pas d'adresse et porte `meta nfproto ipv4`.
     #[test]
     fn le_dhcpv4_ne_vaut_qu_en_ipv4() {
-        let sortie = "meta nfproto ipv4 udp sport 68 udp dport 67 accept";
+        let sortie = "ip daddr 255.255.255.255 udp sport 68 udp dport 67 accept";
         let entree = "meta nfproto ipv4 udp sport 67 udp dport 68 accept";
         for p in matrice_dhcp() {
             let r = render(&p);
@@ -760,16 +770,66 @@ mod tests {
                 1,
                 "reponse du serveur DHCPv4 absente ou doublee: {p:?}\n{r}"
             );
-            // Toute REGLE qui nomme un port du DHCPv4 porte la famille:
-            // absence par le filet le plus large, mot a mot.
+            // Toute REGLE qui nomme un port du DHCPv4 porte la famille IPv4,
+            // par `meta nfproto ipv4` ou par une adresse `ip`: absence par le
+            // filet le plus large, mot a mot.
             for l in regles_nft::lignes_normalisees(&r) {
-                let mots: Vec<&str> = l.split_whitespace().collect();
-                let nomme = mots.windows(2).any(|w| {
-                    (w[0] == "sport" || w[0] == "dport") && (w[1] == "67" || w[1] == "68")
-                });
                 assert!(
-                    !nomme || l.starts_with("meta nfproto ipv4 "),
+                    !nomme_un_port(&l, &["67", "68"])
+                        || l.starts_with("meta nfproto ipv4 ")
+                        || l.starts_with("ip "),
                     "regle du DHCPv4 sans sa famille: {l}\n{r}"
+                );
+            }
+        }
+    }
+
+    /// La regle normalisee nomme-t-elle l'un de ces ports, en source ou en
+    /// destination? Mot a mot: `dport 6700` ne nomme pas le 67.
+    fn nomme_un_port(regle: &str, ports: &[&str]) -> bool {
+        let mots: Vec<&str> = regle.split_whitespace().collect();
+        mots.windows(2)
+            .any(|w| (w[0] == "sport" || w[0] == "dport") && ports.contains(&w[1]))
+    }
+
+    /// Aucune regle de sortie ne nomme le DHCPv4 vers une autre destination
+    /// que la diffusion, dans TOUTE politique de la matrice.
+    ///
+    /// Le client DHCPv4 diffuse sa decouverte, sa demande et sa redemande
+    /// (RFC 2131 sections 4.4.4 et 4.4.5). Le renouvellement unicast et le
+    /// RELEASE, qui visent le serveur par son adresse, ne passent pas par
+    /// cette regle; selon RFC 2131 (section 4.4.5), le bail se garde alors par
+    /// la redemande diffusee, a T2. C'est la forme du plan
+    /// WFP et du filtre de demarrage (`docs/FILTRE-DEMARRAGE-EXEMPTIONS.md`).
+    /// Jusqu'au 11/10/2026, la regle de sortie 68 -> 67 ne nommait aucune
+    /// destination. Mesure sur essai-linux, en namespaces jetables, LAN
+    /// ferme: avant, un renouvellement vers le serveur du lien et vers une
+    /// adresse hors du lien obtenait sa reponse; apres, les deux sont refuses
+    /// a l'emission. LAN ouvert, l'acceptation du LAN laisse passer, comme
+    /// tout trafic du LAN, celui qui vise une adresse privee.
+    ///
+    /// Chaque regle de sortie qui nomme le 67 ou le 68 porte, mot a mot,
+    /// `ip daddr 255.255.255.255`, et il n'y en a qu'une: une seconde regle,
+    /// meme diffusee, serait une forme que la recette n'a pas pesee.
+    #[test]
+    fn aucune_regle_de_sortie_ne_nomme_le_67_vers_autre_chose_que_la_diffusion() {
+        for p in matrice_dhcp() {
+            let r = render(&p);
+            let dhcpv4: Vec<String> = regles_nft::lignes_normalisees(chaine(&r, "output"))
+                .into_iter()
+                .filter(|l| nomme_un_port(l, &["67", "68"]))
+                .collect();
+            assert_eq!(
+                dhcpv4.len(),
+                1,
+                "regles de sortie du DHCPv4: {dhcpv4:?}: {p:?}\n{r}"
+            );
+            for l in &dhcpv4 {
+                let mots: Vec<&str> = l.split_whitespace().collect();
+                assert!(
+                    mots.windows(3)
+                        .any(|w| w == ["ip", "daddr", "255.255.255.255"]),
+                    "sortie du DHCPv4 vers autre chose que la diffusion: {l}: {p:?}\n{r}"
                 );
             }
         }
