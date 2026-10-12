@@ -55,6 +55,9 @@ NS_SRV=bifrost-mort-srv
 NS_CLI=bifrost-mort-cli
 VETH_S=veth-morts
 VETH_C=veth-mortc
+# Adresse MAC de la veth client, posee a sa creation (voir FUITE plus bas).
+# Unicast et administree localement.
+CLI_MAC=02:00:00:98:00:02
 SRV_ADDR=10.98.0.1
 CLI_ADDR=10.98.0.2
 WG_PORT=51820
@@ -65,13 +68,21 @@ ETIQUETTE="${1:-mesure}"
 WORK=$(mktemp -d /tmp/bifrost-mort.XXXXXX)
 PROFILE="$WORK/tunnel.toml"
 
-# Ce qui ne compte JAMAIS comme du clair: trafic WireGuard vers l'endpoint,
-# multicast, diffusion, decouverte de voisins IPv6; le DHCP n'y tombe que par
-# une adresse, comme tout autre paquet, aucune clause ne nomme ses ports.
-# Meme liste que `capture::allowed()` dans
-# crates/bifrost-daemon/src/checks/capture.rs.
-PERMIS="(udp port $WG_PORT and host $SRV_ADDR) or (net 224.0.0.0/4) or (host 255.255.255.255) or (dst net ff00::/8) or (icmp6 and icmp6[icmp6type] >= 133 and icmp6[icmp6type] <= 137)"
-FUITE="(ip or ip6) and not ($PERMIS)"
+# Ce qui ne compte JAMAIS comme du clair: ce que la sortie du kill switch
+# admet sur le lien, en miroir. WireGuard vers l'endpoint, client DHCPv4 vers
+# la diffusion (68 -> 67), client DHCPv6 vers ff02::1:2 et ff05::1:3
+# (546 -> 547), NDP (ICMPv6 133 a 137); ni multicast ni diffusion au-dela.
+# Le pcap ne porte pas la marque de WireGuard: la clause exempte tout UDP du
+# client vers ce port de l'endpoint. Meme miroir que `capture::allowed()`
+# dans crates/bifrost-daemon/src/checks/capture.rs, adresses de ce banc.
+PERMIS="(ip and dst host $SRV_ADDR and udp dst port $WG_PORT) or (ip and dst host 255.255.255.255 and udp src port 68 and udp dst port 67) or (ip6 and (dst host ff02::1:2 or dst host ff05::1:3) and udp src port 546 and udp dst port 547) or (icmp6 and icmp6[icmp6type] >= 133 and icmp6[icmp6type] <= 137)"
+# Et seul compte ce que le CLIENT emet (source Ethernet $CLI_MAC). La capture
+# se fait sur $VETH_S, dans $NS_SRV: elle voit les deux sens du lien, donc
+# aussi ce que le serveur emet de son cote, ses reponses WireGuard (depuis le
+# port $WG_PORT, que la clause WireGuard, bornee a la destination, ne couvre
+# pas), ses reponses a la sonde du lien au bras A, son NDP. Rien de cela ne
+# sort du client.
+FUITE="ether src $CLI_MAC and (ip or ip6) and not ($PERMIS)"
 # Les destinations de crates/bifrost-daemon/src/checks/probe.rs.
 INTERNET="dst host 8.8.8.8 or dst host 203.0.113.9 or dst host 2001:db8::1"
 LAN="dst host $SRV_ADDR and not (udp port $WG_PORT)"
@@ -132,7 +143,7 @@ ip netns del "$NS_CLI" 2>/dev/null; ip netns del "$NS_SRV" 2>/dev/null
 ip link del "$VETH_C" 2>/dev/null
 ip netns add "$NS_SRV" || exit 1
 ip netns add "$NS_CLI" || exit 1
-ip link add "$VETH_C" type veth peer name "$VETH_S" || exit 1
+ip link add "$VETH_C" address "$CLI_MAC" type veth peer name "$VETH_S" || exit 1
 ip link set "$VETH_C" netns "$NS_CLI"
 ip link set "$VETH_S" netns "$NS_SRV"
 for p in "$NS_SRV $VETH_S $SRV_ADDR" "$NS_CLI $VETH_C $CLI_ADDR"; do

@@ -10,8 +10,11 @@
 //! ```
 //!
 //! Le namespace `phys` joue le reseau physique: c'est la qu'on capture. Tout ce
-//! qui apparait sur `veth-bfp` sans etre chiffre est une fuite, exactement
-//! comme un paquet qui sortirait de la carte reseau d'une vraie machine.
+//! que le client emet sur le lien sans etre chiffre, hors de ce que la sortie
+//! du kill switch admet, est une fuite, exactement comme un paquet qui
+//! sortirait de la carte reseau d'une vraie machine. Ce que `phys` emet de son
+//! cote n'en est jamais une: la capture reconnait le client a son adresse MAC,
+//! [`CLIENT_MAC`].
 //!
 //! Les deux namespaces sont detruits a la fin, y compris si un test panique.
 
@@ -23,6 +26,21 @@ pub const NS_CLIENT: &str = "bifrost-check-client";
 pub const NS_PHYS: &str = "bifrost-check-phys";
 pub const VETH_CLIENT: &str = "veth-bfc";
 pub const VETH_PHYS: &str = "veth-bfp";
+
+/// Adresse MAC de `veth-bfc`, posee a la creation du lien ([`argv_lien`]).
+///
+/// La capture se fait cote `phys` et voit les deux sens du lien; un pcap ne
+/// porte pas le sens d'une trame, sa source Ethernet si. Le filtre de fuite
+/// (`capture::leak_filter`) ne juge que les trames qui portent cette source:
+/// ce que la passerelle emet de son cote (ses reponses aux sondes, son NDP,
+/// ses rapports MLD quand son lien remonte) n'est jamais compte. Sans adresse
+/// posee, le noyau en tire une au hasard, le filtre ne reconnait plus rien,
+/// et les temoins des vecteurs tombent a zero.
+///
+/// Unicast (bit de poids faible du premier octet nul) et administree
+/// localement (bit suivant a un): elle ne peut appartenir a aucune carte.
+/// La garde `l_adresse_mac_du_client_est_unicast_et_locale` le verifie.
+pub const CLIENT_MAC: &str = "02:00:00:77:00:02";
 
 pub const CLIENT_ADDR: &str = "10.77.0.2";
 pub const PHYS_ADDR: &str = "10.77.0.1";
@@ -68,16 +86,7 @@ impl Bench {
 
         run(&["netns", "add", NS_CLIENT])?;
         run(&["netns", "add", NS_PHYS])?;
-        run(&[
-            "link",
-            "add",
-            VETH_CLIENT,
-            "type",
-            "veth",
-            "peer",
-            "name",
-            VETH_PHYS,
-        ])?;
+        run(&argv_lien())?;
         run(&["link", "set", VETH_CLIENT, "netns", NS_CLIENT])?;
         run(&["link", "set", VETH_PHYS, "netns", NS_PHYS])?;
 
@@ -430,6 +439,27 @@ pub fn teardown_quiet() {
     let _ = quiet(&["link", "del", VETH_PHYS]);
 }
 
+/// La commande `ip` qui cree le lien du banc: le veth, avec [`CLIENT_MAC`]
+/// posee sur `veth-bfc` des sa creation.
+///
+/// `address` vient avant `type`: place apres `peer name`, il s'appliquerait
+/// au bout `phys`. Le deplacement du bout dans son namespace garde l'adresse.
+/// La garde `le_lien_nait_avec_l_adresse_mac_du_client` lit cette commande.
+fn argv_lien() -> [&'static str; 10] {
+    [
+        "link",
+        "add",
+        VETH_CLIENT,
+        "address",
+        CLIENT_MAC,
+        "type",
+        "veth",
+        "peer",
+        "name",
+        VETH_PHYS,
+    ]
+}
+
 fn run(args: &[&str]) -> Result<()> {
     let out = Command::new("ip")
         .args(args)
@@ -574,6 +604,68 @@ mod tests {
         assert_ne!(
             WG_PORT, BANNIERE_PORT,
             "le port wg et celui de la banniere se confondent"
+        );
+    }
+
+    /// L'adresse MAC du client est six octets, unicast et administree
+    /// localement.
+    ///
+    /// Multicast (bit de poids faible du premier octet a un), le noyau la
+    /// refuserait a la creation du lien et le banc ne monterait pas; universelle
+    /// (bit suivant nul), elle pourrait etre celle d'une carte reelle.
+    #[test]
+    fn l_adresse_mac_du_client_est_unicast_et_locale() {
+        let octets: Vec<u8> = CLIENT_MAC
+            .split(':')
+            .map(|o| {
+                assert_eq!(o.len(), 2, "octet mal forme dans CLIENT_MAC: {CLIENT_MAC}");
+                u8::from_str_radix(o, 16).expect("CLIENT_MAC n'est pas hexadecimale")
+            })
+            .collect();
+        assert_eq!(
+            octets.len(),
+            6,
+            "CLIENT_MAC n'a pas six octets: {CLIENT_MAC}"
+        );
+        assert_eq!(octets[0] & 1, 0, "CLIENT_MAC est multicast: {CLIENT_MAC}");
+        assert_eq!(
+            octets[0] & 2,
+            2,
+            "CLIENT_MAC n'est pas administree localement: {CLIENT_MAC}"
+        );
+    }
+
+    /// Le lien du banc nait avec l'adresse MAC du client sur `veth-bfc`.
+    ///
+    /// Le filtre de fuite ne juge que les trames de source [`CLIENT_MAC`]: une
+    /// commande de creation qui ne la pose plus, ou qui la pose sur le bout
+    /// `phys` (apres `peer`), laisserait le noyau tirer celle du client au
+    /// hasard, et les temoins des vecteurs tomberaient a zero. Pure: elle lit
+    /// la commande que `Bench::setup` passe a `ip`, sans la lancer.
+    #[test]
+    fn le_lien_nait_avec_l_adresse_mac_du_client() {
+        let argv = argv_lien();
+        let position = |mot: &str| argv.iter().position(|a| *a == mot);
+        let adresse = position("address").expect("la commande du lien ne pose aucune adresse MAC");
+        assert_eq!(
+            argv.get(adresse + 1),
+            Some(&CLIENT_MAC),
+            "l'adresse posee n'est pas CLIENT_MAC: {argv:?}"
+        );
+        assert_eq!(
+            argv.get(2),
+            Some(&VETH_CLIENT),
+            "le lien cree n'est pas veth-bfc: {argv:?}"
+        );
+        let peer = position("peer").expect("la commande ne cree pas de paire");
+        assert!(
+            adresse < peer,
+            "l'adresse MAC est posee sur le bout phys, apres peer: {argv:?}"
+        );
+        assert_eq!(
+            &argv[..2],
+            &["link", "add"],
+            "ce n'est plus une creation: {argv:?}"
         );
     }
 

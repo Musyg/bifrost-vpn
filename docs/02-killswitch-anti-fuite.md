@@ -387,7 +387,7 @@ Firefox: HKLM\SOFTWARE\Policies\Mozilla\Firefox\DNSOverHTTPS\Enabled = 0 (DWORD)
 
 ### PARTIE 4 - SUITE DE TESTS DE FUITES EN CI
 
-Objectif: assertion "zero paquet non chiffre vers une destination hors endpoint VPN" sur l'interface physique, plus verification IP de sortie/DNS/IPv6/WebRTC et comportement du kill switch sous defaillance.
+Objectif: assertion "zero trame emise par le client hors de ce que la sortie du kill switch admet" sur l'interface physique, plus verification IP de sortie/DNS/IPv6/WebRTC et comportement du kill switch sous defaillance.
 
 Architecture de test (Linux, reproductible en CI via namespaces imbriques):
 ```sh
@@ -395,35 +395,22 @@ Architecture de test (Linux, reproductible en CI via namespaces imbriques):
 ip netns add phys
 # namespace "client" contient le kill switch + le tunnel
 ip netns add client
-# veth entre les deux
-ip link add veth-c type veth peer name veth-p
+# veth entre les deux; adresse MAC fixe cote client, unicast et
+# administree localement: la capture juge par l'emetteur
+ip link add veth-c address 02:00:00:77:00:02 type veth peer name veth-p
 ip link set veth-c netns client
 ip link set veth-p netns phys
 ```
-Capture pcap sur l'interface physique (cote phys/passerelle) et assertion. Exemple d'assertion (Python/scapy) - aucun paquet en clair vers une destination autre que l'endpoint:
-```python
-from scapy.all import rdpcap, IP, UDP
-ENDPOINT_IP = "203.0.113.7"
-WG_PORT = 51820
-pkts = rdpcap("phys.pcap")
-leaks = []
-for p in pkts:
-    if IP in p:
-        dst = p[IP].dst
-        # autorise: WireGuard chiffre vers l'endpoint, multicast et diffusion
-        # (le DHCP admis par le kill switch y tombe par sa destination)
-        if dst == ENDPOINT_IP:
-            continue
-        if dst.startswith(("224.", "239.", "255.255.255.255")):
-            continue
-        leaks.append((dst, p.summary()))
-assert not leaks, f"FUITE detectee: {leaks[:10]}"
-```
-Equivalent tshark en one-liner (pour CI):
+Capture pcap sur l'interface physique (cote phys/passerelle) et assertion. La capture voit les deux sens du lien: seule une trame que le client emet (source Ethernet, l'adresse posee sur `veth-c`) peut etre une fuite, et elle n'en est pas une si la sortie du kill switch l'admet. Ce que la passerelle emet (ses reponses, son NDP, ses rapports MLD quand son lien remonte) n'en est jamais une. Les exemptions sont le miroir exact de la sortie, LAN ferme, et rien d'autre: WireGuard vers l'endpoint, client DHCPv4 vers la diffusion, client DHCPv6 vers ses deux groupes, NDP. Ni multicast ni diffusion au-dela: un mDNS, un SSDP ou un LLMNR du client sous kill switch est une fuite. Exemple d'assertion (libpcap; la forme du filtre de la suite de fuite de Bifrost, avec l'endpoint de l'exemple):
 ```sh
-tshark -r phys.pcap -Y "ip.dst != 203.0.113.7 && ip.dst < 224.0.0.0" -T fields -e ip.dst | sort -u
+tcpdump -nn -r phys.pcap 'ether src 02:00:00:77:00:02 and (ip or ip6) and not (
+  (ip and dst host 203.0.113.7 and udp dst port 51820)
+  or (ip and dst host 255.255.255.255 and udp src port 68 and udp dst port 67)
+  or (ip6 and (dst host ff02::1:2 or dst host ff05::1:3) and udp src port 546 and udp dst port 547)
+  or (icmp6 and icmp6[icmp6type] >= 133 and icmp6[icmp6type] <= 137))'
 # la sortie DOIT etre vide
 ```
+Le pcap ne porte pas la marque de WireGuard: la premiere clause exempte tout UDP du client vers ce port de l'endpoint. Et les primitives `udp` et `icmp6` de libpcap ne franchissent pas un en-tete d'extension IPv6: une forme admise portee derriere un en-tete Hop-by-Hop serait comptee.
 Un equivalent gopacket (Go) peut etre integre directement au logiciel pour un test embarque.
 
 Simulation des defaillances (kill switch doit tenir):
@@ -510,6 +497,7 @@ Total socle (sans driver kernel): **~45-70 j-h**. Ces chiffres sont ancres sur l
 - nftables, acces LAN et DNS: dans une chaine `policy drop`, le blocage du :53 hors resolveur declare n'existe que par l'absence d'accept. Un `ip daddr { LAN } accept` pose ensuite admet donc aussi le :53 vers toute adresse du LAN, box et resolveurs tiers compris, hors tunnel. Poser le drop du :53 du LAN (deux familles, UDP et TCP) AVANT l'accept du LAN, et APRES le permit du resolveur declare. Mesure dans Bifrost le 30/09/2026 sur essai-linux, en namespaces jetables, `allow_lan` vrai et resolveur de boucle locale: un repondeur DNS du lien a recu les huit requetes :53 envoyees (IPv4, IPv6 et lien local, UDP et TCP). Corrige le meme jour: zero requete au meme repondeur, le resolveur declare sur le lien toujours servi. Le :853 (DoT en TCP, DoQ en UDP) avait le meme defaut, et le meme remede: ses drops vont entre ceux du :53 et l'accept du LAN, precedes de l'accept du :853 du resolveur declare quand il vit sur le LAN. Mesure le 01/10/2026 sur essai-linux, meme methode, LAN ouvert, resolveur de boucle locale: un repondeur du lien a recu les huit connexions et datagrammes :853 envoyes (IPv4 sur deux adresses, IPv6 unique-locale et lien local; TCP et UDP). Corrige le meme jour: zero; le :853 du resolveur declare sur le lien toujours servi (IPv4 puis IPv6), le :853 joint par l'interface du tunnel toujours servi, le reste du lien (443 et un port hors DNS) toujours joint.
 - nftables, DHCP dans une table `inet`: une regle sans famille y vaut pour IPv4 et IPv6. `udp sport 68 udp dport 67 accept` admettait donc aussi un datagramme IPv6 de 68 vers 67, vers toute adresse, et son entree depuis toute source IPv6; poser `meta nfproto ipv4` dans les deux sens. Et le client DHCPv6 emet vers `ff02::1:2` (RFC 9915), pas vers une adresse de lien: un accept 546 -> 547 borne a `fe80::/10` le laisse tomber. Sa reponse, d'une adresse de lien vers le port 546, ne se rattache pas a la sollicitation multicast par `ct state`: elle a son propre accept en entree. Mesure dans Bifrost le 02/10/2026 sur essai-linux, en namespaces jetables, rendu du logiciel: la sollicitation vers `ff02::1:2` et l'envoi vers `ff05::1:3` tombaient, LAN ouvert comme ferme, et un envoi IPv6 68 -> 67 vers une adresse globale arrivait. Corrige le meme jour. Depuis le 11/10/2026, la sortie DHCPv4 nomme la diffusion par `ip daddr`, qui porte la famille (nft 1.0.9 compile `ip daddr 255.255.255.255` avec le meme test de famille que `meta nfproto ipv4`), et la sortie DHCPv6 ne vise plus que ses deux groupes: le renouvellement unicast, le RELEASE et l'unicast DHCPv6 vers le serveur ne passent plus par ces regles (LAN ouvert, l'acceptation du LAN laisse passer ce qui vise une adresse du LAN).
 - Capture de fuite et DHCP: un filtre qui exempte le DHCP par ses ports (`udp port 67 or udp port 68`, `udp port 546 or udp port 547`) exempte ces ports vers toute destination, y compris un DHCP que le kill switch refuse. Ne pas exempter le DHCP par ses ports, et juger le filtre sur des trames (dans Bifrost, une garde sans privilege relit un pcap synthetique par forme). Mesure le 11/10/2026 sur essai-linux, en namespaces jetables, kill switch desarme: des seize formes DHCP du banc, toutes vues sur le lien, l'ancien filtre n'en comptait aucune; le nouveau compte les douze que le kill switch refuse et pas les quatre qu'il admet. Corrige le meme jour.
+- Capture de fuite et emetteur: une capture cote passerelle voit les deux sens du lien, et la passerelle emet d'elle-meme (a la remontee de son lien, une DAD et des rapports MLDv2 vers `ff02::16`; ses reponses aux sondes). Juger par la destination oblige alors a exempter du multicast que le kill switch refuse au client, et fait compter les reponses de la passerelle dans les temoins. Juger par l'emetteur: une adresse MAC fixe sur l'interface du client, seule source comptee, et pour exemptions le seul miroir de la sortie du kill switch. Mesure dans Bifrost le 11/10/2026 sur essai-linux, en namespaces jetables, kill switch arme: apres une coupure du lien, un rapport MLDv2 de la passerelle tombait dans la capture de la phase, dans deux series sur deux, et seule l'exemption de `ff00::/8` le tenait hors du compte. Corrige le 12/10/2026: la capture juge par l'emetteur et n'exempte que le miroir de la sortie; deux series, chaque phase qui attend zero a zero, temoins non nuls, aucune trame du client hors de la sortie.
 - WFP, poids de sous-couche: BFE ne garantit pas le poids demande. Une sous-couche dont le poids entre en collision avec une sous-couche deja installee est rebattue vers un creneau libre; mesure dans Bifrost le 30/09/2026 sur essai-windows: une demande 0xFFFF rendue 0xFFFE quand une sous-couche tierce tenait deja 0xFFFF. Un tiers qui squatte le poids maximal avec un permis dur passe alors au-dessus du kill switch. Lire le poids EFFECTIF apres la pose; la preuve WFP compare l'arbitrage a ce poids-la, la pose ne le verifie pas encore.
 
 ## Recommendations

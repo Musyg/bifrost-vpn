@@ -60,6 +60,11 @@ NS_SRV=bifrost-e2e-server
 NS_CLI=bifrost-e2e-client
 VETH_S=veth-e2es
 VETH_C=veth-e2ec
+# Adresse MAC de la veth client, posee a sa creation: la capture du DoD 2 se
+# fait cote serveur et voit les deux sens du lien, et seul ce que le client
+# emet peut etre une fuite (meme principe que CLIENT_MAC de checks/netns.rs).
+# Unicast et administree localement.
+CLI_MAC=02:00:00:99:00:02
 SRV_ADDR=10.99.0.1
 CLI_ADDR=10.99.0.2
 WG_PORT=51820
@@ -355,7 +360,7 @@ ip netns add "$NS_SRV"
 ip netns add "$NS_CLI"
 # Le lien nait DANS les namespaces: le creer dans celui de l'hote puis l'y
 # deplacer poserait, le temps d'une commande, deux interfaces sur la machine.
-ip -n "$NS_CLI" link add "$VETH_C" type veth peer name "$VETH_S" netns "$NS_SRV"
+ip -n "$NS_CLI" link add "$VETH_C" address "$CLI_MAC" type veth peer name "$VETH_S" netns "$NS_SRV"
 for pair in "$NS_SRV $VETH_S $SRV_ADDR" "$NS_CLI $VETH_C $CLI_ADDR"; do
   set -- $pair
   ip -n "$1" link set lo up
@@ -839,14 +844,20 @@ else
   ok "capture complete: $ETAGE_VUS vus par le filtre, $ETAGE_REMIS remis"
 fi
 
-# Tout ce qui n'est pas du WireGuard chiffre vers l'endpoint, du multicast,
-# de la diffusion ou du NDP est une fuite: le DHCP n'y est exempte que par
-# une adresse, comme tout autre paquet, aucune clause ne nomme ses ports.
-# Meme liste que `capture::allowed()` dans
-# crates/bifrost-daemon/src/checks/capture.rs.
-LEAK_FILTER="(ip or ip6) and not ((udp port $WG_PORT and host $SRV_ADDR) \
- or (net 224.0.0.0/4) or (host 255.255.255.255) \
- or (dst net ff00::/8) \
+# Une fuite est une trame IP que le CLIENT emet (source Ethernet $CLI_MAC)
+# hors de ce que la sortie du kill switch admet sur le lien: WireGuard vers
+# l'endpoint, client DHCPv4 vers la diffusion (68 -> 67), client DHCPv6 vers
+# ff02::1:2 et ff05::1:3 (546 -> 547), NDP (ICMPv6 133 a 137). Ce que le
+# serveur emet de son cote n'est jamais compte; aucune autre exemption, ni
+# multicast, ni diffusion. Le pcap ne porte ni la marque de WireGuard ni le
+# compte emetteur: la clause WireGuard exempte tout UDP du client vers ce
+# port de l'endpoint, et le :53 que la sortie laisse au compte du resolveur
+# n'est pas exempte. Meme miroir que `capture::allowed()` dans
+# crates/bifrost-daemon/src/checks/capture.rs, adresses de ce banc.
+LEAK_FILTER="ether src $CLI_MAC and (ip or ip6) and not (\
+(ip and dst host $SRV_ADDR and udp dst port $WG_PORT) \
+ or (ip and dst host 255.255.255.255 and udp src port 68 and udp dst port 67) \
+ or (ip6 and (dst host ff02::1:2 or dst host ff05::1:3) and udp src port 546 and udp dst port 547) \
  or (icmp6 and icmp6[icmp6type] >= 133 and icmp6[icmp6type] <= 137))"
 
 LEAKS=$(tcpdump -r "$PCAP" -nn -c 20 "$LEAK_FILTER" 2>/dev/null | grep -v '^reading' || true)
