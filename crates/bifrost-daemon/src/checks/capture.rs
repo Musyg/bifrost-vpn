@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use bifrost_core::{Error, Result};
 
-use super::netns::{Bench, PHYS_ADDR, VETH_PHYS, WG_PORT};
+use super::netns::{Bench, CLIENT_MAC, PHYS_ADDR, VETH_PHYS, WG_PORT};
 
 /// Temps maximal accorde a tcpdump pour ouvrir son fichier de sortie.
 const ATTACHE_MAX: Duration = Duration::from_secs(5);
@@ -434,38 +434,72 @@ impl Drop for Pcap {
     }
 }
 
-/// Paquets qui ne comptent jamais comme une fuite.
+/// Les trames que le client emet sur le lien, et elles seules.
 ///
-/// Ce que le filtre exempte, clause par clause (`port`, `host` et `net` sans
-/// qualificatif valent pour la source comme pour la destination):
+/// La capture se fait cote `phys` et voit les deux sens du lien. Une fuite est
+/// une trame que le client emet; ce que la passerelle emet de son cote (ses
+/// reponses aux sondes, son NDP, ses rapports MLD) n'en est jamais une. Le
+/// pcap ne porte pas le sens d'une trame, sa source Ethernet si: le banc pose
+/// [`CLIENT_MAC`] sur `veth-bfc` a la creation du lien (`netns.rs`).
 ///
-/// - l'UDP qui porte le port WireGuard et l'adresse de l'endpoint du banc;
-/// - tout paquet dont une adresse est dans `224.0.0.0/4`;
-/// - tout paquet dont une adresse est `255.255.255.255`;
-/// - tout paquet dont la destination est dans `ff00::/8`;
-/// - l'ICMPv6 des types 133 a 137 (NDP).
+/// Mesure du 11/10/2026 sur essai-linux, suite de fuite dans un namespace
+/// jetable, deux series: apres la remontee de `veth-bfp` (phase
+/// `coupure-lien` de `reconnect-window`, kill switch arme), la passerelle a
+/// emis des rapports MLDv2 vers `ff02::16`, et la capture armee de la phase en
+/// a pris un dans chaque serie; ceux du client, le kill switch les a jetes.
+fn emises_par_le_client() -> String {
+    format!("ether src {CLIENT_MAC}")
+}
+
+/// Ce que la sortie du kill switch du banc admet sur le lien, en miroir: les
+/// seules trames du client qui ne comptent jamais comme une fuite.
 ///
-/// Aucune clause ne nomme un port du DHCP: un datagramme du DHCP n'est
-/// exempte que par une adresse, comme tout autre paquet. Les destinations que
-/// les regles DHCP du kill switch Linux nomment en sortie y tombent ainsi: la
-/// diffusion pour le DHCPv4 (68 -> 67), `ff02::1:2` et `ff05::1:3` pour le
-/// DHCPv6 (546 -> 547). Aucune clause non plus pour les reponses du serveur
-/// (67 -> 68, 547 -> 546): le pcap ne porte pas le sens d'une trame, une
-/// telle clause exempterait aussi la meme forme emise par le client, et le
-/// banc n'a pas de serveur DHCP.
+/// Les phases qui relisent un pcap par [`leak_filter`] ou [`ipv6_filter`] et
+/// y attendent zero arment `bench_policy` (`checks/mod.rs`): marque
+/// WireGuard, resolveur sur la boucle locale, LAN ferme, aucun coeur. La
+/// sortie (`ruleset.rs`) n'admet alors sur le lien que ceci, et chaque clause
+/// est bornee comme sa regle nft:
+///
+/// - `meta mark`, ce que le module WireGuard chiffre: dans le banc, l'UDP du
+///   client vers l'endpoint, 10.77.0.1 port 51820. Le pcap ne porte pas la
+///   marque: la clause exempte tout UDP du client vers ce port de l'endpoint;
+/// - `ip daddr 255.255.255.255 udp sport 68 udp dport 67`, le client DHCPv4;
+/// - `ip6 daddr { ff02::1:2, ff05::1:3 } udp sport 546 udp dport 547`, le
+///   client DHCPv6;
+/// - `icmpv6 type` 133 a 137, le NDP.
+///
+/// Le reste de ce que la sortie admet ne parait pas sur le lien: la boucle
+/// locale, l'interface du tunnel, le DNS vers le resolveur declare
+/// (127.0.0.1). Aucune exemption de plus: ni multicast, ni diffusion, ni
+/// groupe IPv6 hors des deux du DHCPv6. Une seule capture relue par ces
+/// filtres tourne LAN ouvert: le temoin `dns-leak-lien-ouvert`, qui y attend
+/// un compte non nul. Le miroir, celui de la sortie LAN ferme, y compte la
+/// sonde de lien que l'acceptation du LAN admet, et c'est ce que ce temoin
+/// mesure.
+///
+/// Un ecart de forme, du cote qui compte: les primitives `udp` et `icmp6` de
+/// libpcap ne franchissent pas un en-tete Hop-by-Hop. Une forme de cette liste
+/// portee derriere lui serait comptee, quoi qu'en dise le kill switch. Le banc
+/// n'en emet aucune (mesure du 11/10/2026: les seules trames du lien a en-tete
+/// Hop-by-Hop etaient des rapports MLDv2).
 fn allowed() -> String {
     format!(
-        "(udp port {WG_PORT} and host {PHYS_ADDR}) \
-         or (net 224.0.0.0/4) \
-         or (host 255.255.255.255) \
-         or (dst net ff00::/8) \
+        "(ip and dst host {PHYS_ADDR} and udp dst port {WG_PORT}) \
+         or (ip and dst host 255.255.255.255 and udp src port 68 and udp dst port 67) \
+         or (ip6 and (dst host ff02::1:2 or dst host ff05::1:3) \
+         and udp src port 546 and udp dst port 547) \
          or (icmp6 and icmp6[icmp6type] >= 133 and icmp6[icmp6type] <= 137)"
     )
 }
 
-/// Tout paquet IP en clair vers une destination hors endpoint.
+/// Toute trame IP que le client emet en clair sur le lien hors de ce que la
+/// sortie du kill switch admet.
 pub fn leak_filter() -> String {
-    format!("(ip or ip6) and not ({})", allowed())
+    format!(
+        "{} and (ip or ip6) and not ({})",
+        emises_par_le_client(),
+        allowed()
+    )
 }
 
 /// Toute requete DNS visible sur le lien physique.
@@ -473,9 +507,10 @@ pub fn dns_filter() -> String {
     "(udp port 53) or (tcp port 53)".to_owned()
 }
 
-/// Tout IPv6 hors NDP et multicast.
+/// Tout IPv6 que le client emet sur le lien hors de ce que la sortie du kill
+/// switch admet.
 pub fn ipv6_filter() -> String {
-    format!("ip6 and not ({})", allowed())
+    format!("{} and ip6 and not ({})", emises_par_le_client(), allowed())
 }
 
 /// Ce qu'une relecture de pcap a trouve: le COMPTE, entier, et les PREUVES,
@@ -873,12 +908,31 @@ mod tests {
         std::fs::write(chemin, octets)
     }
 
-    /// L'en-tete Ethernet d'une trame de temoin. Aucune clause du filtre juge
-    /// ne lit un champ de lien: les adresses MAC sont fixes.
+    /// Les six octets d'une adresse MAC ecrite `aa:bb:cc:dd:ee:ff`.
+    fn octets_mac(mac: &str) -> [u8; 6] {
+        let octets: Vec<u8> = mac
+            .split(':')
+            .map(|o| u8::from_str_radix(o, 16).expect("adresse MAC hexadecimale"))
+            .collect();
+        octets
+            .try_into()
+            .unwrap_or_else(|o: Vec<u8>| panic!("adresse MAC de {} octets: {mac}", o.len()))
+    }
+
+    /// L'en-tete Ethernet d'une trame de temoin, emise par le client: sa
+    /// source est [`CLIENT_MAC`], la seule que le filtre de fuite juge. La
+    /// destination n'est lue par aucune clause. [`depuis`] change la source.
     fn ethernet(ethertype: u16) -> Vec<u8> {
-        let mut t = vec![0x02, 0, 0, 0, 0, 2, 0x02, 0, 0, 0, 0, 1];
+        let mut t = vec![0x02, 0, 0, 0, 0, 1];
+        t.extend_from_slice(&octets_mac(CLIENT_MAC));
         t.extend_from_slice(&ethertype.to_be_bytes());
         t
+    }
+
+    /// La meme trame, emise depuis l'adresse MAC `mac`.
+    fn depuis(mac: &str, mut trame: Vec<u8>) -> Vec<u8> {
+        trame[6..12].copy_from_slice(&octets_mac(mac));
+        trame
     }
 
     /// Un en-tete UDP de 8 octets suivi d'une charge de 4. Sommes de controle
@@ -902,14 +956,29 @@ mod tests {
         decalage: u16,
         charge: &[u8],
     ) -> Vec<u8> {
+        trame_ipv4_de(source, destination, 17, &[], decalage, charge)
+    }
+
+    /// Une trame IPv4 du protocole `protocole`, `options` (un multiple de
+    /// quatre octets) dans l'en-tete, qui porte `charge`.
+    fn trame_ipv4_de(
+        source: std::net::Ipv4Addr,
+        destination: std::net::Ipv4Addr,
+        protocole: u8,
+        options: &[u8],
+        decalage: u16,
+        charge: &[u8],
+    ) -> Vec<u8> {
+        assert_eq!(options.len() % 4, 0, "options IPv4 hors de mots de 32 bits");
         let mut t = ethernet(0x0800);
-        t.extend_from_slice(&[0x45, 0x00]);
-        t.extend_from_slice(&((20 + charge.len()) as u16).to_be_bytes());
+        t.extend_from_slice(&[0x40 | (5 + options.len() / 4) as u8, 0x00]);
+        t.extend_from_slice(&((20 + options.len() + charge.len()) as u16).to_be_bytes());
         t.extend_from_slice(&[0x00, 0x01]); // identifiant
         t.extend_from_slice(&(decalage & 0x1fff).to_be_bytes()); // drapeaux nuls
-        t.extend_from_slice(&[64, 17, 0x00, 0x00]); // duree de vie, UDP, somme
+        t.extend_from_slice(&[64, protocole, 0x00, 0x00]); // duree de vie, protocole, somme
         t.extend_from_slice(&source.octets());
         t.extend_from_slice(&destination.octets());
+        t.extend_from_slice(options);
         t.extend_from_slice(charge);
         t
     }
@@ -922,21 +991,79 @@ mod tests {
         saut_par_saut: bool,
         charge: &[u8],
     ) -> Vec<u8> {
+        trame_ipv6_de(source, destination, saut_par_saut, 17, charge)
+    }
+
+    /// Une trame IPv6 qui porte `charge` sous l'en-tete suivant `protocole`
+    /// (17 UDP, 6 TCP, 58 ICMPv6), derriere un en-tete Hop-by-Hop si
+    /// `saut_par_saut`.
+    fn trame_ipv6_de(
+        source: std::net::Ipv6Addr,
+        destination: std::net::Ipv6Addr,
+        saut_par_saut: bool,
+        protocole: u8,
+        charge: &[u8],
+    ) -> Vec<u8> {
         let mut suite = Vec::new();
         if saut_par_saut {
-            // en-tete suivant UDP, longueur 0 (8 octets), PadN de 4 octets
-            suite.extend_from_slice(&[17, 0, 1, 4, 0, 0, 0, 0]);
+            // en-tete suivant, longueur 0 (8 octets), PadN de 4 octets
+            suite.extend_from_slice(&[protocole, 0, 1, 4, 0, 0, 0, 0]);
         }
         suite.extend_from_slice(charge);
         let mut t = ethernet(0x86dd);
         t.extend_from_slice(&[0x60, 0x00, 0x00, 0x00]);
         t.extend_from_slice(&(suite.len() as u16).to_be_bytes());
-        t.push(if saut_par_saut { 0 } else { 17 });
+        t.push(if saut_par_saut { 0 } else { protocole });
         t.push(64);
         t.extend_from_slice(&source.octets());
         t.extend_from_slice(&destination.octets());
         t.extend_from_slice(&suite);
         t
+    }
+
+    /// Un message ICMP (IPv4 ou IPv6): type, code, somme nulle, puis `corps`.
+    fn icmp(type_: u8, code: u8, corps: &[u8]) -> Vec<u8> {
+        let mut m = vec![type_, code, 0x00, 0x00];
+        m.extend_from_slice(corps);
+        m
+    }
+
+    /// Un segment TCP de 20 octets portant `drapeaux` (0x02 SYN, 0x04 RST).
+    fn tcp(source: u16, destination: u16, drapeaux: u8) -> Vec<u8> {
+        let mut s = Vec::new();
+        s.extend_from_slice(&source.to_be_bytes());
+        s.extend_from_slice(&destination.to_be_bytes());
+        s.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0, 0]); // sequence, acquittement
+        s.extend_from_slice(&[0x50, drapeaux, 0xff, 0xff, 0, 0, 0, 0]);
+        s
+    }
+
+    /// Une requete ARP du client, de `source` vers `cible`.
+    fn trame_arp(source: std::net::Ipv4Addr, cible: std::net::Ipv4Addr) -> Vec<u8> {
+        let mut t = ethernet(0x0806);
+        t.extend_from_slice(&[0, 1, 0x08, 0x00, 6, 4, 0, 1]);
+        t.extend_from_slice(&octets_mac(CLIENT_MAC));
+        t.extend_from_slice(&source.octets());
+        t.extend_from_slice(&[0; 6]);
+        t.extend_from_slice(&cible.octets());
+        t
+    }
+
+    /// La clause d'adresse IPv6 d'un temoin, `sens` valant `src` ou `dst`.
+    /// L'adresse non specifiee s'y ecrit par ses seize octets nuls plutot que
+    /// par `::`.
+    fn hote6(sens: &str, a: std::net::Ipv6Addr) -> String {
+        if a.is_unspecified() {
+            let o = if sens == "src" { 8 } else { 24 };
+            format!(
+                "ip6[{o}:4] == 0 and ip6[{}:4] == 0 and ip6[{}:4] == 0 and ip6[{}:4] == 0",
+                o + 4,
+                o + 8,
+                o + 12
+            )
+        } else {
+            format!("{sens} host {a}")
+        }
     }
 
     /// Une forme de la table des temoins, et ce que le filtre de fuite doit en
@@ -1106,6 +1233,283 @@ mod tests {
         );
     }
 
+    /// Une forme de la table de la garde par emetteur: sa trame, emise depuis
+    /// `mac`, et son temoin, qui exige cette source Ethernet.
+    fn forme_de(
+        id: &'static str,
+        mac: &str,
+        (trame, temoin): (Vec<u8>, String),
+        fuite: usize,
+    ) -> Forme {
+        Forme {
+            id,
+            trame: depuis(mac, trame),
+            temoin: format!("ether src {mac} and {temoin}"),
+            fuite,
+        }
+    }
+
+    fn udp4(s: std::net::Ipv4Addr, sp: u16, d: std::net::Ipv4Addr, dp: u16) -> (Vec<u8>, String) {
+        (
+            trame_ipv4(s, d, 0, &udp(sp, dp)),
+            format!(
+                "ip and src host {s} and dst host {d} and udp src port {sp} and udp dst port {dp}"
+            ),
+        )
+    }
+
+    fn udp6(s: std::net::Ipv6Addr, sp: u16, d: std::net::Ipv6Addr, dp: u16) -> (Vec<u8>, String) {
+        (
+            trame_ipv6(s, d, false, &udp(sp, dp)),
+            format!(
+                "ip6 and {} and {} and udp src port {sp} and udp dst port {dp}",
+                hote6("src", s),
+                hote6("dst", d)
+            ),
+        )
+    }
+
+    fn tcp4(
+        s: std::net::Ipv4Addr,
+        sp: u16,
+        d: std::net::Ipv4Addr,
+        dp: u16,
+        drapeaux: u8,
+    ) -> (Vec<u8>, String) {
+        let segment = tcp(sp, dp, drapeaux);
+        (
+            trame_ipv4_de(s, d, 6, &[], 0, &segment),
+            format!(
+                "ip and src host {s} and dst host {d} and tcp src port {sp} \
+                 and tcp dst port {dp} and tcp[13] == {drapeaux}"
+            ),
+        )
+    }
+
+    fn icmp4(
+        s: std::net::Ipv4Addr,
+        d: std::net::Ipv4Addr,
+        type_: u8,
+        code: u8,
+    ) -> (Vec<u8>, String) {
+        (
+            trame_ipv4_de(s, d, 1, &[], 0, &icmp(type_, code, &[0; 36])),
+            format!(
+                "ip and src host {s} and dst host {d} and icmp[0] == {type_} and icmp[1] == {code}"
+            ),
+        )
+    }
+
+    /// Un rapport IGMPv3 (protocole 2), sous l'option Router Alert.
+    fn igmp3(s: std::net::Ipv4Addr, d: std::net::Ipv4Addr) -> (Vec<u8>, String) {
+        let rapport = [0x22, 0, 0, 0, 0, 0, 0, 1, 4, 0, 0, 0, 224, 0, 0, 251];
+        (
+            trame_ipv4_de(s, d, 2, &[0x94, 0x04, 0x00, 0x00], 0, &rapport),
+            format!("ip and src host {s} and dst host {d} and ip[9] == 2"),
+        )
+    }
+
+    /// Un message ICMPv6 de type `type_`, directement sous l'en-tete IPv6.
+    fn icmp6_de(s: std::net::Ipv6Addr, d: std::net::Ipv6Addr, type_: u8) -> (Vec<u8>, String) {
+        (
+            trame_ipv6_de(s, d, false, 58, &icmp(type_, 0, &[0; 36])),
+            format!(
+                "ip6 and {} and {} and ip6[6] == 58 and ip6[40] == {type_}",
+                hote6("src", s),
+                hote6("dst", d)
+            ),
+        )
+    }
+
+    /// Un rapport MLDv2 (ICMPv6 143) derriere un en-tete Hop-by-Hop, la forme
+    /// que le noyau emet: un enregistrement, sans source, pour `ff02::1:ff00:c`.
+    fn mld2(s: std::net::Ipv6Addr, d: std::net::Ipv6Addr) -> (Vec<u8>, String) {
+        let mut corps = vec![0, 0, 0, 1, 4, 0, 0, 0];
+        corps.extend_from_slice(
+            &"ff02::1:ff00:c"
+                .parse::<std::net::Ipv6Addr>()
+                .unwrap()
+                .octets(),
+        );
+        (
+            trame_ipv6_de(s, d, true, 58, &icmp(143, 0, &corps)),
+            format!(
+                "ip6 and {} and {} and ip6[6] == 0 and ip6[40] == 58 and ip6[48] == 143",
+                hote6("src", s),
+                hote6("dst", d)
+            ),
+        )
+    }
+
+    /// Le filtre de fuite ne compte que ce que le CLIENT emet hors de la
+    /// sortie du kill switch: chaque forme de sa table, jugee par son
+    /// emetteur et par sa forme.
+    ///
+    /// GARDE SANS ROOT, comme la precedente: un pcap synthetique d'une trame
+    /// par forme, relu par [`relever`] sous [`leak_filter`] et sous
+    /// [`ipv6_filter`], qui doit compter les formes IPv6 comme le premier et
+    /// aucune autre. Chaque forme a son temoin, qui exige sa source Ethernet.
+    /// Adresses du banc (`netns.rs`): client 10.77.0.2, fd00:77::2 et
+    /// [`CLIENT_MAC`], passerelle 10.77.0.1; une adresse de lien par cote,
+    /// fe80::c pour le client et fe80::1 pour la passerelle. Le banc laisse le
+    /// noyau tirer l'adresse MAC de la passerelle; la table lui donne
+    /// 02:00:00:77:00:01.
+    ///
+    /// Emises par le client, comptees (1); la sortie du kill switch les
+    /// refuse, LAN ferme:
+    /// - V1 a V4, quatre formes relevees le 11/10/2026, que l'ancien filtre
+    ///   exemptait par leur destination: 10.77.0.2:40000 ->
+    ///   255.255.255.255:67; [fe80::c]:546 -> [ff02::1]:547; 10.77.0.2:68 ->
+    ///   224.0.0.1:67; [fe80::c]:546 -> [ff02::1:3]:547;
+    /// - M1, M2 mDNS vers 224.0.0.251:5353 et [ff02::fb]:5353;
+    /// - S1 SSDP vers 239.255.255.250:1900;
+    /// - L1, L2 LLMNR vers 224.0.0.252:5355 et [ff02::1:3]:5355;
+    /// - G1 rapport IGMPv3 vers 224.0.0.22 (protocole 2, option Router Alert);
+    /// - R1, R2 rapports MLDv2 vers ff02::16, derriere un en-tete Hop-by-Hop,
+    ///   depuis fe80::c et depuis `::`: la forme que le client emet quand son
+    ///   lien monte, et que le kill switch arme a jetee au retour de la
+    ///   porteuse (mesure du 11/10/2026);
+    /// - E1 ICMPv6 echo (type 128) vers ff02::1, hors NDP;
+    /// - D1, D2 diffusion dirigee du sous-reseau du banc, 10.77.0.255: un
+    ///   DHCPv4 68 -> 67 et un NetBIOS 137 -> 137;
+    /// - P1 a P3, des sondes de la suite, vues sur le lien le 11/10/2026: UDP
+    ///   et TCP SYN vers 10.77.0.1:9999 (la sonde de lien des temoins), UDP
+    ///   vers [2001:db8::1]:1234.
+    ///
+    /// Emises par le client, non comptees (0); la sortie les admet:
+    /// - A1, A2 DHCPv4 68 -> 67 vers la diffusion, depuis 0.0.0.0 et
+    ///   10.77.0.2;
+    /// - A3, A4 DHCPv6 546 -> 547 vers ff02::1:2 et ff05::1:3;
+    /// - A5 a A9 ICMPv6 133 a 137 (NDP), A7 etant le NS de detection
+    ///   d'adresse dupliquee, depuis `::`;
+    /// - A10 WireGuard vers 10.77.0.1:51820;
+    /// - A11 une requete ARP, qui n'est pas de l'IP.
+    ///
+    /// Emises par la passerelle, non comptees (0):
+    /// - Q1, Q2 rapports MLDv2 vers ff02::16, depuis fe80::1 et depuis `::`
+    ///   (la forme de la trame relevee le 11/10/2026 dans `coupure-lien`);
+    /// - Q3 un NS de detection d'adresse dupliquee;
+    /// - Q4 ICMP port injoignable et Q5 TCP RST vers 10.77.0.2, ses reponses
+    ///   a la sonde de lien;
+    /// - Q6 WireGuard de 10.77.0.1:51820 vers le client.
+    ///
+    /// Sans tcpdump, la garde s'abstient en le nommant, comme la precedente.
+    #[test]
+    fn le_filtre_de_fuite_juge_chaque_forme_par_son_emetteur() {
+        use super::super::netns::{CLIENT_ADDR, CLIENT_ADDR6, PHYS_ADDR, PREFIX};
+        use std::net::{Ipv4Addr, Ipv6Addr};
+        if Command::new("tcpdump")
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_err()
+        {
+            println!(
+                "SKIPPED le_filtre_de_fuite_juge_chaque_forme_par_son_emetteur: \
+                 tcpdump absent"
+            );
+            return;
+        }
+        const PASSERELLE: &str = "02:00:00:77:00:01";
+        let client = CLIENT_MAC;
+        let v6 = |a: &str| -> Ipv6Addr { a.parse().unwrap() };
+        let c4: Ipv4Addr = CLIENT_ADDR.parse().unwrap();
+        let p4: Ipv4Addr = PHYS_ADDR.parse().unwrap();
+        let c6: Ipv6Addr = CLIENT_ADDR6.parse().unwrap();
+        let prefixe: u32 = PREFIX.parse().unwrap();
+        let dirigee = Ipv4Addr::from(u32::from(c4) | (u32::MAX >> prefixe));
+        let (lien_c, lien_p, nulle) = (v6("fe80::c"), v6("fe80::1"), Ipv6Addr::UNSPECIFIED);
+        let rapports = v6("ff02::16");
+        let groupe4 = |d: u8| Ipv4Addr::new(224, 0, 0, d);
+
+        let formes = vec![
+            forme_de("V1", client, udp4(c4, 40000, Ipv4Addr::BROADCAST, 67), 1),
+            forme_de("V2", client, udp6(lien_c, 546, v6("ff02::1"), 547), 1),
+            forme_de("V3", client, udp4(c4, 68, groupe4(1), 67), 1),
+            forme_de("V4", client, udp6(lien_c, 546, v6("ff02::1:3"), 547), 1),
+            forme_de("M1", client, udp4(c4, 5353, groupe4(251), 5353), 1),
+            forme_de("M2", client, udp6(lien_c, 5353, v6("ff02::fb"), 5353), 1),
+            forme_de(
+                "S1",
+                client,
+                udp4(c4, 40001, Ipv4Addr::new(239, 255, 255, 250), 1900),
+                1,
+            ),
+            forme_de("L1", client, udp4(c4, 40002, groupe4(252), 5355), 1),
+            forme_de("L2", client, udp6(lien_c, 40002, v6("ff02::1:3"), 5355), 1),
+            forme_de("G1", client, igmp3(c4, groupe4(22)), 1),
+            forme_de("R1", client, mld2(lien_c, rapports), 1),
+            forme_de("R2", client, mld2(nulle, rapports), 1),
+            forme_de("E1", client, icmp6_de(lien_c, v6("ff02::1"), 128), 1),
+            forme_de("D1", client, udp4(c4, 68, dirigee, 67), 1),
+            forme_de("D2", client, udp4(c4, 137, dirigee, 137), 1),
+            forme_de("P1", client, udp4(c4, 40004, p4, 9999), 1),
+            forme_de("P2", client, tcp4(c4, 40005, p4, 9999, 0x02), 1),
+            forme_de("P3", client, udp6(c6, 40006, v6("2001:db8::1"), 1234), 1),
+            forme_de(
+                "A1",
+                client,
+                udp4(Ipv4Addr::UNSPECIFIED, 68, Ipv4Addr::BROADCAST, 67),
+                0,
+            ),
+            forme_de("A2", client, udp4(c4, 68, Ipv4Addr::BROADCAST, 67), 0),
+            forme_de("A3", client, udp6(lien_c, 546, v6("ff02::1:2"), 547), 0),
+            forme_de("A4", client, udp6(lien_c, 546, v6("ff05::1:3"), 547), 0),
+            forme_de("A5", client, icmp6_de(lien_c, v6("ff02::2"), 133), 0),
+            forme_de("A6", client, icmp6_de(lien_c, v6("ff02::1"), 134), 0),
+            forme_de("A7", client, icmp6_de(nulle, v6("ff02::1:ff00:2"), 135), 0),
+            forme_de("A8", client, icmp6_de(lien_c, lien_p, 136), 0),
+            forme_de("A9", client, icmp6_de(lien_c, lien_p, 137), 0),
+            forme_de("A10", client, udp4(c4, 40007, p4, WG_PORT), 0),
+            forme_de("A11", client, (trame_arp(c4, p4), "arp".to_owned()), 0),
+            forme_de("Q1", PASSERELLE, mld2(lien_p, rapports), 0),
+            forme_de("Q2", PASSERELLE, mld2(nulle, rapports), 0),
+            forme_de(
+                "Q3",
+                PASSERELLE,
+                icmp6_de(nulle, v6("ff02::1:ff00:1"), 135),
+                0,
+            ),
+            forme_de("Q4", PASSERELLE, icmp4(p4, c4, 3, 3), 0),
+            forme_de("Q5", PASSERELLE, tcp4(p4, 9999, c4, 40005, 0x04), 0),
+            forme_de("Q6", PASSERELLE, udp4(p4, WG_PORT, c4, 40007), 0),
+        ];
+
+        let (fuite, fuite6) = (leak_filter(), ipv6_filter());
+        let mut ecarts = Vec::new();
+        for f in &formes {
+            let chemin = std::env::temp_dir().join(format!(
+                "bifrost-emetteur-{}-{}.pcap",
+                f.id,
+                std::process::id()
+            ));
+            pcap_d_une_trame(&chemin, &f.trame).expect("pcap synthetique ecrit");
+            let attendue6 = if f.trame[12..14] == [0x86, 0xdd] {
+                f.fuite
+            } else {
+                0
+            };
+            let vue = relever(&chemin, &f.temoin).map(|r| r.compte);
+            let comptee = relever(&chemin, &fuite).map(|r| r.compte);
+            let comptee6 = relever(&chemin, &fuite6).map(|r| r.compte);
+            let _ = std::fs::remove_file(&chemin);
+            match (vue, comptee, comptee6) {
+                (Ok(1), Ok(n), Ok(n6)) if n == f.fuite && n6 == attendue6 => {}
+                (vue, comptee, comptee6) => ecarts.push(format!(
+                    "{}: temoin {vue:?} (1 attendu), fuite {comptee:?} ({} attendu), \
+                     ipv6 {comptee6:?} ({attendue6} attendu)",
+                    f.id, f.fuite
+                )),
+            }
+        }
+        assert!(
+            ecarts.is_empty(),
+            "formes mal jugees par les filtres de fuite:\n{}\nfiltre: {fuite}\nfiltre ipv6: {fuite6}",
+            ecarts.join("\n")
+        );
+    }
+
     /// Une relecture refusee n'est pas une capture vide.
     ///
     /// Les trois plaintes sont celles que tcpdump 4.99.4 a ecrites le
@@ -1266,43 +1670,62 @@ mod tests {
         );
     }
 
-    /// Le filtre de fuite ne doit jamais rapporter le trafic legitime.
+    /// Le filtre de fuite ne doit jamais rapporter le trafic legitime, et ne
+    /// juge que ce que le client emet.
     #[test]
     fn le_trafic_wireguard_n_est_pas_une_fuite() {
         let f = leak_filter();
-        assert!(f.contains("udp port 51820"));
-        assert!(f.starts_with("(ip or ip6) and not ("));
+        assert!(f.contains(&format!("dst host {PHYS_ADDR} and udp dst port {WG_PORT}")));
+        assert!(
+            f.starts_with(&format!("ether src {CLIENT_MAC} and (ip or ip6) and not (")),
+            "le filtre ne juge plus par l'emetteur: {f}"
+        );
     }
 
-    /// Le NDP, le multicast et la diffusion sont exclus des fuites, et les
-    /// destinations des regles DHCP du kill switch par eux seuls: la diffusion
-    /// pour le DHCPv4, `ff00::/8` pour les groupes du DHCPv6. Aucune clause
-    /// ne nomme un port du DHCP, en source ou en destination, mot a mot: une
-    /// telle clause exempterait le meme port vers toute adresse, y compris
-    /// vers une destination que la chaine `output` refuse. La garde sans root
-    /// juge chaque forme de sa table sur un pcap.
+    /// Le filtre n'exempte que les clauses de la sortie du kill switch du
+    /// banc: aucune exemption par reseau (ni `224.0.0.0/4`, ni `ff00::/8`, ni
+    /// aucun `net`), et un port du DHCP n'y est nomme que dans la clause qui
+    /// nomme aussi la destination que la regle nft lui donne: la diffusion
+    /// pour 68 -> 67, `ff02::1:2` et `ff05::1:3` pour 546 -> 547. Nomme seul,
+    /// un port exempterait le meme port vers toute adresse, y compris vers une
+    /// destination que la chaine `output` refuse; une destination nommee seule
+    /// exempterait tout ce qui la vise. La garde sans root juge chaque forme
+    /// sur un pcap.
     #[test]
-    fn ndp_dhcp_et_multicast_sont_exclus_des_fuites() {
-        let f = leak_filter();
-        for exclusion in [
-            "224.0.0.0/4",
-            "host 255.255.255.255",
-            "dst net ff00::/8",
-            "icmp6type",
-        ] {
-            assert!(f.contains(exclusion), "exclusion absente: {exclusion}");
-        }
-        let mots: Vec<&str> = f
-            .split(|c: char| c.is_whitespace() || c == '(' || c == ')')
-            .filter(|m| !m.is_empty())
+    fn seules_les_sorties_du_kill_switch_sont_exclues_des_fuites() {
+        let a = allowed();
+        let clauses: Vec<&str> = a
+            .strip_prefix('(')
+            .and_then(|a| a.strip_suffix(')'))
+            .expect("allowed() n'est pas une suite de clauses parenthesees")
+            .split(") or (")
             .collect();
-        for w in mots.windows(2) {
-            assert!(
-                !(w[0] == "port" && ["67", "68", "546", "547"].contains(&w[1])),
-                "une clause nomme un port du DHCP ({} {}): {f}",
-                w[0],
-                w[1]
-            );
+        assert_eq!(clauses.len(), 4, "une clause de plus ou de moins: {a}");
+        for c in &clauses {
+            let mots: Vec<&str> = c
+                .split(|x: char| x.is_whitespace() || x == '(' || x == ')')
+                .filter(|m| !m.is_empty())
+                .collect();
+            assert!(!mots.contains(&"net"), "exemption par reseau: ({c})");
+            let nomme = |m: &str| mots.contains(&m);
+            let dhcp4 = nomme("68") || nomme("67") || nomme("255.255.255.255");
+            if dhcp4 {
+                for exige in ["src", "dst", "68", "67", "255.255.255.255"] {
+                    assert!(nomme(exige), "clause DHCPv4 sans `{exige}`: ({c})");
+                }
+                assert_eq!(c.matches("port 68").count(), 1, "({c})");
+                assert!(c.contains("udp src port 68 and udp dst port 67"), "({c})");
+                assert!(c.contains("dst host 255.255.255.255"), "({c})");
+            }
+            let dhcp6 = nomme("546") || nomme("547") || nomme("ff02::1:2") || nomme("ff05::1:3");
+            if dhcp6 {
+                assert!(c.contains("udp src port 546 and udp dst port 547"), "({c})");
+                assert!(
+                    c.contains("(dst host ff02::1:2 or dst host ff05::1:3)"),
+                    "clause DHCPv6 sans ses deux groupes, et eux seuls: ({c})"
+                );
+                assert_eq!(c.matches("dst host").count(), 2, "({c})");
+            }
         }
     }
 
@@ -1336,10 +1759,16 @@ mod tests {
     }
 
     /// Le filtre IPv6 doit rester une restriction du filtre general, sinon on
-    /// pourrait declarer IPv6 etanche alors qu'une categorie a ete oubliee.
+    /// pourrait declarer IPv6 etanche alors qu'une categorie a ete oubliee; il
+    /// juge le meme emetteur.
     #[test]
     fn le_filtre_ipv6_reutilise_les_memes_exclusions() {
-        assert!(ipv6_filter().starts_with("ip6 and not ("));
-        assert!(ipv6_filter().ends_with(&format!("{})", allowed())));
+        let f = ipv6_filter();
+        assert!(
+            f.starts_with(&format!("{} and ip6 and not (", emises_par_le_client())),
+            "{f}"
+        );
+        assert!(f.ends_with(&format!("{})", allowed())), "{f}");
+        assert!(leak_filter().starts_with(&emises_par_le_client()));
     }
 }
