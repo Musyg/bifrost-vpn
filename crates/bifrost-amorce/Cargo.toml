@@ -17,7 +17,11 @@ ureq = { version = "3", default-features = false, features = ["rustls-no-provide
 # par l'equipe rustls pour la seule securite), et aws-lc-rs est le fournisseur
 # par defaut de rustls. Mesure le 19 aout 2026: il se construit sur dev-windows
 # SANS cmake ni nasm, contrairement a ce que le handoff affirmait.
-rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std", "tls12"] }
+# `prefer-post-quantum` met l'echange hybride X25519MLKEM768 en tete du
+# ClientHello, avec sa part; sans elle il venait en dernier et sans part. Le
+# repli classique qui va avec est dans `src/toile.rs`. Les features s'unifient:
+# la sonde d'inspection du client est concernee de la meme facon.
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std", "tls12", "prefer-post-quantum"] }
 aws-lc-rs = { version = "1", features = ["prebuilt-nasm"] }
 
 [dev-dependencies]

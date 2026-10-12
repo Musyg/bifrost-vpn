@@ -49,10 +49,11 @@
 //! [`colle`], qui vaut pour toute messagerie, un QR code ou un SMS. Le
 //! **mimetisme d'empreinte TLS**
 //! (JA3/JA4) aussi: `wreq` le fait, au prix de BoringSSL, donc de `cmake` et de
-//! Go dans la chaine de construction. La pile retenue est rustls avec aws-lc-rs,
-//! qui presente une empreinte ordinaire et porte les echanges de cles
-//! post-quantiques - ce qui, en 2026, ressemble davantage au trafic courant
-//! qu'un ClientHello qui n'en a pas.
+//! Go dans la chaine de construction. La pile retenue est rustls avec aws-lc-rs.
+//! Son ClientHello met en tete l'echange hybride post-quantique X25519MLKEM768
+//! et en porte la part; si cet essai est coupe en route, un second repart avec
+//! un echange classique seul. Ce qui est mesure, et ce que ce repli concede,
+//! est dans [`toile`].
 
 #![forbid(unsafe_code)]
 

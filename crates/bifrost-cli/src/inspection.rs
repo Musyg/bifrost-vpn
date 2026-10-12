@@ -69,8 +69,25 @@
 //! Un equipement d'inspection configure pour NE PAS dechiffrer ces points-la
 //! passerait donc inapercu. La limite est reelle et assumee: elle se paierait
 //! sinon en destinations supplementaires, donc en signature.
+//!
+//! # L'echange hybride, et le repli classique
+//!
+//! Le fournisseur par defaut d'aws-lc-rs, avec la feature `prefer-post-quantum`
+//! que ce paquet active comme `bifrost-amorce`: le premier ClientHello met
+//! X25519MLKEM768 en tete et en porte la part. Avec le nom
+//! `cloudflare-dns.com`, il fait 1475 octets de charge TCP (mesure sur la
+//! boucle locale de dev-windows), plus qu'un segment TCP usuel, et un boitier
+//! qui reassemble mal le coupe: sans repli, ce boitier ferait passer la cible
+//! pour injoignable. La sonde rejoue donc UNE fois avec
+//! `bifrost_amorce::toile::fournisseur_classique` (X25519, P-256, P-384), et
+//! seulement si le serveur n'a RIEN envoye et que la poignee a fini par une fin
+//! de flux, une reinitialisation, une interruption ou un delai. La sonde pilote
+//! rustls sur sa propre prise: elle compte les octets recus, ce que ureq ne
+//! permet pas a `Toile`. Un serveur qui a repondu, meme d'un seul ServerHello,
+//! n'est pas rejoue. Le verdict du second essai se juge comme celui du premier;
+//! une cible muette coute deux delais.
 
-use std::io::Write as _;
+use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -284,6 +301,10 @@ pub fn juger(vue: &[CertificateDer<'static>], nom: &str) -> Chaine {
 /// Synchrone: rustls l'est, et l'envelopper dans une pile asynchrone ajouterait
 /// une dependance pour un echange qui dure moins d'une seconde. L'appelant la
 /// place sur un fil bloquant.
+///
+/// Un essai avec l'echange hybride, puis au plus UN essai classique, si le
+/// premier a ete coupe sans que le serveur ait rien envoye: voir l'en-tete du
+/// module.
 pub fn observer(cible: SocketAddr, nom: &str) -> Chaine {
     let Ok(nom_serveur) = ServerName::try_from(nom.to_owned()) else {
         return Chaine::Douteuse {
@@ -291,38 +312,116 @@ pub fn observer(cible: SocketAddr, nom: &str) -> Chaine {
         };
     };
 
+    match essayer(cible, &nom_serveur, nom, fournisseur()) {
+        Essai::Vu(chaine) => chaine,
+        Essai::CoupeSansReponse => {
+            let classique = Arc::new(bifrost_amorce::toile::fournisseur_classique());
+            match essayer(cible, &nom_serveur, nom, classique) {
+                Essai::Vu(chaine) => chaine,
+                Essai::CoupeSansReponse => Chaine::Injoignable,
+            }
+        }
+    }
+}
+
+/// Ce qu'un essai de poignee de main a rendu.
+enum Essai {
+    /// Un verdict, a rendre tel quel.
+    Vu(Chaine),
+    /// Coupe, reinitialise, interrompu ou muet AVANT tout octet du serveur:
+    /// le seul cas qui appelle le second essai.
+    CoupeSansReponse,
+}
+
+/// La prise TCP, et le compte de ce que le serveur y a envoye.
+///
+/// rustls rend la meme erreur pour une fin de flux avant toute reponse et pour
+/// une fin de flux apres un ServerHello: le compte est ce qui les distingue.
+struct PriseComptee {
+    prise: std::net::TcpStream,
+    recus: usize,
+}
+
+impl Read for PriseComptee {
+    fn read(&mut self, tampon: &mut [u8]) -> std::io::Result<usize> {
+        let lus = self.prise.read(tampon)?;
+        self.recus += lus;
+        Ok(lus)
+    }
+}
+
+impl Write for PriseComptee {
+    fn write(&mut self, octets: &[u8]) -> std::io::Result<usize> {
+        self.prise.write(octets)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.prise.flush()
+    }
+}
+
+/// Les fins de poignee qu'un boitier intolerant au ClientHello produit: fin de
+/// flux, reinitialisation, interruption, delai. Le delai se lit `TimedOut`
+/// sous Windows et `WouldBlock` sous Linux, ou un delai de lecture rend
+/// `EAGAIN`. Une alerte ou une erreur de rustls arrive en `InvalidData`: jamais
+/// de second essai.
+fn coupe_de_transport(genre: std::io::ErrorKind) -> bool {
+    use std::io::ErrorKind;
+    matches!(
+        genre,
+        ErrorKind::UnexpectedEof
+            | ErrorKind::ConnectionReset
+            | ErrorKind::ConnectionAborted
+            | ErrorKind::TimedOut
+            | ErrorKind::WouldBlock
+    )
+}
+
+fn essayer(
+    cible: SocketAddr,
+    nom_serveur: &ServerName<'static>,
+    nom: &str,
+    fournisseur: Arc<CryptoProvider>,
+) -> Essai {
     let greffier = Arc::new(Greffier {
         vue: Mutex::new(Vec::new()),
-        fournisseur: fournisseur(),
+        fournisseur: fournisseur.clone(),
     });
-    let configuration = match rustls::ClientConfig::builder_with_provider(fournisseur())
+    let configuration = match rustls::ClientConfig::builder_with_provider(fournisseur)
         .with_safe_default_protocol_versions()
     {
         Ok(c) => c
             .dangerous()
             .with_custom_certificate_verifier(greffier.clone())
             .with_no_client_auth(),
-        Err(_) => return Chaine::Injoignable,
+        Err(_) => return Essai::Vu(Chaine::Injoignable),
     };
 
-    let Ok(mut connexion) = rustls::ClientConnection::new(Arc::new(configuration), nom_serveur)
+    let Ok(mut connexion) =
+        rustls::ClientConnection::new(Arc::new(configuration), nom_serveur.clone())
     else {
-        return Chaine::Injoignable;
+        return Essai::Vu(Chaine::Injoignable);
     };
-    let Ok(mut prise) = std::net::TcpStream::connect_timeout(&cible, DELAI) else {
-        return Chaine::Injoignable;
+    // Une connexion refusee ou qui n'aboutit pas n'a porte aucun ClientHello:
+    // pas de second essai.
+    let Ok(prise) = std::net::TcpStream::connect_timeout(&cible, DELAI) else {
+        return Essai::Vu(Chaine::Injoignable);
     };
     let _ = prise.set_read_timeout(Some(DELAI));
     let _ = prise.set_write_timeout(Some(DELAI));
+    let mut prise = PriseComptee { prise, recus: 0 };
 
-    if connexion.complete_io(&mut prise).is_err() {
+    if let Err(erreur) = connexion.complete_io(&mut prise) {
         // La chaine a pu etre notee avant l'echec: une poignee qui casse APRES
         // le certificat en apprend autant qu'une qui aboutit.
         let vue = greffier.vue.lock().expect("verrou").clone();
-        if vue.is_empty() {
-            return Chaine::Injoignable;
+        if !vue.is_empty() {
+            return Essai::Vu(juger(&vue, nom));
         }
-        return juger(&vue, nom);
+        if prise.recus == 0 && coupe_de_transport(erreur.kind()) {
+            return Essai::CoupeSansReponse;
+        }
+        return Essai::Vu(Chaine::Injoignable);
     }
 
     // On raccroche par un `close_notify`, comme le ferait n'importe quel
@@ -333,7 +432,7 @@ pub fn observer(cible: SocketAddr, nom: &str) -> Chaine {
     let _ = prise.flush();
 
     let vue = greffier.vue.lock().expect("verrou").clone();
-    juger(&vue, nom)
+    Essai::Vu(juger(&vue, nom))
 }
 
 /// Ce que l'ensemble des observations dit du reseau.
@@ -370,9 +469,144 @@ pub fn raison_du_silence(observations: &[Chaine]) -> &'static str {
     "aucune poignee de main TLS n'a abouti"
 }
 
+// Le banc TLS de la boucle locale, partage avec `tests/repli_toile.rs`.
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../tests/commun/banc_tls.rs"]
+mod banc_tls;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use banc_tls::{Banc, Conduite, Hello, SECP256R1, SECP384R1, X25519, X25519MLKEM768};
+
+    /// Les ClientHello vus par le banc, chacun complet.
+    fn hellos(banc: &Banc) -> Vec<Hello> {
+        banc.vus()
+            .into_iter()
+            .map(|h| h.expect("chaque connexion doit porter un ClientHello complet"))
+            .collect()
+    }
+
+    /// Observe sur un fil, et rend la main au plus tard apres trente secondes:
+    /// une sonde qui rejouerait sans borne ne fait pas pendre la recette, elle
+    /// la fait rougir.
+    fn observer_borne(banc: &Banc) -> Chaine {
+        let (envoi, reception) = std::sync::mpsc::channel();
+        let adresse = banc.adresse;
+        std::thread::spawn(move || {
+            let _ = envoi.send(observer(adresse, banc_tls::NOM));
+        });
+        reception
+            .recv_timeout(Duration::from_secs(30))
+            .expect("la sonde n'a pas rendu la main: elle rejoue sans borne")
+    }
+
+    fn hybride_en_tete(h: &Hello) {
+        assert_eq!(
+            h.groupes.first(),
+            Some(&X25519MLKEM768),
+            "le premier ClientHello doit mettre X25519MLKEM768 en tete: {h:?}"
+        );
+        assert_eq!(
+            h.parts.first().map(|p| p.0),
+            Some(X25519MLKEM768),
+            "le premier ClientHello doit porter la part hybride: {h:?}"
+        );
+    }
+
+    fn rien_que_du_classique(h: &Hello) {
+        assert!(
+            !h.offre_du_post_quantique(),
+            "le second essai ne doit offrir ni groupe ni part hybride: {h:?}"
+        );
+        assert_eq!(
+            h.groupes,
+            [X25519, SECP256R1, SECP384R1],
+            "le second essai offre X25519, P-256, P-384: {h:?}"
+        );
+    }
+
+    /// Le boitier intolerant: il coupe tout ClientHello qui offre l'hybride.
+    /// La sonde rejoue une fois en classique, et l'echange aboutit jusqu'au
+    /// verdict, juge comme au premier essai.
+    #[test]
+    fn la_sonde_rejoue_une_fois_en_classique_et_rend_son_verdict() {
+        let banc = Banc::monter(Conduite::CoupeSiPostQuantique);
+        let vu = observer_borne(&banc);
+        let vus = hellos(&banc);
+        assert_eq!(vus.len(), 2, "deux essais attendus: {vus:?}");
+        hybride_en_tete(&vus[0]);
+        rien_que_du_classique(&vus[1]);
+        assert!(
+            matches!(vu, Chaine::Etrangere { .. }),
+            "le second essai doit aboutir au verdict: {vu:?}"
+        );
+    }
+
+    #[test]
+    fn un_ecouteur_qui_coupe_toujours_voit_deux_essais_et_jamais_trois() {
+        let banc = Banc::monter(Conduite::CoupeToujours);
+        let vu = observer_borne(&banc);
+        let vus = hellos(&banc);
+        assert_eq!(vus.len(), 2, "deux essais, jamais trois: {vus:?}");
+        hybride_en_tete(&vus[0]);
+        rien_que_du_classique(&vus[1]);
+        assert_eq!(vu, Chaine::Injoignable);
+    }
+
+    /// Un serveur muet coute deux delais: c'est le prix du repli sur delai.
+    #[test]
+    fn un_serveur_muet_est_rejoue_une_fois() {
+        let banc = Banc::monter(Conduite::Silence);
+        let vu = observer_borne(&banc);
+        let vus = hellos(&banc);
+        assert_eq!(vus.len(), 2, "le silence appelle le second essai: {vus:?}");
+        rien_que_du_classique(&vus[1]);
+        assert_eq!(vu, Chaine::Injoignable);
+    }
+
+    /// Une alerte est une reponse du serveur: aucun second essai.
+    #[test]
+    fn une_alerte_n_appelle_aucun_second_essai() {
+        let banc = Banc::monter(Conduite::Alerte);
+        let vu = observer_borne(&banc);
+        let vus = hellos(&banc);
+        assert_eq!(vus.len(), 1, "une alerte ne se rejoue pas: {vus:?}");
+        assert_eq!(vu, Chaine::Injoignable);
+    }
+
+    /// Un serveur qui va jusqu'a son certificat: le verdict du premier essai,
+    /// sans second.
+    #[test]
+    fn un_certificat_presente_n_appelle_aucun_second_essai() {
+        let banc = Banc::monter(Conduite::Sert);
+        let vu = observer_borne(&banc);
+        let vus = hellos(&banc);
+        assert_eq!(
+            vus.len(),
+            1,
+            "une poignee aboutie ne se rejoue pas: {vus:?}"
+        );
+        hybride_en_tete(&vus[0]);
+        assert!(matches!(vu, Chaine::Etrangere { .. }), "{vu:?}");
+    }
+
+    /// Ce qui distingue la sonde de `Toile`: un serveur qui a repondu, meme
+    /// d'un seul ServerHello, n'est pas rejoue. La sonde compte les octets
+    /// recus sur sa prise.
+    #[test]
+    fn une_coupure_apres_un_server_hello_n_est_pas_rejouee() {
+        let banc = Banc::monter(Conduite::ServerHelloPuisCoupe);
+        let vu = observer_borne(&banc);
+        let vus = hellos(&banc);
+        assert_eq!(
+            vus.len(),
+            1,
+            "le serveur a repondu: aucun second essai: {vus:?}"
+        );
+        assert_eq!(vu, Chaine::Injoignable);
+    }
 
     #[test]
     fn une_chaine_etrangere_suffit_a_conclure_a_l_interception() {

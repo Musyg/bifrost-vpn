@@ -42,8 +42,10 @@ bifrost-evasion.workspace = true
 # en root et que `bifrost-daemon/tests/frontiere_reseau.rs` le lui interdit,
 # avec ses raisons. Memes reglages que bifrost-amorce, meme fournisseur, et le
 # jeu de racines de Mozilla EMBARQUE - surtout pas celui du systeme, ou une
-# interception d'entreprise s'installe.
-rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std", "tls12"] }
+# interception d'entreprise s'installe. `prefer-post-quantum` comme dans
+# bifrost-amorce: echange hybride en tete, et repli classique dans
+# `src/inspection.rs`.
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std", "tls12", "prefer-post-quantum"] }
 webpki-roots = "1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
