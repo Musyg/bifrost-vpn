@@ -660,7 +660,7 @@ Le troisieme profil du document, « parano », n'est pas livre : il coupe Window
 
 ### La couche 1 : registre, services, taches planifiees
 
-Windows seulement, et posee a la source : on n'y filtre pas un flux, on en eteint la source. Vingt-huit reglages, deux profils, chacun avec sa raison, ce qu'il casse et sa source datee. `bifrost-telemetrie` porte le catalogue et le journal, purs et testes sur les deux hotes ; `bifrost_daemon::telemetrie` porte ce qui touche la machine.
+Windows seulement, et posee a la source : on n'y filtre pas un flux, on en eteint la source. Deux profils; chaque reglage porte sa raison, ce qu'il casse et sa source datee. `bifrost-telemetrie` porte le catalogue et le journal, purs et testes sur les deux hotes ; `bifrost_daemon::telemetrie` porte ce qui touche la machine.
 
 ```bash
 bifrost-daemon --telemetrie-etat --telemetrie-profil strict        # ne fait que LIRE

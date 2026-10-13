@@ -388,7 +388,7 @@ bifrost-daemon --telemetrie-appliquer --telemetrie-profil strict
 bifrost-daemon --telemetrie-restaurer
 ```
 
-The catalogue contains 28 settings, two profiles, source dates and the effects of each setting. Apply records the original state, writes the setting and reads it back. Restore distinguishes a previously absent value from a previously absent key. Missing targets are reported as inapplicable.
+The catalogue documents two profiles, source dates and the effects of each setting. Apply records the original state, writes the setting and reads it back. Restore distinguishes a previously absent value from a previously absent key. Missing targets are reported as inapplicable.
 
 The daemon refuses HKCU settings when it runs as SYSTEM: in that context HKCU is SYSTEM's hive, not the user's. The independent Windows recipe reads the targets itself before and after an apply/restore cycle.
 
