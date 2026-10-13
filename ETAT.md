@@ -4,8 +4,13 @@ Bifrost est un VPN auto-heberge pour Windows 11 et Linux. Trois objectifs, dans
 cet ordre: ne pas fuir (kill switch de niveau noyau, fail-closed), ne pas etre
 bloque (resistance active au DPI et a la censure), ne pas laisser le systeme
 d'exploitation parler (blocage de la telemetrie avant le tunnel). Le MVP de
-l'objectif 1 est implemente; l'objectif 2 avance; l'objectif 3 est au stade de
-la conception. Daemon et CLI, pas d'interface graphique.
+l'objectif 1 est implemente. Le flux de connexion utilise la selection des
+transports, avec WireGuard et les profils VLESS+REALITY et Hysteria2 par
+sing-box. Les couches DNS et reglages Windows anti-telemetrie sont
+implementees; les filtres WFP par service gardent leurs effets mesures propres.
+Les commandes `prove` couvrent le pare-feu et le routage, ainsi que le DNS
+effectif sous Linux, dans le perimetre de chaque comparaison. Daemon et CLI;
+l'interface Tauri reste un jalon separe, hors MVP.
 
 Cette page tient sur un ecran et se met a jour a chaque tranche. Ce qui est
 mesure et ce qui ne l'est pas est detaille dans le README et dans les documents

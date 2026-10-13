@@ -1,5 +1,7 @@
 # Bifrost
 
+Francais | [English](README.en.md)
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Musyg/Musyg/308e2616361e5e3b06cf4725e4598ffbcef7d39e/assets/bifrost/bifrost-fond-sombre.png">
   <img src="https://raw.githubusercontent.com/Musyg/Musyg/308e2616361e5e3b06cf4725e4598ffbcef7d39e/assets/bifrost/bifrost-couleur.png" alt="Bifrost - pont de lumiere" width="360">
@@ -7,24 +9,28 @@
 
 VPN auto-heberge pour Windows 11 et Linux. Trois objectifs, dans cet ordre de priorite :
 
-1. **Ne pas fuir.** Kill switch de niveau noyau, fail-closed, sans fenetre de fuite au boot, au reveil, ni pendant la reconnexion.
+1. **Ne pas fuir.** Kill switch applique par le systeme, fail-closed, avec des controles de chute du tunnel, de reconnexion, de demarrage et de mort du daemon.
 2. **Ne pas etre bloque.** Resistance active au DPI et a la censure, du FAI europeen au reseau d'entreprise jusqu'aux censures etatiques.
 3. **Ne pas laisser l'OS parler.** Blocage de la telemetrie du systeme d'exploitation avant qu'elle n'entre dans le tunnel.
 
 Le logiciel s'appelle Bifrost. Les documents de conception ont porte le nom de travail "Hyper VPN" jusqu'au 21 aout 2026; il ne subsiste que dans l'historique git, ou une recherche sur ce nom retrouve les versions d'origine.
 
-## Statut : MVP de l'objectif 1
+## Statut actuel
 
-Le premier objectif est implemente. Daemon et CLI uniquement, pas d'interface graphique. L'objectif 2 avance : couche de decision, sondes reseau, lancement des coeurs tiers, un tunnel VLESS+REALITY qui porte du trafic reel, et le chemin qui fait entrer le trafic du systeme dans un coeur, tout cela decrit plus bas ; l'objectif 3 reste au stade de la conception.
+Bifrost est en developpement. Le MVP de l'objectif 1 est implemente. Daemon et CLI uniquement; l'interface Tauri est un jalon separe, hors MVP. Le flux de connexion appelle la selection des transports: WireGuard directement, VLESS+REALITY et Hysteria2 par sing-box, avec interface TUN et passage SOCKS5. La couche DNS anti-telemetrie et les reglages Windows du registre, des services et des taches planifiees sont implementes; les filtres WFP par service restent une defense en profondeur, dont l'effet mesure est documente cible par cible.
+
+Les commandes `prove` confrontent aussi le pare-feu et le routage a une reference explicite ou a ce que le daemon declare avoir pose; la preuve des resolveurs DNS effectifs est livree sous Linux. Elles rendent MATCH, MISMATCH ou UNMEASURED, avec le perimetre de chaque mesure. Les chantiers ouverts restent dans [`ETAT.md`](ETAT.md); les sections detaillees ci-dessous conservent aussi l'historique des mesures et des corrections.
 
 | Composant | Linux | Windows |
 |---|---|---|
 | Kill switch | nftables `inet`, policy drop, fwmark. Fonctionnel et verifie | WFP user-mode (BFE). Fonctionnel, execute et mesure sur machine dediee |
 | Tunnel WireGuard | Module noyau pilote en netlink. Fonctionnel | WireGuardNT. Fonctionnel, handshake et chemin de donnees verifies |
+| Chemin par coeur | TUN, routage par identite du coeur, passage SOCKS5 | Wintun, sockets du coeur liees a l'interface physique, passage SOCKS5 |
 | Choix du protocole anti-DPI | `bifrost-evasion` : politique pure, sondes et coeurs tiers lances en processus separes | idem, le crate est multiplateforme |
 | DNS | systemd-resolved ou `/etc/resolv.conf` | `netsh` plus filtres WFP |
 | IPC authentifie | Socket Unix, `SO_PEERCRED` | Named pipe, DACL SYSTEM et Administrateurs |
-| Suite de fuite | Dix vecteurs, namespaces reseau et pcap | Un seul y tourne dans `check` (`doh-bypass`); les neuf autres sont cables et renvoyes a une commande dediee, avec la raison |
+| Preuves locales | Integrite de fichier, nftables, routage et DNS effectif | Integrite de fichier, WFP et routage |
+| Suite de fuite | Dix vecteurs en namespaces et pcap, par `--run-checks`; dans le service sans CAP_SYS_ADMIN, neuf sont SKIPPED avec la commande a lancer hors service | Un seul y tourne dans `check` (`doh-bypass`); les neuf autres sont cables et renvoyes a une commande dediee, avec la raison |
 | Anti-telemetrie | Couche DNS: le resolveur embarque refuse les noms de telemetrie AVANT le tunnel | idem, plus la couche 1: registre, services et taches planifiees, journalisee et reversible |
 
 ## Ce que Bifrost vise, et ce qu'il ne promettra pas
@@ -41,6 +47,9 @@ crates/
   bifrost-evasion/    choix du protocole anti-DPI. Aucun appel systeme.
   bifrost-firewall/   kill switch : nftables (Linux), WFP (Windows)
   bifrost-dns/        resolveur systeme pendant la duree du tunnel
+  bifrost-telemetrie/ catalogues et journal des reglages reversibles
+  bifrost-coffre/     protection du profil au repos
+  bifrost-amorce/     recuperation et verification des profils signes
   bifrost-ipc/        schema et transport IPC authentifie
   bifrost-daemon/     daemon privilegie, tunnel, suite de fuite
   bifrost-cli/        client non privilegie
@@ -98,6 +107,14 @@ Si le daemon meurt alors que le kill switch est arme, le trafic reste bloque : c
 ```bash
 bifrost-daemon --cleanup-firewall
 ```
+
+Le client fournit aussi une sortie de secours locale, sans passer par un daemon mort ou fige:
+
+```bash
+bifrost-cli emergency-disarm --je-sais-ce-que-je-fais
+```
+
+Elle exige les privileges du systeme et le drapeau explicite, ouvre le trafic en clair et ne remplace pas `disconnect`: un daemon encore vivant pourrait sinon croire son kill switch toujours arme.
 
 ### Avertissement
 
@@ -643,7 +660,7 @@ Le troisieme profil du document, « parano », n'est pas livre : il coupe Window
 
 ### La couche 1 : registre, services, taches planifiees
 
-Windows seulement, et posee a la source : on n'y filtre pas un flux, on eteint ce qui le produit. Vingt-huit reglages, deux profils, chacun avec sa raison, ce qu'il casse et sa source datee. `bifrost-telemetrie` porte le catalogue et le journal, purs et testes sur les deux hotes ; `bifrost_daemon::telemetrie` porte ce qui touche la machine.
+Windows seulement, et posee a la source : on n'y filtre pas un flux, on en eteint la source. Vingt-huit reglages, deux profils, chacun avec sa raison, ce qu'il casse et sa source datee. `bifrost-telemetrie` porte le catalogue et le journal, purs et testes sur les deux hotes ; `bifrost_daemon::telemetrie` porte ce qui touche la machine.
 
 ```bash
 bifrost-daemon --telemetrie-etat --telemetrie-profil strict        # ne fait que LIRE
@@ -772,13 +789,13 @@ La meme valeur alimente le lancement. C'etaient deux champs independants - celui
 
 `e2e-linux.sh` en est le temoin de bout en bout : un vrai daemon lance avec le drapeau, un vrai `connect`, et les regles que le noyau applique verifiees sur pieces - l'exemption presente, le `:53` du coeur bloque avant elle, et trois occurrences sur la table entiere, donc rien en `input` ni en `forward`.
 
-L'empaquetage cree ce compte depuis, en `sysusers.d(5)` et hors du groupe de pilotage. **Ce qui manque encore** : le flux de connexion ne choisit pas encore de technique, donc il ne lance aucun coeur. Ce sont `--coeur-selftest` et `--coeur-e2e` qui en lancent, et ils lisent la meme identite. Relier la selection de technique au flux de connexion appartient a l'objectif 2.
+L'empaquetage cree ce compte en `sysusers.d(5)` et hors du groupe de pilotage. **Le flux de connexion est maintenant relie a la selection et au lancement des coeurs.** Un profil par coeur demande `--coeurs-dans` et `--facade`; seul sing-box porte aujourd'hui les sorties d'un vrai profil, VLESS+REALITY et Hysteria2. Les autres generateurs sont refuses en nommant la raison. `--coeur-selftest` et `--coeur-e2e` restent des recettes distinctes. Le meme compte alimente le lancement et l'exemption, dans les deux chemins.
 
 **Le resolveur chiffre embarque tourne sous le service installe, sur Linux.** La plomberie est posee - le `:53` sortant n'est autorise que vers une adresse de boucle locale, le systeme est empeche d'utiliser un resolveur pousse par DHCP, et le `:53` se ferme a tout le monde sauf au compte du resolveur, y compris a l'interieur du tunnel, des lors que l'exploitation declare ce compte ET que le profil demande `embarque`. L'empaquetage installe dnscrypt-proxy en `/usr/lib/bifrost/dnscrypt-proxy` et l'unite le designe par ce chemin, jamais par le `PATH`. Un cycle `connect` / `disconnect` complet a ete mesure a travers l'unite reelle : le resolveur demarre avec le tunnel sous son propre UID, la machine resout par lui, rien ne sort en clair a la sortie du tunnel, et il s'arrete avec lui. Cette mesure a ete prise confinee dans des namespaces reseau, pas sur les interfaces physiques de l'hote - armer le kill switch y coupe la session qui pilote la recette.
 
-Ce qui manque : le DoH des navigateurs n'est desactive par aucune policy, et l'equivalent Windows de la restriction du `:53` par UID, qui passerait par `ALE_APP_ID`, n'est pas ecrit. Le critere du document 02, « dnsleaktest ne montre que le resolveur attendu », n'est donc pas encore atteint.
+Les politiques DoH disposent maintenant des commandes explicites `--doh-policy constater`, `poser` et `retirer`, sous Linux comme sous Windows. Elles ne sont pas posees automatiquement a la connexion. La restriction Windows du `:53` pour le resolveur embarque est elle aussi ecrite, par le chemin du binaire et le SID de LocalService, et le cycle du service installe a sa recette. Ces controles ne couvrent pas les resolveurs propres a toutes les applications; le critere global du document 02 ne se deduit pas de la seule presence de ces regles.
 
-**La fenetre de fuite au demarrage de la machine n'est pas fermee, mais le motif avance ici etait faux.** Les filtres que le daemon pose sont non persistants : ils survivent a sa mort, pas au redemarrage. Cette ligne affirmait que la fermer demande un driver noyau, donc un budget de certificat EV ; `--boot-filtres` l'a mesure faux le 17 aout 2026 sur machine dediee. Un filtre `FWPM_FILTER_FLAG_BOOTTIME` pose par un simple processus utilisateur s'inscrit dans le magasin que `tcpip.sys` lit AVANT le demarrage de BFE, et un filtre `FWPM_FILTER_FLAG_PERSISTENT` survit a un vrai redemarrage et bloque encore. Ce qui reste non mesure est le rejet d'un paquet PENDANT la fenetre pre-BFE, qui demanderait un temoin d'audit horodate ; a ne pas confondre avec ce qui precede. Cote Linux, l'unite systemd fournie demarre le daemon tot, mais le kill switch n'est arme qu'a la connexion.
+**Les filtres de demarrage Windows ont maintenant leur commande propre.** `bifrost-daemon --demarrage montrer` ne fait qu'afficher le plan; `poser` installe les filtres boot-time et persistants, `retirer` les retire. Ce sont des objets distincts des filtres ordinaires armes a la connexion. Le defaut de la CLI laisse ouverte la plage CGNAT des reseaux overlay pour ne pas condamner une machine administree a distance; `--demarrage-sans-overlay` la ferme et peut rendre cette machine injoignable apres redemarrage. Les choix LAN et IPv6 restent explicites. La mesure du 17 aout 2026 a etabli qu'un processus utilisateur peut poser ces filtres et que les persistants survivent a un vrai redemarrage; elle n'etablit pas le rejet d'un paquet pendant toute la fenetre pre-BFE. Cote Linux, l'unite systemd fournie demarre le daemon tot, mais le kill switch n'est arme qu'a la connexion.
 
 **Un client DHCP utilisant des sockets `AF_PACKET` contourne Netfilter**, donc le kill switch nftables. C'est une limite du mecanisme, documentee par `wg-quick(8)`. Le confinement en namespace reseau est la parade structurelle.
 
@@ -804,7 +821,7 @@ Ce qui manque : le DoH des navigateurs n'est desactive par aucune policy, et l'e
 - **Stack** : daemon Rust privilegie, IPC authentifie. L'interface Tauri v2 non privilegiee est prevue hors MVP, en jalon propre apres J2. Les coeurs anti-censure sing-box et Xray tourneront en processus separes, jamais lies statiquement, pour eviter la contamination GPL.
 - **Kill switch** : Windows Filtering Platform en mode utilisateur sur Windows, nftables avec fwmark sur Linux. Aucun driver noyau au depart.
 - **Licence** : MPL-2.0 pour le client (champ `license` du workspace).
-- **Conformite** : le VPN est un produit important de classe I au sens du Cyber Resilience Act. Obligations de signalement des le 11 septembre 2026, conformite complete au 11 decembre 2027.
+- **Conformite** : le classement et le calendrier du Cyber Resilience Act sont documentes dans [`docs/07`](docs/07-programme-securite-produit.md), distinctement des mesures techniques.
 
 ## Objectif 2 : ce qui est fait, ce qui ne l'est pas
 
@@ -989,7 +1006,11 @@ Un profil porte des secrets d'authentification : une cle privee WireGuard, ou l'
 
 **Le repertoire compte autant que le fichier.** Un profil parfaitement en `0600` dans un repertoire ou n'importe qui ecrit peut etre **remplace** ; le remplacant designe le serveur de son choix, et le tunnel monte vers lui sans que rien ne le signale. C'est une redirection complete du trafic obtenue sans jamais lire le moindre secret, et c'est une propriete d'INTEGRITE, distincte de celle du fichier - c'est ce que protege le `0700` de `/etc/mullvad-vpn`. La verification porte donc sur l'ECRITURE et non sur la lecture, et elle honore le bit collant : `/tmp` en `1777` passe, parce qu'un repertoire collant ne laisse retirer un fichier qu'a son proprietaire.
 
-**Un profil peut etre scelle**, par `bifrost profil sceller`. Le clair n'est alors plus necessaire, et la commande dit de le supprimer plutot que de le faire elle-meme : c'est la seule copie d'une cle privee, et la detruire n'appartient pas a cet outil. Tant que les deux coexistent, l'ouverture le signale.
+**Un profil peut etre scelle**, par `bifrost-cli profil sceller`. Le clair n'est alors plus necessaire, et la commande dit de le supprimer plutot que de le faire elle-meme : c'est la seule copie d'une cle privee, et la detruire n'appartient pas a cet outil. Tant que les deux coexistent, l'ouverture le signale.
+
+```bash
+bifrost-cli profil sceller --config tunnel.toml
+```
 
 ### Pourquoi systemd-creds et pas le trousseau
 
@@ -1036,7 +1057,7 @@ Elle n'est pas resolue par le transport, et c'est le piege. REALITY verifie la c
 Et elle s'aggrave a chaque canal. Le plan en veut trois - subscription CDN, miroir GitHub raw, bot Telegram - donc trois points d'injection. **La signature est ce qui rend un canal hostile acceptable** : sans elle, ajouter des canaux augmente la surface d'attaque ; avec elle, chaque canal supplementaire est gratuit. Elle vient donc avant le multi-canal, et non apres.
 
 ```bash
-bifrost profil installer profil-recu.toml
+bifrost-cli profil installer profil-recu.toml
 ```
 
 La commande verifie la signature `profil-recu.toml.minisig` contre la cle publique de confiance rangee a cote de la destination, puis met le profil en place en `0600`. Rien n'est ecrit avant que la signature ne soit acceptee.
@@ -1084,12 +1105,12 @@ L'observateur est pur et vit avec le reste de la politique ; le superviseur du d
 
 Deux garde-fous que la falsification a valides : un lien lent **depuis toujours** n'est pas un lien etrangle - le condamner ferait changer de technique en boucle sur une 3G faible - et un debit tombe **a zero** est un silence, pas un throttling, donc il passe par la sonde. Et seules les deux signatures que le document 04 attribue a un censeur vont au carnet : une coupure ordinaire, serveur qui redemarre ou Wi-Fi qui saute, ecarterait sinon la technique du prochain essai pour une raison qui n'a rien a voir avec elle.
 
-**Ce qui conclut aujourd'hui, et ce qui attend.** Le critere de debit est vivant : il ne demande rien au pair, il se lit entierement dans les compteurs. Celui de gel attend la sonde, que ce daemon ne sait pas encore emettre - le fil du superviseur est synchrone et n'a pas de handle de runtime, alors que les deux sondes possibles sont asynchrones. La tentation serait de repondre avec `last_handshake`, qui est sous la main : pour WireGuard il dit vrai, mais pour un chemin par coeur il est **fabrique**, faute de poignee de main periodique, et il repondrait toujours "le pair est vivant". Une reponse toujours positive est pire que pas de reponse : elle a l'air d'une mesure.
+**Ce qui conclut aujourd'hui.** Le critere de debit se lit dans les compteurs. Celui de gel appelle maintenant la sonde de vitalite branchee au superviseur: sur un chemin par coeur, elle demande un aller-retour par la sortie courante, plutot que de prendre le `last_handshake` fabrique pour une mesure. Le superviseur distingue une reponse du pair, son silence et une sonde qui n'a pas pu etre demandee; cette derniere ne condamne aucune technique. Le mecanisme est detaille dans la section de l'objectif 2 et dans `coeurs/vitalite.rs`.
 
-Restent a ecrire, dans cet ordre :
+Les deux chantiers autrefois listes ici sont maintenant branches:
 
-1. La sonde aller-retour ci-dessus, qui rendra le critere de gel concluant.
-2. Les deux sondes manquantes, QUIC et MITM TLS. La seconde ne peut pas se contenter de regarder des tailles : detecter une interception demande de VALIDER une chaine de certificats, donc une vraie pile TLS. Ce point etait bloque sur le fournisseur cryptographique ; il ne l'est plus, la pile etant desormais dans le depot.
+1. La sonde aller-retour rend le critere de gel concluant quand elle peut etre mesuree.
+2. Les sondes QUIC et MITM TLS existent. La seconde valide une chaine par la pile TLS du client non privilegie; `inspection-tls --annoncer` transmet explicitement son verdict au daemon. Les chantiers restants sont dans `ETAT.md`, pas dans cette ancienne liste.
 
 ## Le TUN sous Windows
 
@@ -1098,7 +1119,7 @@ Le chemin par coeur a besoin d'un TUN **generique**: une interface qui rend des 
 ### Le depot ne la distribue pas, il va la chercher
 
 ```bash
-bifrost pilote recuperer
+bifrost-cli pilote recuperer
 ```
 
 Un binaire tiers versionne est un binaire que personne ne relit, que rien ne date, et qui grossit l'historique a chaque mise a jour. L'archive vient donc de l'amont, et **son empreinte SHA-256 est epinglee dans le programme**: le reseau n'a plus a etre digne de confiance, puisqu'un miroir hostile ou une interception ne peuvent pas produire une archive qui corresponde. Une empreinte fausse d'un seul caractere fait refuser l'archive, et rien n'est ecrit.
@@ -1138,7 +1159,7 @@ Un seul endroit repasse au lieu d'attendre: l'anneau d'**emission** plein. Wintu
 Le plan veut trois canaux : subscription CDN, miroir GitHub raw, bot Telegram. La raison affichee est la disponibilite. Mais un multi-canal naif ne fait que **multiplier les points d'injection** - trois endroits d'ou peut venir un faux profil au lieu d'un seul. Ce qui renverse le compte, c'est la signature : elle deplace la confiance du canal vers la cle, et rend alors chaque canal supplementaire gratuit. L'ordre des deux lots n'etait pas interchangeable.
 
 ```bash
-bifrost profil recuperer \
+bifrost-cli profil recuperer \
   --depuis https://cdn.exemple/tunnel.toml \
   --depuis https://raw.githubusercontent.com/exemple/miroir/main/tunnel.toml \
   --depuis /media/usb/tunnel.toml
@@ -1179,8 +1200,8 @@ La difference decide de tout. Ce qui fait passer Telegram la ou le reste est blo
 Ce qui manquait n'etait donc pas un client d'API, mais le chemin par lequel une personne fait entrer un profil recu n'importe ou :
 
 ```bash
-bifrost profil partager tunnel.toml          # cote operateur : une chaine a transmettre
-bifrost profil recuperer --depuis "bifrost1..."   # cote destinataire
+bifrost-cli profil partager tunnel.toml          # cote operateur : une chaine a transmettre
+bifrost-cli profil recuperer --depuis "bifrost1..."   # cote destinataire
 ```
 
 Une chaine unique, en base64url sans remplissage - ni `+`, ni `/`, ni `=` que les URL et les messageries transforment - et tout espace blanc est ignore a la lecture, parce qu'une messagerie replie une chaine de huit cents caracteres et que l'utilisateur qui recopie ajoute des espaces. Elle sert Telegram exactement comme Tor s'en sert, et sert aussi Signal, un courriel, un QR code, un SMS. Le prefixe porte un **numero de version** : un format qu'on colle traine dans des messages et des captures d'ecran, et le jour ou il faudra en changer, un lien de l'ancien monde doit etre refuse en le disant plutot que mal interprete.
@@ -1192,7 +1213,7 @@ Une chaine unique, en base64url sans remplissage - ni `+`, ni `/`, ni `=` que le
 C'est la seconde moitie du "signes **et chiffres**" du plan, qui ne disait pas comment.
 
 ```bash
-bifrost profil partager tunnel.toml --chiffrer
+bifrost-cli profil partager tunnel.toml --chiffrer
 ```
 
 La phrase de passe sort sur la sortie d'erreur, le lien sur la sortie standard - on peut donc rediriger le lien sans emporter la phrase avec lui. Elle est **engendree par le programme, jamais tapee par une personne** : une phrase choisie par un humain, dans un logiciel ou l'adversaire peut etre un Etat, ne vaut pas le scrypt qui la protege. Vingt-quatre caracteres de base32 Crockford - ni `I`, ni `L`, ni `O`, ni `U`, qui se confondent quand on dicte au telephone - soit 120 bits, bien au-dela de ce que le facteur de travail aurait a rattraper.
@@ -1207,6 +1228,6 @@ Derouler ce chemin a la main a trouve un defaut que les recettes n'avaient pas v
 
 ## Prochaines etapes
 
-La liste tenue a jour est dans [`ETAT.md`](ETAT.md), avec pour chaque chantier ouvert une prochaine action nommee. En resume : du document 03, la couche DNS est livree et il reste ses couches Windows, registre et WFP par service ; puis la suite de l'objectif 2. L'audit de dependances demande par le document 07 est cable.
+La liste tenue a jour est dans [`ETAT.md`](ETAT.md), avec pour chaque chantier ouvert une prochaine action nommee. La selection et le lancement par coeur, les couches DNS et reglages Windows anti-telemetrie, ainsi que les preuves locales de pare-feu, routage et DNS ne sont plus de simples elements du plan: leur perimetre livre est decrit ci-dessus. La suite de l'objectif 2, les fonctions encore ouvertes du document 03, l'interface et la distribution gardent leurs chantiers propres. L'audit de dependances demande par le document 07 est cable.
 
 Signaler une faille de securite : voir [`SECURITY.md`](SECURITY.md). Le `packaging/security.txt` (RFC 9116) est servi par le site de l'editeur.
