@@ -144,7 +144,8 @@ le `.lock` comme partout ailleurs dans le depot.
 
 Ce que cela ne dit pas:
 - une exemption n'est pas un audit: les 299 dependances ne sont couvertes que par la decision de les
-  accepter telles quelles, prise a la mise en place; l'etape dit seulement qu'aucune n'entre ni ne
+  accepter telles quelles, prise a la mise en place puis a chaque changement de version (rustls
+  0.23.46 le 14/10/2026, pour quatre avis RustSec); l'etape dit seulement qu'aucune n'entre ni ne
   change de version sans un commit de `supply-chain/`;
 - le harnais `fuzz/`, espace de travail separe, n'est pas couvert: 266 dependances tierces dans son
   verrou, dont 2 absentes du verrou racine (`arbitrary`, `libfuzzer-sys`).
