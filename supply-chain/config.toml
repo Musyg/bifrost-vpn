@@ -16,6 +16,10 @@ notes = "Paquet de l'espace de travail, designe par chemin, non publie sur crate
 audit-as-crates-io = false
 notes = "Paquet de l'espace de travail, designe par chemin, non publie sur crates.io: premiere partie, jamais audite comme un paquet du registre."
 
+[policy.bifrost-coquille]
+audit-as-crates-io = false
+notes = "Paquet de l'espace de travail, designe par chemin, non publie sur crates.io: premiere partie, jamais audite comme un paquet du registre."
+
 [policy.bifrost-core]
 audit-as-crates-io = false
 notes = "Paquet de l'espace de travail, designe par chemin, non publie sur crates.io: premiere partie, jamais audite comme un paquet du registre."

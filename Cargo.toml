@@ -11,6 +11,7 @@ members = [
     "crates/bifrost-ipc",
     "crates/bifrost-daemon",
     "crates/bifrost-cli",
+    "crates/bifrost-coquille",
     "crates/bifrost-temoin-svchost",
 ]
 
@@ -48,6 +49,7 @@ bifrost-firewall = { path = "crates/bifrost-firewall" }
 bifrost-dns = { path = "crates/bifrost-dns" }
 bifrost-telemetrie = { path = "crates/bifrost-telemetrie" }
 bifrost-ipc = { path = "crates/bifrost-ipc" }
+bifrost-coquille = { path = "crates/bifrost-coquille" }
 # Le daemon est declare ici pour une seule raison: le temoin heberge dans
 # svchost REUTILISE sa sonde `--connect-probe` au lieu d'en ecrire une seconde.
 # Deux implementations qui divergeraient rendraient deux mesures incomparables.

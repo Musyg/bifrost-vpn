@@ -53,6 +53,7 @@ crates/
   bifrost-ipc/        schema et transport IPC authentifie
   bifrost-daemon/     daemon privilegie, tunnel, suite de fuite
   bifrost-cli/        client non privilegie
+  bifrost-coquille/   logique de la coquille graphique: etat, commandes, vue
 ```
 
 Deux principes de conception structurent tout le reste.

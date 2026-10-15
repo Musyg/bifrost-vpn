@@ -157,8 +157,9 @@ dependances tierces du verrou racine, toutes plateformes et toutes fonctionnalit
 donc toutes exemptees, chacune a sa version exacte (270 au critere `safe-to-deploy`, 29 a
 `safe-to-run`). Les criteres sont ceux de cargo-vet par defaut: `safe-to-deploy` pour les
 dependances normales et de construction de chaque paquet du depot, `safe-to-run` pour celles qui ne
-servent qu'aux recettes. Le seul paquet du depot qui n'est pas livre, le temoin de diagnostic
-`bifrost-temoin-svchost`, ne tire rien que le daemon ne tire deja. Les onze paquets du depot sont
+servent qu'aux recettes. Les deux paquets du depot qui ne sont pas livres, le temoin de diagnostic
+`bifrost-temoin-svchost` et la logique de la coquille graphique `bifrost-coquille`, ne tirent rien
+que le daemon ne tire deja. Les douze paquets du depot sont
 declares de premiere partie (`audit-as-crates-io = false`): aucun n'existe sur crates.io, et la
 declaration empeche vet de les confondre un jour avec un paquet homonyme du registre.
 

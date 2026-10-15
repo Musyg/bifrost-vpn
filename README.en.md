@@ -54,6 +54,7 @@ crates/
   bifrost-ipc/        authenticated IPC schema and transport
   bifrost-daemon/     privileged daemon, tunnel and test harness
   bifrost-cli/        unprivileged client and local comparisons
+  bifrost-coquille/   graphical shell logic: state, commands, view
 ```
 
 Two principles shape the implementation.

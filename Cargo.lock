@@ -336,6 +336,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "bifrost-coquille"
+version = "0.1.0"
+dependencies = [
+ "bifrost-core",
+ "bifrost-ipc",
+ "libc",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "bifrost-core"
 version = "0.1.0"
 dependencies = [
