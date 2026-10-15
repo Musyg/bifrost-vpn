@@ -294,7 +294,7 @@ Reports contain categories and counts, not local addresses, domains, interfaces 
 
 ### CI and platform coverage
 
-Pull requests and pushes to `main` run Linux formatting/lint/tests, leak checks, dependency auditing and parser fuzzing. Fuzzing replays the seeds, then runs each target for 30 seconds. New revisions cancel obsolete automatic runs on the same PR or branch.
+Pull requests and pushes to `main` run Linux formatting/lint/tests, leak checks, dependency auditing and parser fuzzing. Fuzzing replays the seeds, then runs each target for 30 seconds. Every day at 04:37 UTC, a scheduled run executes only the dependency audit (`cargo audit`, `cargo deny`, `cargo vet`) on the latest commit of `main`, with a freshly downloaded RustSec advisory database, so an advisory published against a dependency in either lockfile turns it red without waiting for a commit. GitHub may delay scheduled runs and disables them after 60 days without repository activity. New revisions cancel obsolete automatic runs on the same PR or branch.
 
 **Windows validation is manual.** Before a Windows delivery, run it on the revision being delivered through Actions > ci > Run workflow > `windows`, or:
 

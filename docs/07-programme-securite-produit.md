@@ -110,6 +110,42 @@ du job de fuite (nftables, tcpdump, iproute2, jq), deja presents dans l'image et
 les index d'Ubuntu ne gardent que la version de sortie et la derniere mise a jour: un
 `paquet=version` casserait l'etape a la mise a jour suivante.
 
+**Audit quotidien des dependances** (15/10/2026). Le 14/10/2026, quatre avis RustSec contre rustls
+0.23.45 ont ete publies sans que rien ne change dans le depot; la CI, qui ne partait que sur un
+push, une PR ou un lancement manuel, ne les a vus qu'au run suivant. `ci.yml` porte depuis un
+declencheur `schedule` quotidien (04:37 UTC, hors du debut d'heure, ou GitHub annonce des retards
+et des jobs abandonnes) qui ne lance que le job `dependances`: `cargo audit`, `cargo deny check` a
+la racine et dans `fuzz/`, et `cargo vet`; les etapes du SBOM y sont sautees. La base d'avis est
+telechargee a chaque run: runner neuf, aucun cache, et un telechargement qui echoue fait echouer
+l'etape au lieu de laisser juger une base ancienne. La recette
+`crates/bifrost-evasion/tests/audit_planifie.rs` lit d'abord le workflow en entier contre une
+grammaire YAML minimale declaree dans son en-tete: les seules formes que le workflow emploie,
+chacune decodee comme YAML la decode (mesure contre PyYAML 6.0.3 le 15/10/2026). Toute autre
+forme la fait rougir en se nommant, plutot que d'etre lue de travers: guillemets doubles, `''`
+entre guillemets simples, BOM, mot ou nombre que YAML type, valeur continuee sur la ligne
+suivante, indicateur de bloc autre que `run: |`, ancre, alias... Une forme legitime que le
+workflow n'emploie pas encore rougit aussi: l'employer demande d'etendre la grammaire, ses
+recettes et sa mesure dans le meme commit. Elle exige ensuite le declencheur, ce routage (evalue
+pour chaque evenement, `needs:` compris), les juges du job a la lettre et a leur place sur
+`schedule` (`cargo vet --locked` puis le `git diff` de `supply-chain/`, seuls et dans cet ordre),
+l'absence de tout drapeau qui fige la base (`--no-fetch`, `--stale`, `--offline`, `--frozen`), un
+echec de juge qui fait echouer le run (ni `continue-on-error`, ni operateur ou commande
+etrangere dans son etape, ni `shell:`, ni `defaults:`), un job `dependances` qui ne porte que
+ses cles d'aujourd'hui (un `environment` protege le ferait attendre une approbation), un
+`.cargo/audit.toml` reduit a la liste `ignore`, un groupe de concurrence propre au run
+planifie, et deux contenus figes a ceux de `69d846f`: l'`env:` du workflow
+(`CARGO_TERM_COLOR: always`; une variable de plus y atteindrait chaque juge, et le `git` qui
+telecharge la base de cargo-deny) et la section `[advisories]` de `deny.toml` et de
+`fuzz/deny.toml`, lue a la lettre (elle choisit la base de cargo-deny et dit comment la
+prendre). Ce que cela ne dit pas: GitHub peut retarder un run planifie, en abandonner des jobs
+aux heures chargees, et le desactive apres 60 jours sans activite dans un depot public; un
+echec n'est notifie qu'au compte qui a cree le workflow ou modifie la ligne `cron` en dernier.
+La recette ne lit ni les etapes du job qui ne jugent pas (checkout, outillage et installation
+de cargo-vet, qui tournent avant un juge au moins et pourraient ecrire `$GITHUB_ENV` ou la
+configuration git; SBOM, apres les juges; porte laissee ouverte expres, la fermer toucherait
+la recette a chaque montee d'une action), ni le reste de `deny.toml`, ni l'environnement du
+runner.
+
 **cargo vet sur l'espace de travail racine** (07/10/2026). `supply-chain/` porte la configuration de
 cargo-vet (`config.toml`), le verrou des audits importes (`imports.lock`) et le fichier des audits
 du depot (`audits.toml`). Aucun ensemble d'audits publies n'est importe, par choix: un import

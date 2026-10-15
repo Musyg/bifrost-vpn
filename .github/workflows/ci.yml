@@ -8,6 +8,32 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # L'audit quotidien des dependances. Le 14/10/2026, quatre avis RustSec
+  # contre rustls 0.23.45 ont ete publies sans que rien ne change dans le
+  # depot: on ne les a vus qu'au run suivant. Ce declencheur ne lance que le
+  # job `dependances` (les autres jobs portent `github.event_name !=
+  # 'schedule'`), sur le dernier commit de `main`, avec une base d'avis
+  # telechargee a chaque run: voir le commentaire de ce job.
+  #
+  # 04:37 UTC, soit 06:37 en heure d'ete d'Europe centrale et 05:37 en hiver:
+  # le resultat est la avant la journee de travail. 37 et non 0: la
+  # documentation << Events that trigger workflows >>, section `schedule`
+  # (relevee le 15/10/2026), dit que le declenchement peut etre retarde aux
+  # heures de forte charge, que le debut de chaque heure en est une, et que
+  # des jobs en file peuvent alors etre abandonnes; elle conseille une autre
+  # minute. Ni 15, 30 ou 45 non plus, minutes rondes que d'autres depots
+  # choisissent (suppose, pas mesure). En UTC, sans `timezone`: le passage a
+  # l'heure d'ete ne deplace rien.
+  #
+  # Ce que GitHub en fait (meme documentation, et << Notifications for
+  # workflow runs >>, relevees le 15/10/2026): les notifications du run
+  # planifie partent au compte qui a cree le workflow ou, si un autre l'a
+  # modifiee depuis, au dernier qui a modifie la ligne `cron`; dans un depot
+  # public, les workflows planifies sont desactives apres 60 jours sans
+  # activite dans le depot. `crates/bifrost-evasion/tests/audit_planifie.rs`
+  # exige ce declencheur et ce routage.
+  schedule:
+    - cron: '37 4 * * *'
   workflow_dispatch:
     inputs:
       windows:
@@ -16,7 +42,10 @@ on:
         default: false
 
 # Une nouvelle revision remplace la precedente sur la meme PR ou branche.
-# Un lancement manuel ne doit pas annuler la validation automatique.
+# Un lancement manuel ne doit pas annuler la validation automatique, et le
+# run planifie non plus: `github.event_name` est dans le groupe, donc
+# `schedule` a le sien et n'annule ni ne remplace en file un run de push sur
+# `main`. `audit_planifie.rs` evalue ce groupe pour chaque evenement.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -38,7 +67,9 @@ env:
 jobs:
   controles:
     name: format, lint et tests (Linux)
-    if: github.event_name != 'workflow_dispatch' || !inputs.windows
+    # `github.event_name != 'schedule' && (...)`: saute sur le run planifie,
+    # inchange sur tout autre evenement. Meme forme dans `fuite` et `fuzz`.
+    if: github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.windows)
     runs-on: ubuntu-24.04
     # `shell: bash` pour toutes les etapes: GitHub lance alors
     # `bash --noprofile --norc -eo pipefail {0}`. Sans `shell`, il lance
@@ -235,7 +266,7 @@ jobs:
 
   fuite:
     name: suite de fuite
-    if: github.event_name != 'workflow_dispatch' || !inputs.windows
+    if: github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.windows)
     runs-on: ubuntu-24.04
     # Le harnais lance des daemons et des captures: si l'un d'eux survit a son
     # script, le job reste ouvert bien apres que ses etapes ont reussi. Cette
@@ -405,6 +436,26 @@ jobs:
 
   dependances:
     name: audit des dependances et SBOM
+    # Le seul job du run planifie quotidien (voir `on.schedule`): cette
+    # condition, inchangee, est vraie sur `schedule`. Les deux etapes du SBOM y
+    # sont sautees: le SBOM d'un commit inchange n'apprend rien, et chaque
+    # depot d'artefact serait garde 30 jours.
+    #
+    # La base d'avis est neuve a chaque run, planifie ou non. Chaque runner
+    # heberge par GitHub, hors ceux a un seul processeur, est une machine
+    # virtuelle neuve (documentation << GitHub-hosted runners >>, relevee le
+    # 15/10/2026), et ce workflow ne restaure aucun cache. Chacun des deux
+    # outils telecharge la base avant de juger, et un telechargement qui
+    # echoue fait echouer son etape au lieu de se rabattre sur une base
+    # presente. cargo-audit 0.22.2 clone ou met a jour `~/.cargo/advisory-db`,
+    # sauf `--no-fetch` (`-n`) ou `fetch = false` dans `.cargo/audit.toml`, et
+    # refuse une base dont le dernier commit a plus de 90 jours, sauf
+    # `--stale`. cargo-deny 0.20.2 clone ou met a jour
+    # `$CARGO_HOME/advisory-dbs`, sauf `--offline` ou `--frozen`. Lu dans les
+    # sources des deux outils a ces versions (cargo-audit: `src/auditor.rs`,
+    # `audit.toml.example`; cargo-deny: `src/cargo-deny/check.rs`,
+    # `src/advisories/helpers/db.rs`) le 15/10/2026. `audit_planifie.rs`
+    # refuse ces drapeaux et ces reglages.
     if: github.event_name != 'workflow_dispatch' || !inputs.windows
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -540,13 +591,19 @@ jobs:
       #
       # `SOURCE_DATE_EPOCH`: sans lui le SBOM porte l'heure de sa generation et
       # deux executions sur le meme code rendent deux fichiers differents.
+      #
+      # Saute sur le run planifie, comme le depot qui suit: voir le commentaire
+      # du job. Sans fonction de statut, GitHub ajoute `success() &&` a la
+      # condition d'une etape: sur tout autre evenement, rien ne change.
       - name: SBOM CycloneDX
+        if: github.event_name != 'schedule'
         run: |
           SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)" \
             cargo cyclonedx --describe binaries --target all \
               --format json --spec-version 1.5 --quiet
 
       - name: Depot du SBOM
+        if: github.event_name != 'schedule'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: sbom-cyclonedx
@@ -562,7 +619,7 @@ jobs:
 
   fuzz:
     name: fuzzing des parseurs (Linux)
-    if: github.event_name != 'workflow_dispatch' || !inputs.windows
+    if: github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.windows)
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     defaults:

@@ -461,9 +461,14 @@ MATCH n'est pas une preuve d'etancheite du VPN. Voir
 
 Les PR et les push sur `main` lancent les controles Linux, la suite de fuite,
 l'audit des dependances et le fuzzing des parseurs (graines rejouees, puis
-30 secondes par cible). Windows est **uniquement manuel**: aucune execution
-automatique sur une PR ou sa fusion. Une nouvelle revision annule le run
-automatique obsolete de la meme PR ou branche.
+30 secondes par cible). Chaque jour a 04:37 UTC, un run planifie ne lance que
+l'audit des dependances (`cargo audit`, `cargo deny`, `cargo vet`) sur le
+dernier commit de `main`, avec une base d'avis RustSec telechargee a chaque
+run: un avis publie contre une dependance d'un des deux verrous le fait rougir
+sans attendre un commit. GitHub peut retarder ce declenchement, et le desactive
+apres 60 jours sans activite dans le depot. Windows est **uniquement manuel**:
+aucune execution automatique sur une PR ou sa fusion. Une nouvelle revision
+annule le run automatique obsolete de la meme PR ou branche.
 
 Avant une livraison Windows, lancer explicitement cette validation sur la
 revision a livrer (Actions > ci > Run workflow > cocher `windows`), ou:
