@@ -110,11 +110,17 @@ pub fn chemin_journal(program_data: &std::path::Path) -> std::path::PathBuf {
 /// (`NT AUTHORITY\LocalService`), et sans guillemets le SCM couperait
 /// l'argument en deux. Il vient APRES le binaire, et `install-windows.ps1`
 /// comme `packaging-windows.ps1` s'alignent sur cette forme exacte.
+///
+/// `groupe` est le groupe d'acces du canal, sous la forme canonique de son
+/// SID que `scm::install` a fait juger (`--group "S-1-5-21-..."`), cite et en
+/// dernier. Sans groupe, la ligne n'en mentionne aucun, et le pipe du service
+/// n'admet que SYSTEM et les Administrateurs.
 pub fn ligne_de_commande(
     exe: &std::path::Path,
     avec_sonde: bool,
     resolveur: Option<&std::path::Path>,
     compte: Option<&str>,
+    groupe: Option<&str>,
 ) -> String {
     let mut ligne = format!("\"{}\" --service", exe.display());
     if avec_sonde {
@@ -125,6 +131,9 @@ pub fn ligne_de_commande(
     }
     if let Some(c) = compte {
         ligne.push_str(&format!(" --resolveur-utilisateur \"{c}\""));
+    }
+    if let Some(g) = groupe {
+        ligne.push_str(&format!(" --group \"{g}\""));
     }
     ligne
 }
@@ -172,7 +181,7 @@ mod tests {
     /// binaire depose a cote de lui. Deposer ne suffit pas: il faut nommer.
     #[test]
     fn le_resolveur_declare_est_nomme_dans_la_ligne() {
-        let l = ligne_de_commande(exe(), false, Some(resolveur()), None);
+        let l = ligne_de_commande(exe(), false, Some(resolveur()), None, None);
         assert!(
             l.contains("--resolveur-binaire"),
             "sans ce drapeau le service ne lancera aucun resolveur: {l}"
@@ -186,7 +195,7 @@ mod tests {
     /// serait au DEMARRAGE, pas a l'installation, donc loin de sa cause.
     #[test]
     fn les_deux_chemins_sont_cites() {
-        let l = ligne_de_commande(exe(), false, Some(resolveur()), None);
+        let l = ligne_de_commande(exe(), false, Some(resolveur()), None, None);
         assert!(
             l.contains(&format!("\"{}\"", exe().display())),
             "chemin du daemon non cite: {l}"
@@ -207,7 +216,7 @@ mod tests {
     /// tout: sans le drapeau, le daemon sert sans resolveur embarque et le dit.
     #[test]
     fn sans_resolveur_la_ligne_n_en_mentionne_aucun() {
-        let l = ligne_de_commande(exe(), false, None, None);
+        let l = ligne_de_commande(exe(), false, None, None, None);
         assert!(!l.contains("--resolveur-binaire"), "{l}");
         assert!(l.ends_with("--service"), "{l}");
     }
@@ -216,7 +225,7 @@ mod tests {
     /// mesure une identite, elle ne remplace pas la configuration.
     #[test]
     fn la_sonde_et_le_resolveur_cohabitent() {
-        let l = ligne_de_commande(exe(), true, Some(resolveur()), None);
+        let l = ligne_de_commande(exe(), true, Some(resolveur()), None, None);
         assert!(l.contains("--service-identity-probe"), "{l}");
         assert!(l.contains("--resolveur-binaire"), "{l}");
     }
@@ -227,7 +236,7 @@ mod tests {
     #[test]
     fn le_drapeau_de_service_vient_en_premier() {
         for (sonde, r) in [(false, None), (true, Some(resolveur()))] {
-            let l = ligne_de_commande(exe(), sonde, r, None);
+            let l = ligne_de_commande(exe(), sonde, r, None, None);
             let apres = l.split_once("--").expect("au moins un drapeau").1;
             assert!(apres.starts_with("service"), "{l}");
         }
@@ -240,7 +249,7 @@ mod tests {
     /// (`NT AUTHORITY\LocalService`), et sans eux le SCM couperait l'argument.
     #[test]
     fn le_compte_declare_est_nomme_cite_et_apres_le_binaire() {
-        let l = ligne_de_commande(exe(), false, Some(resolveur()), Some("LocalService"));
+        let l = ligne_de_commande(exe(), false, Some(resolveur()), Some("LocalService"), None);
         assert!(
             l.contains("--resolveur-utilisateur \"LocalService\""),
             "compte non nomme ou non cite: {l}"
@@ -266,6 +275,7 @@ mod tests {
             false,
             Some(resolveur()),
             Some(r"NT AUTHORITY\LocalService"),
+            None,
         );
         assert!(
             l.contains("--resolveur-utilisateur \"NT AUTHORITY\\LocalService\""),
@@ -279,8 +289,88 @@ mod tests {
     #[test]
     fn sans_compte_la_ligne_n_en_mentionne_aucun() {
         for r in [None, Some(resolveur())] {
-            let l = ligne_de_commande(exe(), false, r, None);
+            let l = ligne_de_commande(exe(), false, r, None, None);
             assert!(!l.contains("--resolveur-utilisateur"), "{l}");
+        }
+    }
+
+    /// Le groupe d'acces declare est porte par la ligne du service: le SID
+    /// canonique, cite, en dernier, apres le compte du resolveur. Sans lui,
+    /// le daemon du service ne poserait aucun groupe sur son pipe, et les
+    /// membres trouveraient le canal ferme.
+    #[test]
+    fn le_groupe_d_acces_declare_est_porte_par_la_ligne() {
+        let sid = "S-1-5-21-1-2-3-1001";
+        let l = ligne_de_commande(
+            exe(),
+            false,
+            Some(resolveur()),
+            Some("LocalService"),
+            Some(sid),
+        );
+        assert!(
+            l.ends_with(" --group \"S-1-5-21-1-2-3-1001\""),
+            "groupe non porte, non cite ou pas en dernier: {l}"
+        );
+        assert!(l.find("--group") > l.find("--resolveur-utilisateur"), "{l}");
+        assert_eq!(l.matches('"').count() % 2, 0, "{l}");
+        let seul = ligne_de_commande(exe(), false, None, None, Some(sid));
+        assert_eq!(
+            seul,
+            format!("\"{}\" --service --group \"{sid}\"", exe().display())
+        );
+    }
+
+    /// Les scripts Windows suivent cette ligne: l'installateur cree le groupe
+    /// d'acces s'il manque et le passe a `--install-service --group`; les deux
+    /// bancs relisent en fin de ligne la forme que `ligne_de_commande` ecrit,
+    /// `--group "<SID>"`. Une lecture du texte: ces scripts ne tournent que
+    /// sur une machine Windows jetable, et cette garde compte sur chaque hote.
+    #[test]
+    fn les_scripts_windows_creent_et_passent_le_groupe_d_acces() {
+        let racine = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let lire = |relatif: &str| {
+            std::fs::read_to_string(racine.join(relatif))
+                .unwrap_or_else(|e| panic!("{relatif} illisible: {e}"))
+        };
+        let installateur = lire("packaging/install-windows.ps1");
+        for attendu in [
+            "$GroupeAcces = 'Bifrost'",
+            "New-LocalGroup -Name $GroupeAcces",
+            "$arguments += @('--group', $GroupeAcces)",
+        ] {
+            assert_eq!(
+                installateur.matches(attendu).count(),
+                1,
+                "packaging/install-windows.ps1: `{attendu}`"
+            );
+        }
+        for banc in [
+            "scripts/packaging-windows.ps1",
+            "scripts/service-windows.ps1",
+        ] {
+            let texte = lire(banc);
+            for attendu in ["--group ", ".SID.Value", ".EndsWith("] {
+                assert!(texte.contains(attendu), "{banc}: `{attendu}`");
+            }
+        }
+        assert!(
+            ligne_de_commande(exe(), false, None, None, Some("S-1-5-21-1-2-3-1001"))
+                .ends_with("--group \"S-1-5-21-1-2-3-1001\""),
+            "la forme que les bancs relisent"
+        );
+    }
+
+    /// Sans groupe, la ligne n'en mentionne aucun: un `--group ""` ferait
+    /// refuser le demarrage du service, loin de sa cause.
+    #[test]
+    fn sans_groupe_la_ligne_n_en_mentionne_aucun() {
+        for (sonde, r, c) in [
+            (false, None, None),
+            (true, Some(resolveur()), Some("LocalService")),
+        ] {
+            let l = ligne_de_commande(exe(), sonde, r, c, None);
+            assert!(!l.contains("--group"), "{l}");
         }
     }
 

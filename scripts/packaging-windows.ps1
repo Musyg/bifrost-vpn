@@ -16,6 +16,11 @@ est unique sur la machine. Cette recette l'installe donc pour de bon, lit ce
 que le SCM a enregistre, puis le retire. Elle refuse de tourner si un service
 BifrostDaemon existe deja, pour ne jamais retirer une installation reelle.
 
+Le groupe local Bifrost, groupe d'acces du canal, ne se detourne pas non
+plus: l'installateur le cree s'il manque. La recette mesure qu'il existe, cree
+vide, et que la ligne du service porte son SID; elle le retire a la fin s'il
+n'existait pas avant elle, et jamais sinon.
+
 Regle non negociable, comme partout ici: ce qui ne peut pas s'executer rend
 SKIPPED avec sa raison. Jamais PASSED par defaut.
 
@@ -38,6 +43,7 @@ if (-not $Binaires) { $Binaires = Join-Path $Racine 'target\release' }
 $Installateur = Join-Path $Racine 'packaging\install-windows.ps1'
 $NomService = 'BifrostDaemon'
 $CleService = "HKLM:\SYSTEM\CurrentControlSet\Services\$NomService"
+$GroupeAcces = 'Bifrost'
 
 $script:Echecs = 0
 function Ok    ([string] $m) { Write-Host ('  OK    {0}' -f $m) }
@@ -97,6 +103,10 @@ foreach ($f in 'bifrost-daemon.exe', 'bifrost-cli.exe') {
 if (Get-Service -Name $NomService -ErrorAction SilentlyContinue) {
     Saut "un service $NomService existe deja sur cette machine: cette recette le retirerait, ce qui casserait une installation reelle"
 }
+# Le groupe d'acces existait-il avant la recette? S'il existait, ses membres
+# sont ceux d'une installation reelle: la recette n'y touche pas et ne le
+# retire pas.
+$GroupeAvant = [bool](Get-LocalGroup -Name $GroupeAcces -ErrorAction SilentlyContinue)
 
 $Bac = Join-Path ([IO.Path]::GetTempPath()) ("bifrost-empaquetage-" + [Guid]::NewGuid().ToString('N'))
 $ProgramFilesVrai = $env:ProgramFiles
@@ -327,6 +337,32 @@ try {
         } else {
             Fail 'le compte devrait venir apres le binaire dans la ligne'
         }
+
+        Etape 'Le groupe d acces existe, et la ligne du service porte son SID'
+        # L installateur cree le groupe local VIDE s il manque; le daemon le
+        # juge et inscrit la forme canonique de son SID, citee et en dernier,
+        # exactement comme spec::ligne_de_commande l ecrit. Sans elle, le pipe
+        # du service n admettrait que SYSTEM et les administrateurs.
+        $groupe = Get-LocalGroup -Name $GroupeAcces -ErrorAction SilentlyContinue
+        if (-not $groupe) {
+            Fail "le groupe local $GroupeAcces n existe pas apres l installation"
+        } else {
+            Ok "groupe local $GroupeAcces present"
+            if (-not $GroupeAvant) {
+                $membres = @(Get-LocalGroupMember -Group $GroupeAcces -ErrorAction SilentlyContinue)
+                if ($membres.Count -eq 0) {
+                    Ok 'il a ete cree vide'
+                } else {
+                    Fail "il a ete cree avec $($membres.Count) membre(s): l installateur ne doit en ajouter aucun"
+                }
+            }
+            $groupeCite = '--group "' + $groupe.SID.Value + '"'
+            if ($ligne.EndsWith($groupeCite)) {
+                Ok 'la ligne porte le SID du groupe d acces, cite et en dernier'
+            } else {
+                Fail "la ligne ne porte pas le groupe d acces tel quel: $groupeCite attendu en fin de ligne"
+            }
+        }
     }
 } finally {
     # Le filet. Un service laisse derriere soi pointerait vers un chemin
@@ -336,6 +372,10 @@ try {
     }
     $env:ProgramFiles = $ProgramFilesVrai
     $env:ProgramData  = $ProgramDataVrai
+    # Le groupe d'acces, seulement s'il est ne de cette recette.
+    if (-not $GroupeAvant -and (Get-LocalGroup -Name $GroupeAcces -ErrorAction SilentlyContinue)) {
+        Remove-LocalGroup -Name $GroupeAcces -ErrorAction SilentlyContinue
+    }
     if (Test-Path -LiteralPath $Bac) {
         Remove-Item -LiteralPath $Bac -Recurse -Force -ErrorAction SilentlyContinue
     }
@@ -346,6 +386,13 @@ if (Get-Service -Name $NomService -ErrorAction SilentlyContinue) {
     Fail "le service $NomService subsiste"
 } else {
     Ok 'aucun service residuel'
+}
+if (-not $GroupeAvant) {
+    if (Get-LocalGroup -Name $GroupeAcces -ErrorAction SilentlyContinue) {
+        Fail "le groupe local $GroupeAcces cree par la recette subsiste"
+    } else {
+        Ok 'aucun groupe residuel'
+    }
 }
 if (Test-Path -LiteralPath $Bac) {
     Fail "le bac a sable subsiste: $Bac"

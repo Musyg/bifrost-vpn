@@ -57,19 +57,80 @@ Du cote de la coquille:
   meme la commande;
 - trois commandes seulement: l'etat, `connect-stored` et `disconnect`.
 
-Du cote du daemon, rien ne change: il admet sous Linux root et les membres du
-groupe de pilotage `bifrost`, sous Windows SYSTEM et les Administrateurs (DACL
-du pipe). Sous Linux, une coquille lancee par un membre du groupe `bifrost`
-commande donc le daemon comme la CLI du meme compte (lu dans le code, pas
-mesure par un lancement reel).
+Du cote du daemon: il admet sous Linux root et les membres du groupe
+`bifrost`, qui ont tout le canal; sous Windows SYSTEM, les Administrateurs
+et, si le service en nomme un, les membres de son groupe d'acces, qui n'y
+ont que trois commandes (partie suivante). La coquille d'un compte admis
+lui envoie l'etat, `connect-stored` et `disconnect`, et rien d'autre: pour
+ces trois gestes, elle fait ce que fait la CLI du meme compte. Sous Linux,
+ce point est lu dans le code, pas mesure par un lancement reel.
 
-**Limite sous Windows.** La coquille tourne sans elevation, et le pipe du
-daemon n'admet que SYSTEM et les Administrateurs: sous Windows, elle ne
-commande pas encore le daemon. Elle le montre sans le maquiller: `daemon
-injoignable`, une note qui en donne les causes possibles (service arrete,
-compte sans le droit d'ouvrir son canal, echange coupe), et un tray gris. Un
-groupe d'acces au canal, pose par l'installeur Windows, levera cette limite;
-il n'existe pas encore. Lancement reel du 16/10/2026 sur dev-windows, sans
+## Le groupe d'acces sous Windows
+
+La coquille tourne sans elevation. Sous Windows, le canal l'admet par un
+groupe local, le groupe d'acces que le daemon recoit par `--group <nom>`.
+
+- **Qui le cree.** L'installeur (`packaging/install-windows.ps1`) cree le
+  groupe local `Bifrost`, vide, s'il n'existe pas, et le passe a
+  `--install-service --group`, qui ecrit dans la ligne du service
+  `--group "<SID>"`: le SID du groupe, sous la forme que rend le systeme. Un
+  administrateur y ajoute les comptes qui commandent le daemon
+  (`Add-LocalGroupMember -Group Bifrost -Member <compte>`); l'appartenance
+  vaut a la prochaine ouverture de session du compte.
+- **Ce qui est admissible.** Un groupe local cree par un administrateur, et
+  lui seul: un SID du domaine de la machine, `S-1-5-21-<a>-<b>-<c>-<RID>`,
+  de RID 1000 ou plus, de type groupe local. Jamais un compte, ni un groupe
+  ou un compte predefini (`Utilisateurs`, `Tout le monde`, l'administrateur
+  integre). Le nom ou le SID donne est resolu par le systeme, et le jugement
+  porte sur la forme que celui-ci rend (`EqualSid`, SID canonise), jamais
+  sur la chaine tapee: zeros de tete et casse n'y changent rien.
+- **Fail-closed.** Un groupe introuvable ou non admissible arrete le daemon
+  au demarrage, avant que son superviseur ne tourne, avec un message qui
+  nomme le groupe et la raison; `--install-service --group` refuse
+  d'inscrire le service. Sans `--group`, le descripteur du pipe est
+  `D:P(A;;GA;;;SY)(A;;GA;;;BA)`.
+- **Ce que le pipe accorde au groupe.** Avec un groupe, le descripteur
+  porte une ACE de plus, et une seule: `(A;;0x120083;;;<SID>)`. Ce masque
+  accorde la lecture et l'ecriture du canal (`FILE_READ_DATA`,
+  `FILE_WRITE_DATA`), la lecture de ses attributs et de son descripteur
+  (`FILE_READ_ATTRIBUTES`, et `READ_CONTROL`, qui sert a verifier le
+  proprietaire) et l'attente (`SYNCHRONIZE`): de quoi ouvrir le canal et y
+  echanger.
+- **Ce qu'un membre peut demander.** Trois commandes, par la coquille comme
+  par la CLI: l'etat, `connect-stored` (le profil que le daemon detient,
+  enregistre par un administrateur) et `disconnect`. SYSTEM et un jeton aux
+  Administrateurs actifs (une console elevee, le service lui-meme) gardent
+  tout le canal. Le daemon identifie l'appelant de chaque requete sur le
+  jeton que le pipe lui presente: il emprunte l'identite du client
+  (`ImpersonateNamedPipeClient`), ouvre le jeton du fil, rend au fil son
+  propre jeton (`RevertToSelf`, sur tous les chemins), puis demande au
+  systeme si SYSTEM y est present et les Administrateurs actifs
+  (`CheckTokenMembership`). Un appelant qu'il ne sait pas identifier, par
+  exemple un client ouvert en `SECURITY_ANONYMOUS`, a les trois commandes
+  et elles seules. Toute autre commande recoit un refus qui la nomme
+  (`commande <nom> refusee: reservee aux administrateurs`, suivi de ce que
+  le compte peut demander) et n'atteint jamais le daemon. Sous Linux, un
+  membre du groupe `bifrost` garde tout le canal.
+- **Ce qu'il ne peut pas faire.** Creer une instance du pipe: le masque ne
+  porte ni `FILE_CREATE_PIPE_INSTANCE` (0x4, la valeur de `FILE_APPEND_DATA`
+  pour un pipe), ni `GENERIC_ALL`; un membre ne peut donc pas tenir le canal
+  a la place du daemon. Il ne peut pas non plus changer le descripteur ni le
+  proprietaire du pipe, et le client exige toujours un pipe possede par
+  LocalSystem ou par les Administrateurs.
+- **L'ouverture du client.** `bifrost-ipc` ouvre le canal par les droits
+  individuels `FILE_READ_DATA | FILE_WRITE_DATA | READ_CONTROL` (0x20003),
+  et le systeme y ajoute `SYNCHRONIZE` et `FILE_READ_ATTRIBUTES`: tous dans
+  le masque du groupe. Une ouverture en `GENERIC_WRITE` demanderait aussi
+  `FILE_WRITE_ATTRIBUTES` et `FILE_WRITE_EA`, que ce masque n'accorde pas
+  (mesure sur dev-windows: refusee).
+
+Un compte que le canal n'admet pas recoit un refus a l'ouverture
+(`ERROR_ACCESS_DENIED` sous Windows, `EACCES` sous Linux). La coquille le
+rend dans un etat a lui, `compte non admis par le canal`, avec une note qui
+nomme le groupe d'acces et un tray gris: jamais `daemon injoignable`,
+jamais vert.
+
+Lancement reel du 16/10/2026 sur dev-windows, revision `10ef89b`, sans
 elevation et sans daemon: la fenetre dit `daemon injoignable` et, pour le
 kill switch, `inconnu (daemon injoignable)`, avec la note et une pastille
 grise; `Connecter` et `Deconnecter` sont inactifs; l'info-bulle du tray dit
@@ -88,7 +149,8 @@ etabli que le daemon declare. Aucune erreur ne le fait.
 | `reprise` | le daemon: remontee, avec sa tentative | `reprise (tentative N)` | rouge |
 | `echec` | le daemon: etat d'erreur, avec sa raison | `echec: <raison>` | rouge |
 | `deconnecte` | le daemon: aucun tunnel | `deconnecte` | gris |
-| `daemon-injoignable` | personne ne tient le canal, ou personne que ce compte puisse joindre, ou l'echange a ete coupe | `daemon injoignable`, kill switch `inconnu`, une note | gris |
+| `daemon-injoignable` | personne ne tient le canal, ou l'echange a ete coupe | `daemon injoignable`, kill switch `inconnu`, une note | gris |
+| `compte-non-admis` | le systeme refuse a ce compte d'ouvrir le canal (`ERROR_ACCESS_DENIED`, `EACCES`): hors du groupe d'acces sous Windows, hors du groupe du socket sous Linux | `compte non admis par le canal`, kill switch `inconnu`, une note qui nomme le groupe d'acces | gris |
 | `daemon-sans-reponse` | un serveur tient le canal et n'a pris aucune connexion de plus dans le delai | `daemon sans reponse dans le delai`, une note: rien ne dit qu'il soit arrete | gris |
 | `serveur-non-admis` | un serveur tient le canal sans l'identite du daemon | sa cause, et `rien ne lui a ete envoye` | gris |
 | `refuse` | le daemon a refuse l'appelant, ou rendu une autre erreur | `acces refuse par le daemon`, ou `erreur du daemon: <message>` | gris |
@@ -98,8 +160,10 @@ Quand l'etat attend un kill switch que le daemon ne declare pas arme, la ligne
 du kill switch le dit en toutes lettres (`NON ARME alors que l'etat est ... -
 le trafic peut fuir`). Les boutons de la fenetre suivent l'etat: `Connecter`
 depuis `deconnecte` ou `echec`, `Deconnecter` des qu'un tunnel est attendu;
-apres une erreur, aucun des deux. L'info-bulle du tray et l'entree `Etat` de
-son menu portent le texte de l'etat (`Bifrost - <etat>`, `Etat: <etat>`). Un
+apres une erreur, aucun des deux. Les entrees `Connecter` et `Deconnecter`
+du menu du tray suivent la meme regle, tirees des memes champs de la vue.
+L'info-bulle du tray et l'entree `Etat` de son menu portent le texte de
+l'etat (`Bifrost - <etat>`, `Etat: <etat>`). Un
 etat que la page ne connaitrait pas s'affiche comme tel (`Etat inconnu de
 cette page`), jamais comme un autre.
 
@@ -108,16 +172,72 @@ cette page`), jamais comme un autre.
 - `crates/bifrost-coquille`: la vue (aucune erreur lue comme connectee ni
   rendue verte), la garde d'elevation dans les deux sens, l'exigence du
   canal, contre un faux serveur d'un compte ordinaire et contre un canal
-  occupe.
+  occupe, le refus d'ouverture rendu `compte non admis par le canal` (sous
+  Windows un pipe a DACL vide, sous Linux un socket en mode 0), et le
+  constat que le poste de commande ne nomme que l'etat, `connect-stored` et
+  `disconnect`, que la decision du daemon admet au niveau des membres.
+- `crates/bifrost-ipc`: la decision, commande par commande et niveau par
+  niveau (le niveau des membres n'admet que les trois commandes, et le
+  refus nomme la commande), et une garde qui lit la decision et rougit sur
+  tout bras qui ne nomme pas sa commande; sous Linux, chaque commande
+  rendue au serveur telle quelle.
+- `crates/bifrost-ipc`, sous Windows: la forme des groupes admissibles
+  (comptes et groupes predefinis, zeros de tete, RID sous 1000, domaine
+  etranger refuses), le descripteur sans groupe et avec groupe (une ACE de
+  plus, relue sur le pipe lie), le masque `0x120083` sans le bit 0x4 et
+  distinct de GA, la recette miroir: un pipe dont l'ACE du groupe nomme le
+  compte courant, ou ce compte s'ouvre en client par ses droits
+  individuels et echange, et ne peut pas ajouter d'instance
+  (`ERROR_ACCESS_DENIED`). Les recettes qui nomment ainsi le compte
+  courant la ou le daemon nommerait le groupe (les miroirs) sont des
+  mesures de poste: elles supposent un compte cree par un administrateur,
+  et pour deux d'entre elles un jeton sans Administrateurs actifs. Quand
+  la premisse manque, elles s'abstiennent en le nommant; sur le runner de
+  la CI, dont le compte est un compte predefini, elles rendent `SKIPPED`
+  sous une seule raison, attendue par le budget d'abstention Windows, et
+  c'est la recette du runner, ci-dessous, qui mesure a leur place sur un
+  groupe reel. Et, par le chemin du daemon (`accept`, puis la lecture des
+  requetes), chaque commande rendue au serveur ou refusee selon le niveau
+  de l'appelant (un compte sans Administrateurs actifs a le niveau des
+  membres), un client anonyme rendu a ce niveau meme sous un jeton eleve,
+  et le fil rendu a son jeton sur chaque chemin de l'identification.
+- `crates/bifrost-daemon`: `--group` juge avant le superviseur (un groupe
+  refuse arrete le daemon, et le message le nomme), et porte par la ligne
+  du service sous la forme `--group "<SID>"`; la lecture des trois scripts
+  Windows: l'installeur cree le groupe et le passe, les deux bancs relisent
+  la ligne.
+- `crates/bifrost-coquille/tests/groupe_d_acces.rs`, sur le runner jetable
+  de la CI seulement (`BIFROST_RUNNER_JETABLE=1`, `GITHUB_ACTIONS=true`,
+  processus eleve; ailleurs `SKIPPED` qui le dit): un groupe local et deux
+  comptes jetables, l'un membre, l'autre non, face a un vrai `IpcServer`
+  lie avec ce groupe et dont le pipe appartient aux Administrateurs. Le
+  membre, non eleve, fait servir l'etat, `connect-stored` et `disconnect`
+  par la coquille, ne peut pas ajouter d'instance, et recoit pour chacune
+  des sept autres commandes le refus qui la nomme sans que le serveur en
+  recoive aucune; le non-membre est refuse a l'ouverture et rendu `compte
+  non admis par le canal`; le processus de la recette, aux Administrateurs
+  actifs, fait parvenir au serveur les sept memes commandes. Elle mesure
+  aussi, sur ce groupe reel, ce que les miroirs mesurent ailleurs: le
+  groupe resolu porte la forme d'un compte cree et le domaine des comptes
+  que la recette cree; une forme equivalente de son SID (zeros de tete,
+  minuscules) est resolue et rendue sous la forme canonique; le meme
+  domaine avec le RID de l'administrateur integre est refuse, non
+  admissible, sous sa forme canonique; la DACL du pipe que le serveur lie
+  avec ce groupe porte trois ACE d'autorisation, SYSTEM et les
+  Administrateurs a tous les droits, le groupe a `0x120083`, rien d'autre.
+  Groupe et comptes sont retires en fin de recette, meme sur panique.
 - `crates/bifrost-coquille/tests/gui_conf.rs`: l'identifiant Tauri
   (`io.github.musyg.bifrost-vpn`), la CSP exacte, les capacites exactes
   (`core:default` et `core:event:default`, fenetre `main`), le bundling
-  desactive, aucune image ni aucun binaire dans `gui/`, et une note de la page
+  desactive, aucune image ni aucun binaire dans `gui/`, une note de la page
   pour chaque etat de la vue, non vide pour chaque erreur et sans le mot
-  connecte.
+  connecte, et le menu du tray qui suit les boutons de la page (ses deux
+  entrees tirees d'une seule fonction de la vue, appliquees a chaque vue).
 - les recettes de `gui/` (`cargo test --manifest-path gui/Cargo.toml`):
   chaque erreur et chaque etat peints tels que la vue les derive, aucune
-  erreur en vert, au tray comme dans l'info-bulle.
+  erreur en vert, au tray comme dans l'info-bulle; et, etat par etat, les
+  entrees `Connecter` et `Deconnecter` du tray actives la seulement ou le
+  bouton l'est.
 - la CI: le job `interface-linux` formate, compile, passe clippy et lance ces
   recettes a chaque push et a chaque PR; `interface-windows` fait de meme sur
   un lancement manuel avec la case `windows`. Une PR qui touche `gui/`,
@@ -133,8 +253,17 @@ cette page`), jamais comme un autre.
   coquille se construit depuis les sources (`cargo build --manifest-path
   gui/Cargo.toml`), et ses icones sont engendrees a la construction, sous
   `gui/target/`.
-- Sous Windows, la commande du daemon par une coquille non elevee (voir la
-  limite ci-dessus).
+- Sous Windows, le bout en bout du groupe d'acces (un membre commande le
+  daemon par la coquille et recoit un refus nomme pour toute autre
+  commande, un non-membre est refuse, un processus eleve garde tout le
+  canal) n'est mesure que sur le runner jetable de la CI, au run manuel
+  `windows`, face a un `IpcServer` de recette et non au service installe.
+  Aucun lancement reel de la fenetre par un membre du groupe n'est mesure,
+  ni l'identification d'un appelant par le daemon installe en service.
+- Les trois scripts Windows qui creent le groupe et le passent au service
+  (`packaging/install-windows.ps1`, `scripts/service-windows.ps1`,
+  `scripts/packaging-windows.ps1`) sont gardes par la lecture de leur
+  texte; leur execution n'est pas mesuree.
 - Sous Linux, aucun lancement reel de la fenetre n'est mesure: la coquille y
   est construite et ses recettes y tournent, dans le job `interface-linux`.
 - Le refus de demarrer elevee est garde par recette dans les deux sens; il

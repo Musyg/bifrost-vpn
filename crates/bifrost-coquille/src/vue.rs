@@ -28,6 +28,9 @@ pub enum EtatVue {
     Echec,
     Deconnecte,
     DaemonInjoignable,
+    /// Le canal existe, et le systeme refuse a ce compte de l'ouvrir: hors du
+    /// groupe d'acces du pipe sous Windows, du groupe du socket sous Linux.
+    CompteNonAdmis,
     /// Un serveur tient le canal et n'a pris aucune connexion de plus dans le
     /// delai: rien ne dit que le daemon soit arrete.
     DaemonSansReponse,
@@ -52,8 +55,8 @@ pub enum EtatKillSwitch {
 ///
 /// - `Vert` uniquement quand le tunnel est etabli;
 /// - `Gris` quand tout est au repos (deconnecte) ou quand l'etat est inconnu
-///   (daemon injoignable ou sans reponse, serveur du canal non admis, refus):
-///   rien n'est etabli, ou rien ne permet de le dire;
+///   (daemon injoignable ou sans reponse, compte ou serveur du canal non
+///   admis, refus): rien n'est etabli, ou rien ne permet de le dire;
 /// - `Rouge` quand le kill switch est (ou doit etre) arme sans qu'un tunnel
 ///   soit etabli: connexion en cours, reprise, echec. C'est un etat sur du
 ///   point de vue de la fuite, mais actif, et il ne doit jamais passer pour
@@ -169,6 +172,11 @@ impl Vue {
                 EtatVue::DaemonInjoignable,
                 "daemon injoignable".to_owned(),
                 "daemon injoignable",
+            ),
+            ErreurCommande::CompteNonAdmis(_) => (
+                EtatVue::CompteNonAdmis,
+                "compte non admis par le canal: ce compte n'a pas acces au daemon".to_owned(),
+                "compte non admis par le canal",
             ),
             ErreurCommande::DaemonSansReponse(_) => (
                 EtatVue::DaemonSansReponse,
@@ -294,6 +302,7 @@ mod tests {
     fn une_erreur_de_chaque_sorte() -> Vec<ErreurCommande> {
         vec![
             ErreurCommande::DaemonInjoignable("pipe absent".into()),
+            ErreurCommande::CompteNonAdmis("acces refuse a l'ouverture".into()),
             ErreurCommande::DaemonSansReponse("canal occupe".into()),
             ErreurCommande::ServeurNonAdmis(ServerIdentityError::Refused),
             ErreurCommande::ServeurNonAdmis(ServerIdentityError::Unreadable),
@@ -329,13 +338,15 @@ mod tests {
         assert!(v.texte_etat.contains("injoignable"));
     }
 
-    /// Le serveur non admis, le canal occupe et le daemon injoignable ont
-    /// chacun leur etat et leur texte, et aucun ne se dit comme un autre: un
-    /// canal tenu par un autre processus, ou par un serveur qui ne prend plus
-    /// de connexion, n'est pas un daemon absent.
+    /// Le serveur non admis, le compte non admis, le canal occupe et le daemon
+    /// injoignable ont chacun leur etat et leur texte, et aucun ne se dit
+    /// comme un autre: un canal tenu par un autre processus, ou par un
+    /// serveur qui ne prend plus de connexion, ou qui refuse ce compte, n'est
+    /// pas un daemon absent.
     #[test]
     fn non_admis_sans_reponse_et_injoignable_ne_se_confondent_pas() {
         let injoignable = Vue::depuis_erreur(&ErreurCommande::DaemonInjoignable("absent".into()));
+        let compte = Vue::depuis_erreur(&ErreurCommande::CompteNonAdmis("refuse".into()));
         let sans_reponse = Vue::depuis_erreur(&ErreurCommande::DaemonSansReponse("occupe".into()));
         let refuse = Vue::depuis_erreur(&ErreurCommande::ServeurNonAdmis(
             ServerIdentityError::Refused,
@@ -345,10 +356,17 @@ mod tests {
         ));
         let acces = Vue::depuis_erreur(&ErreurCommande::Refuse("acces refuse".into()));
 
+        assert_eq!(compte.etat, EtatVue::CompteNonAdmis);
         assert_eq!(sans_reponse.etat, EtatVue::DaemonSansReponse);
         assert_eq!(refuse.etat, EtatVue::ServeurNonAdmis);
         assert_eq!(illisible.etat, EtatVue::ServeurNonAdmis);
-        let etats = [injoignable.etat, sans_reponse.etat, refuse.etat, acces.etat];
+        let etats = [
+            injoignable.etat,
+            compte.etat,
+            sans_reponse.etat,
+            refuse.etat,
+            acces.etat,
+        ];
         for (i, a) in etats.iter().enumerate() {
             for b in &etats[i + 1..] {
                 assert_ne!(a, b, "deux erreurs distinctes rendues dans le meme etat");
@@ -368,7 +386,12 @@ mod tests {
             );
         }
         assert_ne!(refuse.texte_etat, illisible.texte_etat);
-        for v in [&sans_reponse, &refuse, &illisible] {
+        assert!(
+            compte.texte_etat.contains("compte non admis par le canal"),
+            "{}",
+            compte.texte_etat
+        );
+        for v in [&compte, &sans_reponse, &refuse, &illisible] {
             for texte in [&v.texte_etat, &v.texte_kill_switch, &v.texte_menu_etat] {
                 assert!(!texte.contains("injoignable"), "{texte}");
             }
@@ -386,6 +409,7 @@ mod tests {
             (EtatVue::Echec, "echec"),
             (EtatVue::Deconnecte, "deconnecte"),
             (EtatVue::DaemonInjoignable, "daemon-injoignable"),
+            (EtatVue::CompteNonAdmis, "compte-non-admis"),
             (EtatVue::DaemonSansReponse, "daemon-sans-reponse"),
             (EtatVue::ServeurNonAdmis, "serveur-non-admis"),
             (EtatVue::Refuse, "refuse"),

@@ -70,6 +70,13 @@ struct Args {
     socket: String,
 
     /// Groupe systeme autorise a piloter le daemon, en plus de root.
+    ///
+    /// Sous Windows, le groupe d'acces du pipe: un groupe local cree par un
+    /// administrateur, designe par son nom ou son SID. Ses membres ouvrent le
+    /// canal sans elevation, pour status, connect-stored et disconnect; toute
+    /// autre commande reste a SYSTEM et aux Administrateurs actifs.
+    /// Introuvable, ou compte ou groupe predefini: le daemon refuse de
+    /// demarrer.
     #[arg(long)]
     group: Option<String>,
 
@@ -1515,6 +1522,9 @@ fn main() -> anyhow::Result<()> {
             // a l'installation et refuse un compte inconnu, plutot que de
             // laisser le service echouer a son premier demarrage.
             args.resolveur_utilisateur.as_deref(),
+            // Le groupe d'acces du canal, juge a l'installation comme au
+            // demarrage: un groupe refuse fait echouer l'installation.
+            args.group.as_deref(),
         );
     }
 
@@ -2505,6 +2515,15 @@ async fn run(args: Args) -> anyhow::Result<()> {
         Err(e) => tracing::warn!(error = %e, "identite ALE_USER_ID illisible"),
     }
 
+    // Le groupe d'acces du canal, sous Windows: designe par --group et
+    // introuvable, ou qui n'est pas un groupe cree localement par un
+    // administrateur, il fait echouer le demarrage, avant que le superviseur
+    // ne tourne. Le daemon ne pose jamais sur son pipe un groupe qu'il n'a
+    // pas retenu, et ne retombe pas en silence sur "aucun groupe": les
+    // membres verraient un canal ferme sans que rien ne dise pourquoi.
+    #[cfg(windows)]
+    server::groupe_d_acces(args.group.as_deref()).context("--group")?;
+
     // Un compte declare mais introuvable fait echouer le demarrage, il ne
     // degrade pas en silence. Retomber sur "aucune exemption" donnerait un
     // daemon qui parait sain et un coeur que le kill switch etrangle des qu'il
@@ -3074,6 +3093,28 @@ mod tests {
             let ici = compact.find(appel).expect("present");
             assert!(ici < superviseur, "{appel} doit preceder le superviseur");
         }
+    }
+
+    /// Sous Windows, `--group` est juge avant que le superviseur existe, et
+    /// son refus arrete `run` (le `?`): un groupe introuvable ou refuse ne
+    /// laisse ni superviseur lance ni daemon qui sert sans lui. Les recettes
+    /// de `server::tests` mesurent le jugement et l'arret de l'ecoute; celle-ci
+    /// garde qu'il est sur le chemin du daemon.
+    #[test]
+    fn run_juge_le_groupe_d_acces_avant_le_superviseur() {
+        let source = include_str!("main.rs");
+        let debut = source
+            .find("\nasync fn run(args: Args)")
+            .expect("fn run dans main.rs");
+        let fin = debut + source[debut..].find("\n}\n").expect("fin de fn run");
+        let compact: String = code_seul(&source[debut..fin]).split_whitespace().collect();
+        let superviseur = compact
+            .find("Supervisor::new(")
+            .expect("le superviseur est construit dans run");
+        let appel = "#[cfg(windows)]server::groupe_d_acces(args.group.as_deref()).context(\"\")?;";
+        assert_eq!(compact.matches(appel).count(), 1, "{appel} dans run");
+        let ici = compact.find(appel).expect("present");
+        assert!(ici < superviseur, "{appel} doit preceder le superviseur");
     }
 
     /// Une fois le superviseur lance, `run` n'a plus qu'une issue:

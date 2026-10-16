@@ -17,7 +17,7 @@ Le logiciel s'appelle Bifrost. Les documents de conception ont porte le nom de t
 
 ## Statut actuel
 
-Bifrost est en developpement. Le MVP de l'objectif 1 est implemente. Daemon et CLI; la coquille graphique (fenetre Tauri et tray, [document 08](docs/08-coquille-graphique.md)) est dans le depot, hors MVP et sans paquet. Sous Windows, elle ne commande pas encore le daemon: le canal du daemon n'admet que SYSTEM et les Administrateurs, et la coquille refuse de tourner elevee. Le flux de connexion appelle la selection des transports: WireGuard directement, VLESS+REALITY et Hysteria2 par sing-box, avec interface TUN et passage SOCKS5. La couche DNS anti-telemetrie et les reglages Windows du registre, des services et des taches planifiees sont implementes; les filtres WFP par service restent une defense en profondeur, dont l'effet mesure est documente cible par cible.
+Bifrost est en developpement. Le MVP de l'objectif 1 est implemente. Daemon et CLI; la coquille graphique (fenetre Tauri et tray, [document 08](docs/08-coquille-graphique.md)) est dans le depot, hors MVP et sans paquet. Elle tourne sans elevation; sous Windows, le canal du daemon admet les membres d'un groupe d'acces local que l'installeur cree vide, et la coquille d'un membre y a les trois commandes que le daemon ouvre aux membres: l'etat, `connect-stored` et `disconnect`. Le flux de connexion appelle la selection des transports: WireGuard directement, VLESS+REALITY et Hysteria2 par sing-box, avec interface TUN et passage SOCKS5. La couche DNS anti-telemetrie et les reglages Windows du registre, des services et des taches planifiees sont implementes; les filtres WFP par service restent une defense en profondeur, dont l'effet mesure est documente cible par cible.
 
 Les commandes `prove` confrontent aussi le pare-feu et le routage a une reference explicite ou a ce que le daemon declare avoir pose; la preuve des resolveurs DNS effectifs est livree sous Linux. Elles rendent MATCH, MISMATCH ou UNMEASURED, avec le perimetre de chaque mesure. Les chantiers ouverts restent dans [`ETAT.md`](ETAT.md); les sections detaillees ci-dessous conservent aussi l'historique des mesures et des corrections.
 
@@ -28,7 +28,7 @@ Les commandes `prove` confrontent aussi le pare-feu et le routage a une referenc
 | Chemin par coeur | TUN, routage par identite du coeur, passage SOCKS5 | Wintun, sockets du coeur liees a l'interface physique, passage SOCKS5 |
 | Choix du protocole anti-DPI | `bifrost-evasion` : politique pure, sondes et coeurs tiers lances en processus separes | idem, le crate est multiplateforme |
 | DNS | systemd-resolved ou `/etc/resolv.conf` | `netsh` plus filtres WFP |
-| IPC authentifie | Socket Unix, `SO_PEERCRED` | Named pipe, DACL SYSTEM et Administrateurs |
+| IPC authentifie | Socket Unix, `SO_PEERCRED` | Named pipe, DACL SYSTEM, Administrateurs et groupe d'acces local (`--group`) a trois commandes |
 | Preuves locales | Integrite de fichier, nftables, routage et DNS effectif | Integrite de fichier, WFP et routage |
 | Suite de fuite | Dix vecteurs en namespaces et pcap, par `--run-checks`; dans le service sans CAP_SYS_ADMIN, neuf sont SKIPPED avec la commande a lancer hors service | Un seul y tourne dans `check` (`doh-bypass`); les neuf autres sont cables et renvoyes a une commande dediee, avec la raison |
 | Anti-telemetrie | Couche DNS: le resolveur embarque refuse les noms de telemetrie AVANT le tunnel | idem, plus la couche 1: registre, services et taches planifiees, journalisee et reversible |
@@ -170,6 +170,8 @@ sudo userdel bifrost-coeur && sudo userdel bifrost-resolveur && sudo groupdel bi
 
 Meme parti pris que sous Linux, et la meme phrase : le script depose les binaires, durcit le repertoire de donnees, enregistre le service, puis **s'arrete la**. Il ne demarre rien.
 
+Il cree aussi, s'il n'existe pas, le groupe local `Bifrost`, vide, et l'inscrit dans la ligne du service (`--group`, par son SID) : c'est le **groupe d'acces** du canal. Ses membres ouvrent le pipe du daemon sans elevation et y ont trois commandes, par la CLI comme par la coquille graphique : l'etat, `connect-stored` (le profil que le daemon detient, enregistre par un administrateur) et `disconnect`. Toute autre commande reste a SYSTEM et aux jetons dont les Administrateurs sont actifs (une console elevee) : le daemon identifie l'appelant de chaque requete sur le jeton que le pipe lui presente, et un appelant qu'il ne sait pas identifier n'a que les trois commandes. Sous Linux, un membre du groupe `bifrost` garde tout le canal. Les membres n'y creent pas d'instance, donc ne peuvent pas tenir le canal a la place du daemon, et le client exige toujours un pipe possede par LocalSystem ou par les Administrateurs. C'est l'administrateur qui y ajoute des comptes (`Add-LocalGroupMember -Group Bifrost -Member <compte>`) ; l'appartenance vaut a la prochaine ouverture de session du compte. Le daemon n'admet qu'un groupe local cree par un administrateur, jamais un compte ni un groupe predefini : un groupe introuvable ou non admissible l'arrete au demarrage, et `--install-service` refuse de l'inscrire. Le detail des droits est dans le [document 08](docs/08-coquille-graphique.md).
+
 Une divergence avec systemd, qu'il vaut mieux lire que decouvrir : le service Windows est enregistre en demarrage **automatique**, donc il partira de lui-meme au prochain redemarrage. Sous Linux, `install-linux.sh` n'active pas l'unite. Le reglage vit dans la specification du service Windows, pas dans l'installateur.
 
 Les binaires vont dans `%ProgramFiles%\Bifrost`, dont les droits par defaut interdisent deja l'ecriture aux comptes ordinaires. Ce qui s'ecrit va dans `%ProgramData%\Bifrost`, et celui-la doit etre **durci a l'installation** : `C:\ProgramData` porte une ACE `CREATOR OWNER` heritee, donc un repertoire cree la par un compte ordinaire lui appartient, et le proprietaire d'un objet detient implicitement `WRITE_DAC` quoi que dise la liste. Il pourrait attendre qu'un administrateur y installe un profil, puis le remplacer par le sien - et le profil designe le serveur vers lequel le tunnel monte. C'est la mecanique de CVE-2026-35603. L'installateur reprend la propriete, coupe l'heritage et ne laisse que SYSTEM et les administrateurs, par leurs **SID** et jamais par leurs noms, qui sont traduits d'une machine a l'autre.
@@ -190,6 +192,8 @@ Remove-Item -Recurse -Force "$env:ProgramFiles\Bifrost"
 ```
 
 `--cleanup-firewall` avant de retirer quoi que ce soit, pour la meme raison que sous Linux : arreter le service ne desarme pas le kill switch, et supprimer le binaire avant les filtres laisserait une machine bloquee sans l'outil pour la debloquer.
+
+Le groupe d'acces `Bifrost` n'est pas retire. Une fois le service desinstalle, un administrateur le retire par `Remove-LocalGroup -Name Bifrost`.
 
 ## Verifier l'integrite d'un fichier, hors ligne
 
@@ -490,6 +494,21 @@ Windows `skipped` n'est pas une validation Windows; ne pas presenter le vert
 Linux comme tel. La derniere validation Windows doit nommer le SHA
 effectivement controle.
 
+Le job Windows de lint et de tests porte `BIFROST_RUNNER_JETABLE`: sur ce
+runner jetable, et la seulement, une recette cree un groupe local et deux
+comptes, mesure le canal du groupe d'acces (un membre commande le daemon par
+la coquille, recoit un refus nomme pour toute autre commande et ne peut pas
+ajouter d'instance au pipe; un non-membre est refuse; le processus eleve de
+la recette garde tout le canal), mesure sur ce groupe reel ce que les
+recettes unitaires de `bifrost-ipc` mesurent ailleurs sur le compte des
+recettes (forme et domaine du groupe, une forme equivalente de son SID
+rendue canonique, le RID de l'administrateur integre refuse, la DACL du
+pipe lie: SYSTEM, les Administrateurs et le groupe, rien d'autre), puis les
+retire. Ailleurs, elle rend `SKIPPED` en disant pourquoi. Le compte du
+runner est un compte predefini: ces recettes unitaires y rendent `SKIPPED`
+sous une seule raison, et le budget d'abstention Windows attend ces lignes
+exactement.
+
 Une PR qui touche `gui/`, `crates/bifrost-coquille`, `crates/bifrost-icone`,
 `crates/bifrost-ipc` ou `packaging/msi` attend, avant sa fusion, un run manuel
 `windows` vert sur sa revision: c'est le seul run ou la coquille se construit
@@ -513,7 +532,7 @@ sudo ./scripts/preuve-dns-daemon-linux.sh   # prove dns --politique-daemon face 
 
 `fuzz-linux.sh` demande une chaine nightly et `cargo-fuzz` (`cargo install --locked cargo-fuzz --version 0.13.2`), et ne tourne que sous Linux. Le harnais vit dans `fuzz/`, un espace de travail cargo separe du workspace racine : son verrou, ses graines (`fuzz/graines/<cible>`) et sa politique de dependances (`fuzz/deny.toml`) n'entrent dans aucun binaire livre. `--duree N` fixe le temps par cible, `--rejouer` s'arrete apres la relecture des graines, `--cible NOM` restreint a cette cible (option repetable). Les binaires suivent `CARGO_TARGET_DIR` comme cargo (defaut `fuzz/target`); corpus de travail et entrees qui font tomber une cible restent sous `fuzz/target/`. Les cibles, la frontiere de confiance de chaque parseur et ce qui n'est pas couvert sont dans `docs/07-programme-securite-produit.md`, section 2.3.
 
-Cote Windows, `.\scripts\packaging-windows.ps1` (en administrateur) eprouve l'installateur en detournant `%ProgramFiles%` et `%ProgramData%` vers un bac a sable : ce qui est mesure est exactement ce qui se produirait a l'installation, sans rien laisser sur la machine. Le service, lui, ne se detourne pas - le gestionnaire de services est unique - donc la recette l'installe pour de bon, relit dans le **registre** ce que le SCM a enregistre, puis le retire ; elle refuse de tourner si un service `BifrostDaemon` existe deja, pour ne jamais defaire une installation reelle. Elle verifie que les quatre fichiers sont deposes - les deux binaires du logiciel, le resolveur chiffre et `wireguard.dll` -, que le repertoire de donnees a l'heritage coupe et ne laisse de droits qu'a SYSTEM et aux administrateurs - jamais a `S-1-5-19` -, que son sous-repertoire `resolveur` existe et est ouvert en lecture heritable a `S-1-5-19` sans aucun bit d'ecriture (un `Modify` la serait un echec : la configuration deviendrait reinscriptible par le resolveur), que `resolveur\etat` est ouvert en ecriture heritable, et que rejouer l'installation ne fait grossir ni l'un ni l'autre compte d'ACE, que le service depend de `BFE`, qu'il n'est pas demarre, et que sa ligne **nomme le resolveur avec son chemin cite et le compte `LocalService`, cite lui aussi, apres le binaire**. Sans droits administrateur elle rend `SKIPPED` avec sa raison, apres avoir tout de meme fait analyser l'installateur.
+Cote Windows, `.\scripts\packaging-windows.ps1` (en administrateur) eprouve l'installateur en detournant `%ProgramFiles%` et `%ProgramData%` vers un bac a sable : ce qui est mesure est exactement ce qui se produirait a l'installation, sans rien laisser sur la machine. Le service, lui, ne se detourne pas - le gestionnaire de services est unique - donc la recette l'installe pour de bon, relit dans le **registre** ce que le SCM a enregistre, puis le retire ; elle refuse de tourner si un service `BifrostDaemon` existe deja, pour ne jamais defaire une installation reelle. Elle verifie que les quatre fichiers sont deposes - les deux binaires du logiciel, le resolveur chiffre et `wireguard.dll` -, que le repertoire de donnees a l'heritage coupe et ne laisse de droits qu'a SYSTEM et aux administrateurs - jamais a `S-1-5-19` -, que son sous-repertoire `resolveur` existe et est ouvert en lecture heritable a `S-1-5-19` sans aucun bit d'ecriture (un `Modify` la serait un echec : la configuration deviendrait reinscriptible par le resolveur), que `resolveur\etat` est ouvert en ecriture heritable, et que rejouer l'installation ne fait grossir ni l'un ni l'autre compte d'ACE, que le service depend de `BFE`, qu'il n'est pas demarre, et que sa ligne **nomme le resolveur avec son chemin cite et le compte `LocalService`, cite lui aussi, apres le binaire**. Le groupe d'acces ne se detourne pas non plus : la recette cree le groupe local `Bifrost` s'il manque, verifie qu'il est vide et que la ligne du service finit par `--group "<SID>"`, son SID, puis le retire si c'est elle qui l'a cree. Sans droits administrateur elle rend `SKIPPED` avec sa raison, apres avoir tout de meme fait analyser l'installateur.
 
 Ce qu'elle n'etablit pas : que le service **sert**. Elle ne le demarre pas, et c'est delibere - le demarrer armerait le kill switch sur la machine de recette. C'est le role de `.\scripts\service-windows.ps1`, pendant de `service-systemd-linux.sh` : il installe pour de bon, demarre le service, `connect`, et mesure ce que la machine fait entre `connect` et `disconnect` - le tunnel transporte (une banniere du pair, verifiee muette avant le montage, et non des compteurs qu'un endpoint mort ferait monter), le vrai dnscrypt-proxy tourne comme ENFANT du service depuis le binaire que sa ligne nomme et sous `S-1-5-19` (decide sur le SID du proprietaire, jamais sur son nom traduit), l'interface du tunnel pointe le resolveur local, un vrai nom y resout, `permit-resolveur-dns` et `block-dns` sont poses pendant qu'une requete en clair vers un resolveur public n'aboutit pas, le DNS de la machine n'a pas bouge, puis le resolveur s'arrete avec le tunnel et le service tient sans redemarrer.
 
@@ -831,12 +850,12 @@ Les politiques DoH disposent maintenant des commandes explicites `--doh-policy c
 | `docs/05-anonymat-chainage.md` | Modeles de menace, architectures de sortie comparees, multi-hop, Tor, Nym, defense contre la correlation de trafic |
 | `docs/06-architecture-logicielle-packaging.md` | Daemon Rust et interface Tauri, IPC privilegie, MSI et paquets Linux, signature, mise a jour TUF, provisioning serveur |
 | `docs/07-programme-securite-produit.md` | Modele de menace du logiciel, fuzzing, audit externe, divulgation coordonnee, conformite Cyber Resilience Act |
-| `docs/08-coquille-graphique.md` | Coquille graphique: perimetre, coquille non privilegiee, regles de l'IPC, rendu de chaque etat, ce qui n'est pas fait |
+| `docs/08-coquille-graphique.md` | Coquille graphique: perimetre, coquille non privilegiee, regles de l'IPC, groupe d'acces sous Windows, rendu de chaque etat, ce qui n'est pas fait |
 | `docs/09-souverainete-verifiable.md` | Controle utilisateur, preuves locales, builds reproductibles, sorties reseau, ODoH et multihop: criteres mesurables et ordre de livraison |
 
 ## Decisions structurantes deja actees
 
-- **Stack** : daemon Rust privilegie, IPC authentifie. La coquille Tauri v2 non privilegiee est dans le depot, hors MVP; la piloter sous Windows sans elevation reste un jalon propre, apres J2. Les coeurs anti-censure sing-box et Xray tourneront en processus separes, jamais lies statiquement, pour eviter la contamination GPL.
+- **Stack** : daemon Rust privilegie, IPC authentifie. La coquille Tauri v2 non privilegiee est dans le depot, hors MVP; sous Windows, un membre du groupe d'acces du canal la lance sans elevation et y a l'etat, la connexion et la deconnexion, toute autre commande restant aux administrateurs; le jalon GUI attend le test d'intrusion de J2. Les coeurs anti-censure sing-box et Xray tourneront en processus separes, jamais lies statiquement, pour eviter la contamination GPL.
 - **Kill switch** : Windows Filtering Platform en mode utilisateur sur Windows, nftables avec fwmark sur Linux. Aucun driver noyau au depart.
 - **Licence** : MPL-2.0 pour le client (champ `license` du workspace).
 - **Conformite** : le classement et le calendrier du Cyber Resilience Act sont documentes dans [`docs/07`](docs/07-programme-securite-produit.md), distinctement des mesures techniques.

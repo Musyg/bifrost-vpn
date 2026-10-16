@@ -25,7 +25,9 @@
 //!     dialog;
 //!   - un fichier binaire dans `gui/`;
 //!   - une page qui ne rend pas chaque etat de la Vue, qui choisit elle-meme une
-//!     couleur, ou dont la note d'un etat d'erreur se lit comme connecte.
+//!     couleur, ou dont la note d'un etat d'erreur se lit comme connecte;
+//!   - un menu du tray dont << Connecter >> ou << Deconnecter >> ne suit pas les
+//!     boutons de la page (`gui/src/main.rs` et `gui/ui/index.html` lus aussi).
 
 use std::path::{Path, PathBuf};
 
@@ -315,6 +317,7 @@ fn etats_de_la_vue() -> Vec<(EtatVue, bool)> {
         EtatVue::Echec,
         EtatVue::Deconnecte,
         EtatVue::DaemonInjoignable,
+        EtatVue::CompteNonAdmis,
         EtatVue::DaemonSansReponse,
         EtatVue::ServeurNonAdmis,
         EtatVue::Refuse,
@@ -329,6 +332,7 @@ fn etats_de_la_vue() -> Vec<(EtatVue, bool)> {
                 | EtatVue::Echec
                 | EtatVue::Deconnecte => false,
                 EtatVue::DaemonInjoignable
+                | EtatVue::CompteNonAdmis
                 | EtatVue::DaemonSansReponse
                 | EtatVue::ServeurNonAdmis
                 | EtatVue::Refuse => true,
@@ -466,6 +470,19 @@ fn la_page_rend_chaque_etat_de_la_vue() {
             !note.to_lowercase().contains("connecte"),
             "{PAGE}: la note de l'etat d'erreur `{nom}` dit << connecte >>: `{note}`"
         );
+        // Le compte que le canal refuse n'est pas un daemon absent: sa note
+        // ne le dit pas, et elle nomme ce qui ouvre le canal.
+        if etat == EtatVue::CompteNonAdmis {
+            assert!(
+                !note.to_lowercase().contains("injoignable"),
+                "{PAGE}: la note de `{nom}` lit le refus du canal comme un daemon \
+                 injoignable: `{note}`"
+            );
+            assert!(
+                note.contains("groupe d'acces"),
+                "{PAGE}: la note de `{nom}` doit nommer le groupe d'acces: `{note}`"
+            );
+        }
     }
 
     assert_eq!(
@@ -482,6 +499,89 @@ fn la_page_rend_chaque_etat_de_la_vue() {
         !contient_le_mot(&page, "vert"),
         "{PAGE}: la page nomme le vert; seule la Vue choisit la couleur"
     );
+}
+
+const COQUILLE: &str = "gui/src/main.rs";
+const HTML: &str = "gui/ui/index.html";
+
+fn lire(relatif: &str) -> String {
+    std::fs::read_to_string(racine().join(relatif))
+        .unwrap_or_else(|e| panic!("{relatif} illisible: {e}"))
+}
+
+/// Le corps de la fonction `signature` de `source`, sans blancs: de sa
+/// signature a la premiere accolade fermante en tete de ligne.
+fn corps_compact(source: &str, signature: &str) -> String {
+    let debut = source
+        .find(signature)
+        .unwrap_or_else(|| panic!("`{signature}` absente"));
+    let fin = debut
+        + source[debut..]
+            .find("\n}\n")
+            .unwrap_or_else(|| panic!("`{signature}` jamais refermee"));
+    source[debut..fin].split_whitespace().collect()
+}
+
+/// Le menu du tray n'offre une action que d'apres les MEMES champs de la Vue
+/// que les boutons de la page. La page ecrit `disabled` depuis
+/// `peut_connecter` et `peut_deconnecter`; la coquille active les entrees
+/// << Connecter >> et << Deconnecter >> depuis `entrees_actives`, qui rend ces
+/// deux champs tels quels, a chaque Vue qu'elle peint (`appliquer_vue`), et
+/// nulle part ailleurs; menu et boutons naissent inactifs. La recette
+/// `le_menu_du_tray_n_offre_que_ce_qu_offrent_les_boutons` de `gui/` mesure
+/// la fonction etat par etat, la ou la coquille compile; celle-ci garde le
+/// cablage, sur chaque hote.
+#[test]
+fn le_menu_du_tray_suit_les_boutons_de_la_page() {
+    let page = lire(PAGE);
+    for ligne in [
+        "document.getElementById(\"connecter\").disabled = !vue.peut_connecter;",
+        "document.getElementById(\"deconnecter\").disabled = !vue.peut_deconnecter;",
+    ] {
+        assert_eq!(page.matches(ligne).count(), 1, "{PAGE}: `{ligne}`");
+    }
+    let html = lire(HTML);
+    for bouton in [
+        "<button id=\"connecter\" type=\"button\" disabled>",
+        "<button id=\"deconnecter\" type=\"button\" disabled>",
+    ] {
+        assert!(html.contains(bouton), "{HTML}: `{bouton}`");
+    }
+
+    let coquille = lire(COQUILLE);
+    assert_eq!(
+        corps_compact(&coquille, "fn entrees_actives("),
+        "fnentrees_actives(vue:&Vue)->(bool,bool){(vue.peut_connecter,vue.peut_deconnecter)",
+        "{COQUILLE}: le menu doit suivre les champs des boutons, tels quels"
+    );
+    let peinture = corps_compact(&coquille, "fn appliquer_vue(");
+    for appel in [
+        "let(connecter,deconnecter)=entrees_actives(vue);",
+        "ctx.item_connecter.set_enabled(connecter);",
+        "ctx.item_deconnecter.set_enabled(deconnecter);",
+    ] {
+        assert_eq!(
+            peinture.matches(appel).count(),
+            1,
+            "{COQUILLE}: `{appel}` dans appliquer_vue"
+        );
+    }
+    assert_eq!(
+        coquille.matches("set_enabled").count(),
+        2,
+        "{COQUILLE}: les entrees du menu ne s'activent que dans appliquer_vue"
+    );
+    let compact: String = coquille.split_whitespace().collect();
+    for naissance in [
+        "MenuItem::with_id(app,\"connecter\",\"Connecter\",false,None::<&str>)?",
+        "MenuItem::with_id(app,\"deconnecter\",\"Deconnecter\",false,None::<&str>)?",
+    ] {
+        assert_eq!(
+            compact.matches(naissance).count(),
+            1,
+            "{COQUILLE}: l'entree doit naitre inactive: `{naissance}`"
+        );
+    }
 }
 
 /// Le temoin de la lecture de la page: une table bien formee est lue, une cle

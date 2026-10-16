@@ -110,6 +110,11 @@ $Binaires = Join-Path $Racine "target\release"
 $NomService = "BifrostDaemon"
 $CleService = "HKLM:\SYSTEM\CurrentControlSet\Services\$NomService"
 $TacheFilet = "bifrost-service-filet"
+# Le groupe d'acces du canal, que l'installateur cree vide s'il manque et que
+# le daemon porte dans la ligne du service. Retire au demontage s'il est ne
+# de ce banc, jamais sinon.
+$GroupeAcces = "Bifrost"
+$GroupeAvant = $false
 
 # Le banc tient son PROPRE journal. Lance en tache planifiee il n'a pas de
 # console ou se plaindre, et une redirection mal ecrite emporte alors la seule
@@ -183,6 +188,10 @@ function Demonter {
         Stop-Service $NomService -Force -ErrorAction SilentlyContinue
         & $Daemon --uninstall-service 2>&1 | Out-Null
         Dire "   service retire (les binaires restent dans $Installation)"
+        if (-not $GroupeAvant -and (Get-LocalGroup -Name $GroupeAcces -ErrorAction SilentlyContinue)) {
+            Remove-LocalGroup -Name $GroupeAcces -ErrorAction SilentlyContinue
+            Dire "   groupe d'acces $GroupeAcces, ne de ce banc, retire"
+        }
     } else {
         Dire "   installation gardee (-Garder)"
     }
@@ -218,6 +227,8 @@ if (Processus-Resolveur) {
     Saute "un dnscrypt-proxy traine d'un passage precedent"
 }
 Dire "   ni service, ni filtre, ni resolveur residuels"
+$GroupeAvant = [bool](Get-LocalGroup -Name $GroupeAcces -ErrorAction SilentlyContinue)
+Dire "   groupe d'acces $GroupeAcces present avant le banc: $GroupeAvant"
 
 # La banniere doit etre HORS D'ATTEINTE avant le montage. Le pair est sur le
 # meme lien, mais 10.98.0.1 est son adresse DE TUNNEL: aucune route ne mene la
@@ -293,6 +304,17 @@ if ($ligne -like "*--resolveur-utilisateur*") {
     Ok "la ligne du service NOMME le compte du resolveur"
 } else {
     Grief "la ligne du service ne nomme aucun compte pour le resolveur: il tournerait sous celui du service"
+}
+# Le groupe d'acces du canal: l'installateur le cree s'il manque, et le daemon
+# inscrit dans la ligne la forme canonique de son SID, citee et en dernier.
+# Sans elle, le pipe du service n'admettrait que SYSTEM et les administrateurs.
+$groupe = Get-LocalGroup -Name $GroupeAcces -ErrorAction SilentlyContinue
+if (-not $groupe) {
+    Grief "le groupe local $GroupeAcces n'existe pas apres l'installation"
+} elseif ($ligne.EndsWith("--group `"$($groupe.SID.Value)`"")) {
+    Ok "la ligne du service porte le SID du groupe d'acces $GroupeAcces"
+} else {
+    Grief "la ligne du service ne porte pas le SID du groupe d'acces: ses membres trouveraient le canal ferme"
 }
 # Le pilote, lui, n'est nomme nulle part: il est resolu par le repertoire du
 # binaire qui tourne. C'est donc sa PRESENCE ICI qui compte, et rien d'autre.

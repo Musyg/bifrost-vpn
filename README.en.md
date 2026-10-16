@@ -17,7 +17,7 @@ The software is called Bifrost. Early design documents used the working name "Hy
 
 ## Current implementation
 
-Bifrost is in development. The first-objective MVP is implemented. The daemon and CLI are available. The graphical shell (Tauri window and tray, [document 08](docs/08-coquille-graphique.md), in French) is in the repository, outside the MVP and without packages. On Windows it does not command the daemon yet: the daemon's channel admits only SYSTEM and Administrators, and the shell refuses to run elevated.
+Bifrost is in development. The first-objective MVP is implemented. The daemon and CLI are available. The graphical shell (Tauri window and tray, [document 08](docs/08-coquille-graphique.md), in French) is in the repository, outside the MVP and without packages. It runs without elevation; on Windows, the daemon's channel admits the members of a local access group that the installer creates empty, and a member's shell has the three commands the daemon opens to members: status, `connect-stored` and `disconnect`.
 
 The connection path now uses transport selection. WireGuard runs directly; VLESS + REALITY and Hysteria2 profiles run through sing-box, with a TUN interface and a SOCKS5 forwarding path. DNS filtering and Windows telemetry settings are implemented. Service-specific WFP telemetry filters remain a separate defense-in-depth layer, with their measured effects recorded individually.
 
@@ -27,7 +27,7 @@ The connection path now uses transport selection. WireGuard runs directly; VLESS
 | WireGuard | Kernel module controlled through netlink | WireGuardNT, with handshake and data-path tests |
 | Third-party transport path | TUN, routing by the core's identity, SOCKS5 forwarding | Wintun, interface-bound transport sockets, SOCKS5 forwarding |
 | DNS | systemd-resolved or `/etc/resolv.conf`; optional dnscrypt-proxy | Interface DNS configuration, WFP restrictions; optional dnscrypt-proxy under LocalService |
-| Authenticated IPC | Unix socket and `SO_PEERCRED` | Named pipe and an explicit security descriptor |
+| Authenticated IPC | Unix socket and `SO_PEERCRED` | Named pipe and an explicit security descriptor: SYSTEM, Administrators and an optional local access group (`--group`) limited to three commands |
 | Local comparisons | File integrity, nftables, routing and effective DNS | File integrity, WFP and routing |
 | Leak-test harness | Ten vectors, network namespaces and packet captures | `check` runs the DoH-policy check; the other vectors refer to dedicated commands |
 | Telemetry controls | DNS filtering | DNS filtering, reversible registry/service/task settings, and separately measured WFP filters |
@@ -175,6 +175,8 @@ From an elevated PowerShell session:
 
 The installer places the binaries, hardens the data directory and registers the service. It does not start it. **The Windows service is registered for automatic startup**, however, and starts at the next reboot. This differs from the Linux installer, which does not enable its unit.
 
+The installer also creates the local group `Bifrost`, empty, if it does not exist, and records it in the service command line (`--group`, by SID). This is the channel's **access group**. Its members open the daemon's pipe without elevation and have three commands there, through the CLI or the graphical shell: status, `connect-stored` (the profile the daemon holds, recorded by an administrator) and `disconnect`. Every other command stays with SYSTEM and with tokens whose Administrators group is active (an elevated console): the daemon identifies the caller of each request from the token the pipe presents, and a caller it cannot identify gets the three commands only. On Linux, a member of the `bifrost` group keeps the whole channel. Members cannot create a pipe instance, so they cannot hold the channel in the daemon's place, and the client still requires a pipe owned by LocalSystem or Administrators. An administrator adds accounts (`Add-LocalGroupMember -Group Bifrost -Member <account>`); membership takes effect at the account's next logon. The daemon accepts only a local group created by an administrator, never an account or a built-in group: a missing or inadmissible group stops the daemon at startup, and `--install-service` refuses to record it. [Document 08](docs/08-coquille-graphique.md) details the rights.
+
 Binaries go into `%ProgramFiles%\Bifrost`. Writable state goes into `%ProgramData%\Bifrost`, whose ownership and inherited permissions are reset to SYSTEM and Administrators. Comparisons use SIDs, not translated account names. A correct-looking ACL is not enough if another account still owns the directory and can rewrite that ACL.
 
 `wireguard.dll` and `dnscrypt-proxy.exe` are not bundled in this repository. `-Pilote` places the WireGuardNT library next to the running daemon; a library beside a development build will not serve a daemon installed elsewhere. `-Resolveur` also records the resolver path in the service command line.
@@ -191,6 +193,8 @@ Remove-Item -Recurse -Force "$env:ProgramFiles\Bifrost"
 ```
 
 Again, clean the filters before deleting the binary. Stopping the service alone does not disarm the kill switch.
+
+The access group `Bifrost` is not removed. Once the service is uninstalled, an administrator removes it with `Remove-LocalGroup -Name Bifrost`.
 
 ## Check file integrity offline
 
@@ -305,7 +309,7 @@ Pull requests and pushes to `main` run Linux formatting/lint/tests, the graphica
 gh workflow run ci.yml --repo Musyg/bifrost-vpn --ref main -f windows=true
 ```
 
-That dispatch runs only the two Windows jobs: lint and tests (30-minute limit) and the graphical shell (build, clippy and tests, 25-minute limit), each with one active run at a time. A skipped Windows job is not Windows validation. The recorded result must identify the SHA it actually checked.
+That dispatch runs only the two Windows jobs: lint and tests (30-minute limit) and the graphical shell (build, clippy and tests, 25-minute limit), each with one active run at a time. The Windows lint-and-test job sets `BIFROST_RUNNER_JETABLE`: on that disposable runner, and only there, a test creates a local group and two accounts, measures the access group's channel (a member commands the daemon through the shell, gets a named refusal for every other command and cannot add a pipe instance; a non-member is refused; the elevated test process keeps the whole channel), measures on that real group what the unit tests of `bifrost-ipc` measure elsewhere on the test account (form and domain of the group, an equivalent form of its SID rendered canonical, the built-in administrator's RID refused, the DACL of the bound pipe: SYSTEM, Administrators and the group, nothing else), and removes them. Elsewhere it reports `SKIPPED` with its reason. The runner's account is a built-in account, so those unit tests report `SKIPPED` there, under one stated reason; the Windows abstention budget expects exactly those lines. A skipped Windows job is not Windows validation. The recorded result must identify the SHA it actually checked.
 
 A pull request that touches `gui/`, `crates/bifrost-coquille`, `crates/bifrost-icone`, `crates/bifrost-ipc` or `packaging/msi` waits, before merging, for a green manual `windows` run on its revision: it is the only run where the shell is built on Windows.
 
@@ -560,7 +564,7 @@ The detailed design and measurement documents are currently in French:
 | [05: anonymity and chaining](docs/05-anonymat-chainage.md) | Threat models, exit architectures, Tor, Nym and correlation |
 | [06: software architecture and packaging](docs/06-architecture-logicielle-packaging.md) | IPC, services, planned interface and distribution |
 | [07: security programme](docs/07-programme-securite-produit.md) | Threat model, fuzzing, disclosure and regulatory planning |
-| [08: graphical shell](docs/08-coquille-graphique.md) | Scope, unprivileged shell, IPC rules, rendering of each state, what is not done |
+| [08: graphical shell](docs/08-coquille-graphique.md) | Scope, unprivileged shell, IPC rules, Windows access group, rendering of each state, what is not done |
 | [09: local verification](docs/09-souverainete-verifiable.md) | File, firewall, routing and DNS evidence; later verification milestones |
 
 The workspace declares MPL-2.0. Third-party executables are separate dependencies with their own licences. For a security report, follow [SECURITY.md](SECURITY.md), not a public issue containing exploit details or secrets. [packaging/security.txt](packaging/security.txt) carries the RFC 9116 contact information served by the publisher's site.

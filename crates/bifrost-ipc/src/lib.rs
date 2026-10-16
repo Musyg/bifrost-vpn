@@ -20,12 +20,28 @@
 //! pipe dont toutes les instances sont prises n'est pas un pipe absent: le
 //! client attend une instance libre, dans une borne courte, et exige
 //! l'identite de celle qu'il obtient.
+//!
+//! Sous Windows, un groupe d'acces ([`groupe::GroupeDAcces`]) ouvre le canal a
+//! ses membres sans elevation: une ACE de plus dans la DACL du pipe, a un
+//! masque qui permet d'echanger et rien d'autre, et seulement pour un groupe
+//! cree localement par un administrateur. Ses membres n'y ont que trois
+//! commandes, `status`, `connect-stored` et `disconnect`: le transport
+//! identifie l'appelant de chaque requete et applique la decision de
+//! [`appelant`] avant de la rendre au serveur.
 
+pub mod appelant;
 pub mod auth;
+#[cfg(windows)]
+pub mod groupe;
 pub mod protocol;
 pub mod transport;
 
+pub use appelant::{CommandeReservee, NiveauDAppelant, decider};
+#[cfg(windows)]
+pub use appelant::{EtapeDIdentification, Identification};
 pub use auth::{AuthError, AuthPolicy, PeerIdentity, SupplementaryGroups};
+#[cfg(windows)]
+pub use groupe::{ErreurGroupe, GroupeDAcces};
 pub use protocol::{Command, Request, Response};
 pub use transport::{
     Connection, IpcClient, IpcError, IpcServer, ServerIdentityError, ServerRequirement, ServerRule,

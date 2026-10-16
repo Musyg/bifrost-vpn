@@ -26,16 +26,25 @@ pub fn status_de_reference() -> TunnelStatus {
     }
 }
 
+/// Les commandes que le faux daemon a recues, par leur nom, dans l'ordre:
+/// tout ce que le transport lui a rendu, et rien de ce qu'il a refuse.
+pub type Recues = std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>;
+
 /// Sert les connexions ouvertes par le poste de commande. Chaque appel du
 /// poste de commande ouvre une connexion, envoie une requete et la referme:
-/// une requete par connexion, acceptees en boucle.
-pub async fn servir(mut server: IpcServer) {
+/// une requete par connexion, acceptees en boucle. Chaque requete rendue par
+/// `recv` est notee dans `recues` avant sa reponse.
+pub async fn servir(mut server: IpcServer, recues: Recues) {
     loop {
         let mut conn = match server.accept().await {
             Ok(c) => c,
             Err(_) => return,
         };
         if let Ok(req) = conn.recv().await {
+            recues
+                .lock()
+                .expect("commandes recues")
+                .push(req.command.name());
             let reponse = match req.command {
                 Command::Status => Response::Status(Box::new(status_de_reference())),
                 Command::ConnectStored | Command::Disconnect => Response::Ok,

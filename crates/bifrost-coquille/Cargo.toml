@@ -32,12 +32,16 @@ tokio = { workspace = true }
 # Les recettes Windows posent elles-memes le descripteur du pipe de leur faux
 # serveur (proprietaire et DACL), comme les recettes de bifrost-ipc; celle du
 # vrai serveur lit le niveau d'integrite et le proprietaire par defaut du
-# jeton de son processus, et y pose les Administrateurs.
+# jeton de son processus, et y pose les Administrateurs. Celle du groupe
+# d'acces cree sur le runner jetable un groupe et deux comptes locaux, au mot
+# de passe tire par le systeme, et emprunte leurs jetons.
 [target.'cfg(windows)'.dev-dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_NetworkManagement_NetManagement",
     "Win32_Security",
     "Win32_Security_Authorization",
+    "Win32_Security_Cryptography",
     "Win32_System_SystemServices",
     "Win32_System_Threading",
 ] }

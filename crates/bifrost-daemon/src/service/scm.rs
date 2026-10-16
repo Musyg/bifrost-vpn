@@ -159,11 +159,20 @@ fn code_demarrage(d: Demarrage) -> u32 {
 /// resolveur (l'equivalent d'un `requires`, tenu ici parce que
 /// `--resolveur-utilisateur` reste legitime SANS binaire hors installation,
 /// pour restreindre le :53 a un resolveur que quelqu'un d'autre pilote).
+///
+/// `groupe` est le groupe d'acces du canal (`--group`). Juge ICI par
+/// `GroupeDAcces::resoudre`, comme au demarrage: un groupe introuvable, ou qui
+/// n'est pas un groupe cree localement par un administrateur, fait echouer
+/// l'installation. La ligne du service porte la forme CANONIQUE de son SID,
+/// celle que le systeme a rendue et qui a ete jugee: renommer le groupe ne
+/// change pas ce que le service accorde, et un autre groupe qui prendrait
+/// son nom n'y gagne rien.
 pub fn install(
     exe: &Path,
     avec_sonde: bool,
     resolveur: Option<&Path>,
     compte: Option<&str>,
+    groupe: Option<&str>,
 ) -> anyhow::Result<()> {
     let s = spec();
     if !exe.is_absolute() {
@@ -216,9 +225,27 @@ pub fn install(
         }
     }
 
+    // Le groupe d'acces, fail-closed a l'installation lui aussi.
+    let groupe = match groupe {
+        None => None,
+        Some(g) => match bifrost_ipc::GroupeDAcces::resoudre(g) {
+            Ok(retenu) => Some(retenu),
+            Err(e) => bail!(
+                "{e}. Creer d'abord le groupe local (New-LocalGroup), ou ne pas \
+                 le declarer: le service refuserait de demarrer."
+            ),
+        },
+    };
+
     // La ligne vient de `spec`, ou elle est une fonction pure mesuree sur les
     // deux hotes. La construire ici la rendrait invisible a la CI Linux.
-    let ligne = super::spec::ligne_de_commande(exe, avec_sonde, resolveur, compte);
+    let ligne = super::spec::ligne_de_commande(
+        exe,
+        avec_sonde,
+        resolveur,
+        compte,
+        groupe.as_ref().map(|g| g.sid()),
+    );
 
     let nom = wide(s.nom);
     let affiche = wide(s.nom_affiche);

@@ -46,8 +46,40 @@ SKIPPED la_bascule_change_vraiment_de_sortie_et_le_dit: BIFROST_COEURS ne design
 # Elle part le jour ou la recette n'aura plus a s'abstenir nulle part.
 SKIPPED la_pile_fantome_s_applique_a_l_executable_marque_et_pas_a_sa_copie_non_marquee: le processeur ne declare pas la pile fantome (CET_SS nul dans la feuille sept de CPUID), l'effet du marquage ne se mesure pas ici
 SKIPPED la_poignee_rend_un_verdict_sans_jamais_faire_attendre_le_superviseur: BIFROST_COEURS ne designe aucun repertoire: cette recette veut un vrai sing-box, que le depot ne distribue pas
+# Releve MESURE (2026-10-16): run 38937217524, commit 67fcd43 (premiere
+# revision de la PR #66), job << lint et tests (Windows) >>: 1793 vertes, 7
+# rouges, toutes dans les recettes
+# unitaires de bifrost-ipc qui mesurent le groupe d'acces du canal sur le
+# compte des recettes (les << miroirs >>, groupe.rs et transport.rs). Le fait:
+# sur ce runner, le compte qui lance les recettes est le compte predefini de
+# la machine (l'administrateur integre, RID 500), et le processus est eleve,
+# Administrateurs actifs dans son jeton. Un miroir nomme le compte des
+# recettes la ou le daemon nommerait le groupe: il n'a de sens que pour un
+# compte cree par un administrateur, non eleve, une mesure de poste de
+# developpement. Depuis, les sept s'abstiennent en le nommant quand cette
+# premisse manque, sous une seule raison, et toute autre erreur reste un
+# rouge. Les sept lignes qui suivent (quatre ici, puis miroir_..., puis les
+# deux un_rid_... et une_forme_..., a leur rang de tri) sont des AVEUX au
+# sens de ce fichier: sur le runner, ces recettes ne mesurent rien. Ce qui
+# mesure a la place, sur ce meme runner: la recette du runner jetable
+# (bifrost-coquille, tests/groupe_d_acces.rs, BIFROST_RUNNER_JETABLE), qui
+# cree un vrai groupe et deux vrais comptes locaux et mesure sur eux ce que
+# les miroirs mesurent ailleurs (forme et domaine du groupe, forme
+# equivalente rendue canonique, RID predefini refuse, DACL du pipe lie,
+# ouverture et commandes d'un membre non eleve). Les sept lignes partent le
+# jour ou le compte des recettes du runner sera un compte cree, ou celui ou
+# les miroirs n'existeront plus; une garde de bifrost-ipc (groupe.rs) exige
+# qu'elles soient ici, sous cette forme exacte, tant que les sept recettes
+# existent.
+SKIPPED le_client_s_ouvre_par_les_droits_que_le_groupe_accorde: le compte des recettes est un compte predefini de la machine, pas un compte cree par un administrateur: la recette miroir ne le mesure pas
+SKIPPED le_compte_courant_passe_la_forme_et_le_domaine: le compte des recettes est un compte predefini de la machine, pas un compte cree par un administrateur: la recette miroir ne le mesure pas
+SKIPPED le_descripteur_ajoute_une_seule_ace_pour_le_groupe: le compte des recettes est un compte predefini de la machine, pas un compte cree par un administrateur: la recette miroir ne le mesure pas
+SKIPPED le_pipe_lie_porte_l_ace_du_groupe_et_rien_de_plus: le compte des recettes est un compte predefini de la machine, pas un compte cree par un administrateur: la recette miroir ne le mesure pas
 SKIPPED les_quatre_issues_de_la_sonde_tiennent_face_a_un_vrai_coeur: BIFROST_COEURS ne designe aucun repertoire: cette recette veut un vrai sing-box, que le depot ne distribue pas
+SKIPPED miroir_le_compte_du_groupe_echange_sans_pouvoir_ajouter_d_instance: le compte des recettes est un compte predefini de la machine, pas un compte cree par un administrateur: la recette miroir ne le mesure pas
 SKIPPED un_chemin_etroit_est_vu_comme_tel: BIFROST_CHEMIN_ETROIT absent, aucune interface a MTU reduit a viser
+SKIPPED un_rid_predefini_de_la_machine_est_refuse: le compte des recettes est un compte predefini de la machine, pas un compte cree par un administrateur: la recette miroir ne le mesure pas
+SKIPPED une_forme_equivalente_est_jugee_et_rendue_sous_sa_forme_canonique: le compte des recettes est un compte predefini de la machine, pas un compte cree par un administrateur: la recette miroir ne le mesure pas
 SKIPPED: <CHEMIN> absente: le depot ne distribue aucun binaire tiers, la recuperer avec 'bifrost pilote recuperer'
 SKIPPED: l'enrobage qui fait passer la doublure pour sing-box est un script shell
 SKIPPED: le binaire minisign n'est pas installe sur cette machine

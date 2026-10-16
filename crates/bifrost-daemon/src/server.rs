@@ -6,6 +6,8 @@ use bifrost_core::TunnelConfig;
 use bifrost_ipc::protocol::{Command, Response};
 use bifrost_ipc::transport::{IpcError, IpcServer};
 use bifrost_ipc::{AuthPolicy, Connection};
+#[cfg(windows)]
+use bifrost_ipc::{ErreurGroupe, GroupeDAcces};
 
 use crate::supervisor::{Cmd, RoutageDeclare};
 
@@ -50,7 +52,7 @@ pub async fn serve(
 /// de `run` sans qu'il ait recu l'arret.
 pub async fn ecouter_et_servir<A>(
     socket: &str,
-    policy: AuthPolicy,
+    policy: impl Into<PolitiqueDuCanal>,
     profil: std::path::PathBuf,
     tx: Sender<Cmd>,
     signal: A,
@@ -61,14 +63,54 @@ where
     A: std::future::Future<Output = ()>,
 {
     use anyhow::Context as _;
+    let politique = policy.into();
     let service = async move {
-        let gid = policy.allowed_gid;
-        let ipc = IpcServer::bind(socket, policy, gid)
+        let ipc = politique
+            .ouvrir(socket)
             .await
             .with_context(|| format!("ecoute sur {socket}"))?;
         serve(ipc, tx, profil).await
     };
     servir_jusqu_a_l_arret(service, signal, arret, superviseur).await
+}
+
+/// Ce que le daemon pose sur son canal: la politique d'autorisation et, sous
+/// Windows, le groupe d'acces du pipe, ou la raison pour laquelle il n'a pas
+/// ete retenu.
+///
+/// Un groupe refuse ne degrade pas en << aucun groupe >>: l'ouverture de
+/// l'ecoute rend son erreur, que [`ecouter_et_servir`] traite comme une erreur
+/// de `bind` (arret du superviseur, puis code de sortie non nul). `run` le
+/// juge d'ailleurs avant de lancer le superviseur; ce second jugement ne sert
+/// que si le groupe disparait entre les deux.
+#[derive(Debug)]
+pub struct PolitiqueDuCanal {
+    auth: AuthPolicy,
+    #[cfg(windows)]
+    groupe: Result<Option<GroupeDAcces>, ErreurGroupe>,
+}
+
+impl From<AuthPolicy> for PolitiqueDuCanal {
+    /// Une politique sans groupe d'acces: celle des recettes.
+    fn from(auth: AuthPolicy) -> Self {
+        Self {
+            auth,
+            #[cfg(windows)]
+            groupe: Ok(None),
+        }
+    }
+}
+
+impl PolitiqueDuCanal {
+    /// Ouvre l'ecoute: le socket, au groupe `allowed_gid` sous Linux; le
+    /// pipe, au groupe d'acces sous Windows.
+    async fn ouvrir(self, socket: &str) -> anyhow::Result<IpcServer> {
+        #[cfg(unix)]
+        let groupe = self.auth.allowed_gid;
+        #[cfg(windows)]
+        let groupe = self.groupe?;
+        Ok(IpcServer::bind(socket, self.auth, groupe).await?)
+    }
 }
 
 /// Sert jusqu'a l'arret, puis arrete le superviseur, quelle que soit la cause
@@ -132,9 +174,16 @@ async fn handle(
         };
 
         // Toute commande privilegiee est tracee avec son appelant: sans cela il
-        // est impossible de savoir apres coup qui a coupe le tunnel.
+        // est impossible de savoir apres coup qui a coupe le tunnel. Sous
+        // Windows, le niveau dit si c'etait un administrateur ou un membre du
+        // groupe d'acces; sous Linux, il est toujours complet.
         if request.command.is_mutating() {
-            tracing::info!(peer = %peer, command = request.command.name(), "commande privilegiee");
+            tracing::info!(
+                peer = %peer,
+                niveau = conn.niveau().nom(),
+                command = request.command.name(),
+                "commande privilegiee"
+            );
         }
 
         let response = dispatch(request.command, &tx, &profil).await;
@@ -172,17 +221,19 @@ async fn dispatch(command: Command, tx: &Sender<Cmd>, profil: &std::path::Path) 
         },
         // Par `ask`, comme `Status`, et pour une raison de plus: la reponse
         // vient du thread qui appelle le moteur, donc elle ne peut pas etre
-        // lue au milieu d'une application. Aucun controle d'acces propre: ce
-        // canal n'en a qu'un, a l'acceptation, et il vaut pour toutes les
-        // commandes.
+        // lue au milieu d'une application. Aucun controle d'acces propre a
+        // cette branche: l'acceptation a juge l'appelant, et sous Windows le
+        // transport a deja applique la decision par commande
+        // (`bifrost_ipc::appelant`), qui reserve celle-ci aux
+        // administrateurs.
         Command::DeclarationPareFeu => match ask(tx, Cmd::Declaration).await {
             Ok(declaration) => Response::DeclarationPareFeu(Box::new(declaration)),
             Err(e) => Response::error(e),
         },
         // Meme voie que `DeclarationPareFeu` et pour la meme raison: la reponse
         // vient du thread qui fait monter et demonter le tunnel, donc elle ne
-        // peut pas etre lue au milieu d'un montage. Un seul controle d'acces, a
-        // l'acceptation, vaut pour toutes les commandes.
+        // peut pas etre lue au milieu d'un montage. Le controle d'acces est
+        // celui de `DeclarationPareFeu`.
         Command::DeclarationRoutage => match ask(tx, Cmd::DeclarationRoutage).await {
             Ok(RoutageDeclare::Linux(declaration)) => {
                 Response::DeclarationRoutage(Box::new(declaration))
@@ -271,12 +322,36 @@ where
         .map_err(|_| "le superviseur n'a pas repondu".to_owned())
 }
 
-/// Politique d'autorisation construite depuis le nom d'un groupe systeme.
-pub fn auth_policy(group: Option<&str>) -> AuthPolicy {
-    AuthPolicy {
-        allowed_gid: resolve_gid(group),
-        ..AuthPolicy::default()
+/// Politique du canal construite depuis le nom d'un groupe systeme: le gid
+/// autorise sous Linux, le groupe d'acces du pipe sous Windows.
+pub fn auth_policy(group: Option<&str>) -> PolitiqueDuCanal {
+    PolitiqueDuCanal {
+        auth: AuthPolicy {
+            allowed_gid: resolve_gid(group),
+            ..AuthPolicy::default()
+        },
+        #[cfg(windows)]
+        groupe: groupe_d_acces(group),
     }
+}
+
+/// Le groupe d'acces du pipe, sous Windows: `--group`, resolu et juge par
+/// [`GroupeDAcces::resoudre`] (un groupe cree localement par un
+/// administrateur, jamais un compte ou un groupe predefini). Sans `--group`,
+/// aucun: le pipe n'admet que SYSTEM et les Administrateurs. Un groupe
+/// introuvable ou refuse rend son erreur, qui arrete le daemon.
+#[cfg(windows)]
+pub fn groupe_d_acces(group: Option<&str>) -> Result<Option<GroupeDAcces>, ErreurGroupe> {
+    let Some(nom) = group else {
+        return Ok(None);
+    };
+    let groupe = GroupeDAcces::resoudre(nom)?;
+    tracing::info!(
+        group = nom,
+        sid = groupe.sid(),
+        "groupe d'acces du canal retenu"
+    );
+    Ok(Some(groupe))
 }
 
 #[cfg(unix)]
@@ -298,12 +373,9 @@ fn resolve_gid(group: Option<&str>) -> Option<u32> {
 }
 
 /// Sur Windows l'autorisation est portee par la DACL du named pipe, pas par un
-/// groupe applicatif: un processus non privilegie ne peut meme pas l'ouvrir.
+/// gid: `--group` y designe le groupe d'acces du pipe ([`groupe_d_acces`]).
 #[cfg(not(unix))]
-fn resolve_gid(group: Option<&str>) -> Option<u32> {
-    if group.is_some() {
-        tracing::warn!("--group est ignore sur Windows: la DACL du pipe fait foi");
-    }
+fn resolve_gid(_group: Option<&str>) -> Option<u32> {
     None
 }
 
@@ -650,6 +722,94 @@ upstream = ["10.2.0.1"]
                     .any(|c| matches!(c.downcast_ref::<IpcError>(), Some(IpcError::Io(_)))),
                 "l'erreur rendue doit etre celle de bind: {e:#}"
             );
+        }
+
+        /// Sous Windows, un `--group` que le jugement du groupe d'acces refuse:
+        /// l'ecoute ne s'ouvre pas, le superviseur recoit l'arret et est
+        /// joint, puis l'erreur est rendue, et elle nomme le groupe. Le daemon
+        /// ne sert jamais sans le groupe qu'on lui a designe, ni a sa place un
+        /// groupe plus large. Trois refus: Everyone ecrit avec un zero de
+        /// tete, le groupe integre des utilisateurs, un nom que la machine ne
+        /// connait pas. Le nom du pipe reste libre: aucune instance n'a ete
+        /// creee.
+        #[cfg(windows)]
+        #[tokio::test]
+        async fn un_groupe_d_acces_refuse_arrete_le_superviseur_puis_est_rendu() {
+            let absent = format!("bifrost-groupe-absent-{}", std::process::id());
+            for (rang, groupe) in ["S-1-1-00", "S-1-5-32-545", absent.as_str()]
+                .into_iter()
+                .enumerate()
+            {
+                let socket = format!(
+                    r"\\.\pipe\bifrost-arret-groupe-{}-{rang}",
+                    std::process::id()
+                );
+                let (tx, fil, recu) = faux_superviseur();
+                let issue = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    ecouter_et_servir(
+                        &socket,
+                        auth_policy(Some(groupe)),
+                        std::path::PathBuf::from("/inexistant"),
+                        tx.clone(),
+                        std::future::pending(),
+                        tx,
+                        fil,
+                    ),
+                )
+                .await;
+                let vu = *recu.lock().unwrap();
+                let issue = issue.unwrap_or_else(|_| {
+                    panic!("{groupe}: le daemon sert au lieu de refuser ce groupe d'acces")
+                });
+                assert_eq!(vu, Some("shutdown"), "{groupe}");
+                let e = issue.expect_err("le refus du groupe doit etre rendu");
+                assert!(
+                    e.chain()
+                        .any(|c| c.downcast_ref::<ErreurGroupe>().is_some()),
+                    "{groupe}: l'erreur rendue doit etre celle du groupe: {e:#}"
+                );
+                assert!(
+                    format!("{e:#}").contains(groupe),
+                    "le message doit nommer le groupe: {e:#}"
+                );
+                IpcServer::bind(&socket, AuthPolicy::default(), None)
+                    .await
+                    .unwrap_or_else(|e| {
+                        panic!("{groupe}: le pipe a ete cree malgre le refus: {e}")
+                    });
+            }
+        }
+
+        /// L'ecoute pose sur le pipe le groupe que le daemon a retenu: `ouvrir`
+        /// passe a `IpcServer::bind` le groupe rendu par le jugement, jamais
+        /// `None` a sa place. Une lecture du texte, sur chaque hote:
+        /// dev-windows n'a aucun groupe admissible et ne peut pas en creer,
+        /// donc aucune recette n'y lie une ecoute du daemon avec un groupe
+        /// retenu.
+        #[test]
+        fn l_ecoute_pose_sur_le_pipe_le_groupe_retenu() {
+            let source = include_str!("server.rs");
+            let debut = source
+                .find("    async fn ouvrir(self, socket: &str)")
+                .expect("PolitiqueDuCanal::ouvrir dans server.rs");
+            let fin = debut + source[debut..].find("\n    }\n").expect("fin de ouvrir");
+            let corps: String = source[debut..fin]
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("//"))
+                .flat_map(|l| l.chars())
+                .filter(|c| !c.is_whitespace())
+                .collect();
+            for attendu in [
+                "#[cfg(windows)]letgroupe=self.groupe?;",
+                "Ok(IpcServer::bind(socket,self.auth,groupe).await?)",
+            ] {
+                assert_eq!(
+                    corps.matches(attendu).count(),
+                    1,
+                    "`{attendu}` dans ouvrir: {corps}"
+                );
+            }
         }
 
         /// Un fichier de recette, retire a la fin.

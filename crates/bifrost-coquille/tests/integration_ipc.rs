@@ -12,6 +12,8 @@
 //! - Un canal qui existe et ne prend aucune connexion de plus est << sans
 //!   reponse dans le delai >>, et un canal absent est injoignable: deux etats
 //!   distincts, aucun vert.
+//! - Un canal qui existe et dont les droits ferment l'ouverture a ce compte
+//!   rend le compte << non admis par le canal >>: ni injoignable, ni vert.
 //!
 //! Le dialogue avec un vrai `IpcServer` sous Windows est dans
 //! `tests/eleve_ipc.rs`, un binaire a part: il modifie le jeton de son
@@ -307,6 +309,96 @@ async fn un_canal_occupe_est_sans_reponse_et_un_canal_absent_injoignable() {
     assert_eq!(vue_personne.etat, EtatVue::DaemonInjoignable);
     assert_ne!(vue_pris.couleur, CouleurTray::Vert);
     assert_ne!(vue_personne.couleur, CouleurTray::Vert);
+}
+
+/// Un canal qui existe, et dont les droits ferment l'ouverture a ce compte.
+/// Windows: un pipe a la DACL vide (`D:P`), qui n'accorde a personne ni la
+/// lecture ni l'ecriture, eleve ou non. Linux: un socket d'ecoute dont le
+/// fichier n'a plus aucun droit (mode 0), que `connect(2)` refuse a tout
+/// compte sauf root.
+struct Ferme {
+    socket: String,
+    #[cfg(windows)]
+    _tenu: tokio::net::windows::named_pipe::NamedPipeServer,
+    #[cfg(unix)]
+    _tenu: tokio::net::UnixListener,
+}
+
+#[cfg(windows)]
+fn ferme(nom: &str) -> Ferme {
+    let socket = format!(r"\\.\pipe\bifrost-coquille-{}-{nom}", std::process::id());
+    let tenu = windows::instance(&socket, "D:P", true).expect("pipe a la DACL vide");
+    Ferme {
+        socket,
+        _tenu: tenu,
+    }
+}
+
+#[cfg(unix)]
+fn ferme(nom: &str) -> Ferme {
+    use std::os::unix::fs::PermissionsExt;
+    let chemin = std::env::temp_dir().join(format!(
+        "bifrost-coquille-{}-{nom}.sock",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&chemin);
+    let ecoute = tokio::net::UnixListener::bind(&chemin).expect("ecoute de la recette");
+    std::fs::set_permissions(&chemin, std::fs::Permissions::from_mode(0o000))
+        .expect("droits du socket retires");
+    Ferme {
+        socket: chemin.to_string_lossy().into_owned(),
+        _tenu: ecoute,
+    }
+}
+
+#[cfg(unix)]
+impl Drop for Ferme {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.socket);
+    }
+}
+
+/// Le compte que le canal refuse a l'ouverture est << non admis par le
+/// canal >>, sur les trois commandes: ni injoignable, ni vert, sans action
+/// proposee. C'est l'etat d'un compte hors du groupe d'acces du pipe, ou hors
+/// du groupe du socket. Root passe outre les droits d'un fichier: sous root,
+/// la recette mesure que le socket s'ouvre, ce qui est la limite de la
+/// mesure sous ce compte.
+#[tokio::test(flavor = "multi_thread")]
+async fn un_canal_qui_refuse_ce_compte_le_rend_non_admis() {
+    let canal = ferme("ferme");
+    #[cfg(unix)]
+    if serveur_privilegie() {
+        assert!(
+            std::os::unix::net::UnixStream::connect(&canal.socket).is_ok(),
+            "root n'ouvre pas un socket au mode 0"
+        );
+        return;
+    }
+    let poste = Commande::new(canal.socket.clone());
+    let issues = [
+        ("status", poste.etat().await.map(|_| ())),
+        ("connect-stored", poste.connecter().await),
+        ("disconnect", poste.deconnecter().await),
+    ];
+    for (commande, issue) in issues {
+        let e = issue.expect_err("un canal ferme a ce compte ne repond pas");
+        assert!(
+            matches!(e, ErreurCommande::CompteNonAdmis(_)),
+            "{commande}: {e:?}"
+        );
+        let vue = Vue::depuis_erreur(&e);
+        assert_eq!(vue.etat, EtatVue::CompteNonAdmis, "{commande}");
+        assert_ne!(vue.couleur, CouleurTray::Vert, "{commande}");
+        assert!(!vue.peut_connecter && !vue.peut_deconnecter, "{commande}");
+        for texte in [
+            &vue.texte_etat,
+            &vue.texte_kill_switch,
+            &vue.texte_menu_etat,
+        ] {
+            assert!(!texte.contains("injoignable"), "{commande}: {texte}");
+        }
+    }
 }
 
 #[cfg(windows)]

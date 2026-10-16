@@ -19,6 +19,13 @@ Idempotent: rejouable sur une installation existante. Le service est retire
 puis recree, parce que sa ligne de commande NOMME le resolveur chiffre et
 change donc avec lui.
 
+Le groupe local Bifrost est le groupe d'acces du canal du daemon: ses membres,
+sans elevation, par la coquille ou la CLI, demandent l'etat du service, le
+connectent sur le profil qu'il detient et le deconnectent; toute autre
+commande reste a SYSTEM et aux Administrateurs actifs. Le script le cree VIDE
+s'il n'existe pas, et ne touche jamais a ses membres; le daemon le juge a
+l'installation et inscrit son SID dans la ligne du service.
+
 .PARAMETER Binaires
 Repertoire contenant bifrost-daemon.exe et bifrost-cli.exe. Par defaut
 target\release a la racine du depot.
@@ -74,13 +81,19 @@ $SID_SYSTEM = '*S-1-5-18'
 $SID_ADMINS = '*S-1-5-32-544'
 # 11b-2: le compte de service du resolveur chiffre, NT AUTHORITY\LocalService.
 $SID_LOCALSERVICE = '*S-1-5-19'
-# Le seul NOM que l'installateur passe au daemon, et sous sa forme CANONIQUE.
+# Un des deux NOMS que l'installateur passe au daemon, sous sa forme CANONIQUE.
 # Mesure du 06/09/2026 sur essai-windows, locale francaise: LookupAccountNameW
 # resout 'LocalService' (et 'NT AUTHORITY\LocalService'); le nom AFFICHE
 # localise, lui, ne se resout pas. Ne jamais passer un nom affiche: il change
 # avec la langue de la machine. Le daemon le resout a l'installation et refuse
 # un nom inconnu (scm::install).
 $CompteResolveur = 'LocalService'
+# L'autre: le groupe d'acces du canal, un groupe LOCAL que ce script cree. Son
+# nom ne se traduit pas, puisque c'est nous qui le donnons. Le daemon le juge
+# a l'installation (un groupe cree localement par un administrateur, jamais un
+# groupe predefini) et inscrit dans la ligne du service la forme canonique de
+# son SID, pas ce nom.
+$GroupeAcces = 'Bifrost'
 
 function Ok    ([string] $m) { Write-Host ('  OK    {0}' -f $m) }
 function Info  ([string] $m) { Write-Host ('  ..    {0}' -f $m) }
@@ -138,6 +151,12 @@ if ($Resolveur -and -not (Test-Path -LiteralPath $Resolveur -PathType Leaf)) {
 }
 if ($Pilote -and -not (Test-Path -LiteralPath $Pilote -PathType Leaf)) {
     throw "-Pilote $Pilote n'existe pas"
+}
+# Un compte local qui porterait deja le nom du groupe d'acces empecherait de le
+# creer, et le daemon refuserait un utilisateur comme groupe d'acces: refuse
+# ici, avant la premiere ecriture.
+if (Get-LocalUser -Name $GroupeAcces -ErrorAction SilentlyContinue) {
+    throw "un compte local s'appelle deja ${GroupeAcces}, le groupe d'acces du canal ne peut pas porter ce nom"
 }
 
 Etape 'Repertoires'
@@ -288,6 +307,22 @@ if ($Resolveur) {
 # la lecture du repertoire, que le daemon repose a chaque lancement
 # (demarrer_sous_compte).
 
+Etape "Groupe d'acces du canal"
+# Cree VIDE s'il n'existe pas, laisse tel quel s'il existe: ses membres sont
+# une decision de l'administrateur, que rejouer l'installation ne defait pas.
+# Ce que le groupe peut: ouvrir le canal du daemon sans elevation, y demander
+# l'etat, connecter le profil que le daemon detient, deconnecter. Le reste lui
+# est ferme: toute autre commande, que le daemon reserve aux administrateurs,
+# et la creation d'une instance du pipe ou la retouche de son descripteur
+# (voir la DACL que pose le daemon).
+$groupe = Get-LocalGroup -Name $GroupeAcces -ErrorAction SilentlyContinue
+if ($groupe) {
+    Info "groupe local $GroupeAcces existe deja, membres conserves"
+} else {
+    New-LocalGroup -Name $GroupeAcces -Description "Comptes admis, sans elevation, a l'etat, a la connexion et a la deconnexion du service $NomService" | Out-Null
+    Ok "groupe local $GroupeAcces cree, vide"
+}
+
 Etape 'Service'
 $existant = Get-Service -Name $NomService -ErrorAction SilentlyContinue
 if ($existant) {
@@ -312,6 +347,9 @@ if (Test-Path -LiteralPath $ResolveurInstalle -PathType Leaf) {
     # laisser le service echouer a son premier demarrage.
     $arguments += @('--resolveur-binaire', $ResolveurInstalle, '--resolveur-utilisateur', $CompteResolveur)
 }
+# Le groupe d'acces, toujours: le daemon le juge et refuse l'installation s'il
+# n'est pas un groupe cree localement par un administrateur.
+$arguments += @('--group', $GroupeAcces)
 & $Daemon @arguments
 if ($LASTEXITCODE -ne 0) { throw "installation du service impossible (code $LASTEXITCODE)" }
 
@@ -324,6 +362,13 @@ Write-Host ''
 Write-Host 'Il est enregistre en demarrage AUTOMATIQUE: il partira de lui-meme au'
 Write-Host 'prochain redemarrage. Armer le kill switch coupe tout trafic hors tunnel,'
 Write-Host 'session distante comprise.'
+Write-Host ''
+Write-Host "Les membres du groupe local $GroupeAcces, sans elevation (coquille, CLI),"
+Write-Host 'demandent l etat du service, le connectent sur le profil enregistre et le'
+Write-Host 'deconnectent; toute autre commande reste aux administrateurs, et les autres'
+Write-Host 'comptes ordinaires sont refuses par le canal.'
+Write-Host "  Add-LocalGroupMember -Group $GroupeAcces -Member <compte>"
+Write-Host 'L appartenance vaut a la prochaine ouverture de session du compte.'
 if (-not (Test-Path -LiteralPath $PiloteInstalle -PathType Leaf)) {
     Write-Host ''
     Write-Host 'ATTENTION: wireguard.dll manque dans le repertoire d installation, donc'

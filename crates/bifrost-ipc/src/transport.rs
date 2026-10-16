@@ -2,7 +2,10 @@
 //!
 //! Les deux cotes appliquent la meme regle: le canal n'est joignable que par
 //! les identites autorisees, et la verification se fait a l'acceptation, avant
-//! de lire le moindre octet du client.
+//! de lire le moindre octet du client. Sous Windows, une seconde decision
+//! suit, par requete: l'appelant est identifie sur le jeton que le canal
+//! presente, et un membre du groupe d'acces n'obtient que trois commandes
+//! (`crate::appelant`); Linux n'a que la premiere.
 
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
@@ -689,6 +692,14 @@ mod imp {
             &self.peer
         }
 
+        /// Sous Linux, tout appelant que le socket admet a tout le canal:
+        /// root, un uid autorise, un membre du groupe `bifrost`. Rien ne
+        /// change par rapport a l'acceptation, et `recv` n'applique aucune
+        /// decision par commande.
+        pub fn niveau(&self) -> crate::appelant::NiveauDAppelant {
+            crate::appelant::NiveauDAppelant::Complet
+        }
+
         /// La requete suivante, lue dans `DELAI_REQUETE`. Au-dela, `recv`
         /// rend [`IpcError::RequestTimeout`] et la connexion est a abandonner:
         /// une trame entamee a pu y etre lue en partie.
@@ -876,6 +887,56 @@ mod imp {
             );
         }
     }
+
+    /// Sous Linux, aucune decision par commande: tout appelant que le socket
+    /// admet a tout le canal, comme avant le groupe d'acces Windows.
+    #[cfg(test)]
+    mod tests_niveau_linux {
+        use super::*;
+        use crate::appelant::NiveauDAppelant;
+        use crate::appelant::tests::une_de_chaque;
+
+        /// Chaque commande du protocole, envoyee par un client admis, est
+        /// rendue au serveur telle quelle, et le niveau de l'appelant est le
+        /// niveau complet.
+        #[tokio::test]
+        async fn sous_linux_chaque_commande_est_rendue_au_serveur() {
+            // SAFETY: geteuid ne prend aucun argument et ne touche aucune memoire.
+            let euid = unsafe { libc::geteuid() };
+            for (rang, (commande, _)) in une_de_chaque().into_iter().enumerate() {
+                let path = std::env::temp_dir().join(format!(
+                    "bifrost-ipc-niveau-{}-{rang}.sock",
+                    std::process::id()
+                ));
+                let politique = AuthPolicy {
+                    allowed_uids: vec![0, euid],
+                    allowed_gid: None,
+                };
+                let mut serveur = IpcServer::bind(&path, politique, None).await.expect("bind");
+                let nom_commande = commande.name();
+                let cote_serveur = async {
+                    let mut connexion = serveur.accept().await?;
+                    let recue = connexion.recv().await?;
+                    connexion.send(&Response::Ok).await?;
+                    Ok::<_, IpcError>((recue.command.name(), connexion.niveau()))
+                };
+                let cote_client = async {
+                    let (mut client, _) =
+                        IpcClient::connect_verified(&path, ServerRequirement::Uid(euid)).await?;
+                    client.request(&Request::new(commande)).await
+                };
+                let (cote_serveur, cote_client) = tokio::join!(cote_serveur, cote_client);
+                let (rendue, niveau) =
+                    cote_serveur.unwrap_or_else(|e| panic!("{nom_commande}: serveur: {e}"));
+                assert_eq!(rendue, nom_commande);
+                assert_eq!(niveau, NiveauDAppelant::Complet, "{nom_commande}");
+                assert!(
+                    matches!(cote_client, Ok(Response::Ok)),
+                    "{nom_commande}: {cote_client:?}"
+                );
+            }
+        }
+    }
 }
 
 // --------------------------------------------------------------------------
@@ -885,16 +946,17 @@ mod imp {
 #[cfg(windows)]
 mod imp {
     use super::*;
+    use crate::appelant::{self, Identification, NiveauDAppelant};
+    use crate::groupe::GroupeDAcces;
     use std::ffi::c_void;
     use std::os::windows::io::{AsRawHandle, RawHandle};
     use std::path::Path;
     use std::time::{Duration, Instant};
-    use tokio::net::windows::named_pipe::{
-        ClientOptions, NamedPipeClient, NamedPipeServer, ServerOptions,
-    };
+    use tokio::net::windows::named_pipe::{NamedPipeClient, NamedPipeServer, ServerOptions};
     use windows_sys::Win32::Foundation::{
         ERROR_COMMITMENT_LIMIT, ERROR_NO_SYSTEM_RESOURCES, ERROR_NOT_ENOUGH_MEMORY,
-        ERROR_NOT_ENOUGH_QUOTA, ERROR_OUTOFMEMORY, ERROR_PIPE_BUSY, LocalFree,
+        ERROR_NOT_ENOUGH_QUOTA, ERROR_OUTOFMEMORY, ERROR_PIPE_BUSY, INVALID_HANDLE_VALUE,
+        LocalFree,
     };
     use windows_sys::Win32::Security::Authorization::{
         ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1,
@@ -904,14 +966,70 @@ mod imp {
         IsWellKnownSid, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
         SECURITY_ATTRIBUTES, WinBuiltinAdministratorsSid, WinLocalSystemSid,
     };
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_FLAG_OVERLAPPED, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_WRITE_DATA,
+        OPEN_EXISTING, READ_CONTROL, SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT, SYNCHRONIZE,
+    };
 
-    /// SDDL du named pipe.
+    /// SDDL du named pipe, sans groupe d'acces.
     ///
     /// `D:P` protege le descripteur de tout heritage, puis on n'accorde
     /// GENERIC_ALL qu'a SYSTEM (SY) et aux Administrateurs (BA). Aucune ACE
     /// pour Everyone: un processus non privilegie ne peut meme pas ouvrir le
-    /// pipe, l'autorisation applicative n'a donc jamais a le refuser.
+    /// pipe, l'autorisation applicative n'a donc jamais a le refuser. Un
+    /// groupe d'acces y ajoute une ACE, et une seule
+    /// ([`descripteur_du_pipe`]).
     const PIPE_SDDL: &str = "D:P(A;;GA;;;SY)(A;;GA;;;BA)";
+
+    /// Les droits de l'ACE du groupe d'acces: lire et ecrire sur le canal,
+    /// lire ses attributs et son descripteur, se synchroniser sur lui; 0x120083.
+    /// Rien d'autre, et d'abord pas `FILE_CREATE_PIPE_INSTANCE` (0x4, la meme
+    /// valeur que `FILE_APPEND_DATA`): un membre qui creerait une instance du
+    /// pipe servirait lui-meme les clients suivants, sous le proprietaire du
+    /// daemon, que `connect_verified` admet.
+    ///
+    /// Mesure du 16/10/2026 sur dev-windows, par une sonde hors du depot qui
+    /// pose cette ACE pour son propre compte, non eleve, et neutralise ses
+    /// droits implicites de proprietaire (une ACE `OW`):
+    ///
+    /// - 0x120083: aucune instance de plus (`ERROR_ACCESS_DENIED`); ouverture
+    ///   par [`ACCES_DU_CLIENT`], proprietaire lu, echange dans les deux sens;
+    /// - sans `FILE_READ_ATTRIBUTES` (0x120003) ou sans `SYNCHRONIZE`
+    ///   (0x20083): aucune ouverture, quels que soient les droits demandes;
+    /// - sans `READ_CONTROL` (0x100083): le proprietaire du pipe ne se lit
+    ///   plus, et `connect_verified` refuserait tout;
+    /// - une instance de plus, en `PIPE_ACCESS_DUPLEX` comme celles du
+    ///   daemon, demande le bit 0x4 ET les droits 0x8, 0x10 et 0x100
+    ///   (0x12019f). Le bit 0x4 seul (0x120087) ne la donne pas: la garde de ce
+    ///   masque est donc structurelle (aucun bit 0x4, ni masque complet, ni
+    ///   `GENERIC_ALL`), et la recette miroir mesure le refus.
+    pub(super) const MASQUE_DU_GROUPE: u32 =
+        FILE_READ_DATA | FILE_WRITE_DATA | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE;
+
+    /// Les droits que le client demande a l'ouverture: lire, ecrire, et lire
+    /// le descripteur, dont `connect_verified` tire le proprietaire; 0x20003.
+    ///
+    /// Pas `GENERIC_READ | GENERIC_WRITE`: le pipe traduit `GENERIC_WRITE` en
+    /// droits que le groupe d'acces n'a pas (0x10 et 0x100), et un membre se
+    /// verrait refuser l'ouverture (mesure du 16/10/2026 sur dev-windows:
+    /// `GENERIC_WRITE` refuse a 0x120083, admis a 0x120193, sans le bit 0x4).
+    /// Ces trois droits sont compris dans ceux de SYSTEM et des
+    /// Administrateurs: pour eux rien ne change. Le systeme y ajoute de
+    /// lui-meme `SYNCHRONIZE` et `FILE_READ_ATTRIBUTES`, que le masque du
+    /// groupe accorde.
+    pub(super) const ACCES_DU_CLIENT: u32 = FILE_READ_DATA | FILE_WRITE_DATA | READ_CONTROL;
+
+    /// Le descripteur du pipe du daemon: [`PIPE_SDDL`] tel quel sans groupe
+    /// d'acces; avec un groupe, [`PIPE_SDDL`] suivi d'UNE ACE d'autorisation
+    /// pour lui, au [`MASQUE_DU_GROUPE`]. Le SID y entre sous la forme
+    /// canonique que le systeme a rendue, la seule qu'un [`GroupeDAcces`]
+    /// porte: aucune chaine tapee n'atteint ce texte.
+    pub(super) fn descripteur_du_pipe(groupe: Option<&GroupeDAcces>) -> String {
+        match groupe {
+            None => PIPE_SDDL.to_owned(),
+            Some(g) => format!("{PIPE_SDDL}(A;;{MASQUE_DU_GROUPE:#x};;;{})", g.sid()),
+        }
+    }
 
     /// Le descripteur des serveurs de recette: celui du daemon, plus une ACE
     /// pour le proprietaire du pipe (`OW`), c'est-a-dire le compte qui le
@@ -938,8 +1056,9 @@ mod imp {
     pub struct IpcServer {
         path: String,
         policy: AuthPolicy,
-        /// Le descripteur de CHAQUE instance: [`PIPE_SDDL`], pose par `bind`.
-        sddl: &'static str,
+        /// Le descripteur de CHAQUE instance: [`descripteur_du_pipe`], pose
+        /// par `bind`.
+        sddl: String,
         /// [`DELAI_REQUETE`]; les recettes le raccourcissent.
         pub(super) delai_requete: std::time::Duration,
         /// L'instance qui attend le client suivant. Toujours presente: c'est
@@ -990,22 +1109,35 @@ mod imp {
     }
 
     impl IpcServer {
+        /// Ouvre l'ecoute sur le pipe `path`, au descripteur
+        /// [`descripteur_du_pipe`]: SYSTEM et les Administrateurs, plus le
+        /// groupe d'acces s'il y en a un. `groupe` ne se construit que par
+        /// [`GroupeDAcces::resoudre`], qui n'admet qu'un groupe cree
+        /// localement par un administrateur.
         pub async fn bind(
             path: impl AsRef<Path>,
             policy: AuthPolicy,
-            _group: Option<u32>,
+            groupe: Option<GroupeDAcces>,
         ) -> Result<Self> {
-            Self::bind_avec_descripteur(path.as_ref(), policy, PIPE_SDDL)
+            if let Some(g) = &groupe {
+                tracing::info!(groupe = g.sid(), "groupe d'acces du canal");
+            }
+            Self::bind_avec_descripteur(
+                path.as_ref(),
+                policy,
+                &descripteur_du_pipe(groupe.as_ref()),
+            )
         }
 
         /// Le corps de `bind`, le descripteur en parametre. Le daemon n'en
-        /// passe jamais d'autre que [`PIPE_SDDL`]; les recettes, si: un
-        /// compte non eleve n'ouvre pas le pipe du daemon, et c'est pourtant
-        /// sous ce compte qu'elles mesurent l'acceptation et le client.
+        /// passe jamais d'autre que [`descripteur_du_pipe`]; les recettes, si:
+        /// un compte non eleve n'ouvre pas le pipe du daemon, et c'est
+        /// pourtant sous ce compte qu'elles mesurent l'acceptation et le
+        /// client.
         pub(super) fn bind_avec_descripteur(
             path: &Path,
             policy: AuthPolicy,
-            sddl: &'static str,
+            sddl: &str,
         ) -> Result<Self> {
             let path = path.to_string_lossy().into_owned();
             // La premiere instance est creee avec first_pipe_instance pour
@@ -1015,7 +1147,7 @@ mod imp {
             Ok(Self {
                 path,
                 policy,
-                sddl,
+                sddl: sddl.to_owned(),
                 delai_requete: DELAI_REQUETE,
                 next,
                 journal: Journal::default(),
@@ -1074,7 +1206,7 @@ mod imp {
             if let Some(e) = self.panne.as_mut().and_then(|p| p(Etape::InstanceSuivante)) {
                 return Err(e.into());
             }
-            create_pipe(&self.path, self.sddl, false)
+            create_pipe(&self.path, &self.sddl, false)
         }
 
         pub fn path(&self) -> &Path {
@@ -1088,9 +1220,9 @@ mod imp {
 
     /// Cree une instance du pipe `path` avec le descripteur `sddl`.
     ///
-    /// Le chemin du daemon (`PIPE_SDDL`) et celui des recettes qui fabriquent
-    /// un pipe d'un autre proprietaire: le meme appel, pour que ce qu'elles
-    /// mesurent soit ce que le daemon fait.
+    /// Le chemin du daemon ([`descripteur_du_pipe`]) et celui des recettes qui
+    /// fabriquent un pipe d'un autre proprietaire: le meme appel, pour que ce
+    /// qu'elles mesurent soit ce que le daemon fait.
     fn create_pipe(path: &str, sddl: &str, first: bool) -> Result<NamedPipeServer> {
         let mut wide: Vec<u16> = sddl.encode_utf16().collect();
         wide.push(0);
@@ -1134,9 +1266,10 @@ mod imp {
         Ok(result?)
     }
 
-    /// Sur Windows, l'autorisation est portee par la DACL du pipe: seuls SYSTEM
-    /// et les Administrateurs peuvent l'ouvrir. L'identite retournee sert a la
-    /// journalisation, pas a la decision.
+    /// Sur Windows, l'autorisation est portee par la DACL du pipe: seuls SYSTEM,
+    /// les Administrateurs et les membres du groupe d'acces, s'il y en a un,
+    /// peuvent l'ouvrir. L'identite retournee sert a la journalisation, pas a
+    /// la decision.
     fn peer_identity(_server: &NamedPipeServer) -> PeerIdentity {
         PeerIdentity {
             uid: 0,
@@ -1151,16 +1284,27 @@ mod imp {
         writer: tokio::io::WriteHalf<NamedPipeServer>,
         peer: PeerIdentity,
         delai: std::time::Duration,
+        /// La poignee de l'instance, pour identifier le client: `reader` et
+        /// `writer` la tiennent ouverte aussi longtemps que la connexion.
+        /// Un entier et non un pointeur, pour que la connexion passe d'une
+        /// tache a l'autre.
+        poignee: isize,
+        /// L'identification de l'appelant de la derniere requete lue; aucune
+        /// avant la premiere.
+        identification: Option<Identification>,
     }
 
     impl Connection {
         fn new(pipe: NamedPipeServer, peer: PeerIdentity, delai: std::time::Duration) -> Self {
+            let poignee = pipe.as_raw_handle() as isize;
             let (r, w) = tokio::io::split(pipe);
             Self {
                 reader: BufReader::new(r),
                 writer: w,
                 peer,
                 delai,
+                poignee,
+                identification: None,
             }
         }
 
@@ -1168,16 +1312,61 @@ mod imp {
             &self.peer
         }
 
+        /// L'identification de l'appelant de la derniere requete lue par
+        /// `recv`, `None` avant la premiere.
+        pub fn identification(&self) -> Option<Identification> {
+            self.identification
+        }
+
+        /// Ce que l'appelant de la derniere requete peut demander:
+        /// [`appelant::niveau_lu`] de son identification, et le niveau
+        /// restreint tant qu'aucune requete n'a ete lue.
+        pub fn niveau(&self) -> NiveauDAppelant {
+            self.identification
+                .map_or(NiveauDAppelant::Restreint, appelant::niveau_lu)
+        }
+
         /// Meme contrat que la version Unix: la requete suivante, lue dans
         /// `DELAI_REQUETE`, dans un runtime dont le pilote de temps est actif
-        /// (`enable_time`, ou `enable_all` comme le daemon).
+        /// (`enable_time`, ou `enable_all` comme le daemon). Et une decision
+        /// de plus, par requete.
+        ///
+        /// Chaque requete lue identifie son appelant (`appelant::identifier`,
+        /// sur le jeton que le canal presente), puis passe par
+        /// [`appelant::decider`]. Une commande admise est rendue. Une
+        /// commande refusee recoit ici sa reponse, le refus qui la nomme
+        /// ([`appelant::CommandeReservee`]), et la lecture passe a la requete
+        /// suivante: elle ne sort jamais du transport, et le serveur n'en
+        /// execute rien. L'identification et la decision n'attendent rien
+        /// (aucun `await`): le fil qui emprunte l'identite du client la rend
+        /// avant toute autre tache.
         pub async fn recv(&mut self) -> Result<Request> {
-            let bytes = read_request_frame(&mut self.reader, self.delai).await?;
-            let req: Request = serde_json::from_slice(&bytes)?;
-            if req.version != PROTOCOL_VERSION {
-                return Err(IpcError::VersionMismatch { got: req.version });
+            loop {
+                let bytes = read_request_frame(&mut self.reader, self.delai).await?;
+                let req: Request = serde_json::from_slice(&bytes)?;
+                if req.version != PROTOCOL_VERSION {
+                    return Err(IpcError::VersionMismatch { got: req.version });
+                }
+                let identification = appelant::identifier(self.poignee as RawHandle);
+                self.identification = Some(identification);
+                if let Identification::Impossible { etape, code } = identification {
+                    tracing::warn!(
+                        etape = etape.nom(),
+                        code,
+                        "appelant non identifie: niveau restreint"
+                    );
+                }
+                match appelant::decider(self.niveau(), &req.command) {
+                    Ok(()) => return Ok(req),
+                    Err(refus) => {
+                        tracing::warn!(
+                            command = refus.commande,
+                            "commande reservee aux administrateurs, refusee"
+                        );
+                        self.send(&Response::error(refus.to_string())).await?;
+                    }
+                }
             }
-            Ok(req)
         }
 
         pub async fn send(&mut self, response: &Response) -> Result<()> {
@@ -1277,12 +1466,44 @@ mod imp {
     async fn ouvrir_le_pipe(path: &str, borne: Duration) -> std::io::Result<NamedPipeClient> {
         let debut = Instant::now();
         loop {
-            match ClientOptions::new().open(path) {
+            match ouvrir_une_fois(path) {
                 Err(e) if e.raw_os_error() == Some(PIPE_OCCUPE) && debut.elapsed() < borne => {}
                 issue => return issue,
             }
             tokio::time::sleep(PAS_PIPE_OCCUPE).await;
         }
+    }
+
+    /// Une ouverture du pipe cote client, aux droits [`ACCES_DU_CLIENT`].
+    ///
+    /// Les drapeaux sont ceux que `ClientOptions` de tokio pose par defaut:
+    /// `SECURITY_IDENTIFICATION` (le serveur peut identifier le client, jamais
+    /// agir sous son identite) et `FILE_FLAG_OVERLAPPED`, qu'exige
+    /// `NamedPipeClient`. `ClientOptions` ne sait demander que `GENERIC_READ`
+    /// et `GENERIC_WRITE`, que le masque du groupe d'acces n'accorde pas.
+    fn ouvrir_une_fois(path: &str) -> std::io::Result<NamedPipeClient> {
+        let large: Vec<u16> = path.encode_utf16().chain(Some(0)).collect();
+        // SAFETY: `large` est une chaine UTF-16 terminee par un zero, vivante
+        // pendant l'appel; ni attributs de securite ni modele.
+        let poignee = unsafe {
+            CreateFileW(
+                large.as_ptr(),
+                ACCES_DU_CLIENT,
+                0,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                SECURITY_IDENTIFICATION | SECURITY_SQOS_PRESENT | FILE_FLAG_OVERLAPPED,
+                std::ptr::null_mut(),
+            )
+        };
+        if poignee == INVALID_HANDLE_VALUE {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: la poignee vient d'etre ouverte en mode recouvre et n'est
+        // tenue par rien d'autre; `NamedPipeClient` la prend et la ferme a sa
+        // destruction, y compris quand son enregistrement aupres du runtime
+        // echoue (la poignee de mio la ferme en tombant).
+        unsafe { NamedPipeClient::from_raw_handle(poignee as RawHandle) }
     }
 
     /// La decision, fonction pure du proprietaire lu et de l'exigence: celle
@@ -1317,8 +1538,9 @@ mod imp {
         /// regle qui ne se verifie qu'avec ce privilege-la ne sert pas.
         ///
         /// Le proprietaire, lui, se lit sur la poignee que le client tient
-        /// deja (`GetSecurityInfo`, `READ_CONTROL` etant compris dans
-        /// `GENERIC_READ`), et il ne se choisit pas: le noyau n'accepte comme
+        /// deja (`GetSecurityInfo`, `READ_CONTROL` etant l'un des droits que
+        /// le client demande, `ACCES_DU_CLIENT`), et il ne se choisit pas: le
+        /// noyau n'accepte comme
         /// proprietaire d'un objet cree que le compte du createur ou un groupe
         /// de son jeton marque `SE_GROUP_OWNER`, sauf privilege de
         /// restauration. Mesure le meme jour depuis un jeton non eleve: creer
@@ -1332,10 +1554,11 @@ mod imp {
         /// Ce que la regle ne dit pas: que le pipe est celui du daemon. Un
         /// pipe de LocalSystem dont la DACL laisse d'autres comptes creer des
         /// instances peut etre servi, instance par instance, par un tiers.
-        /// Celui du daemon ne le permet pas a un compte ordinaire
-        /// (`PIPE_SDDL`: SYSTEM et Administrateurs seulement), mais le permet
-        /// a un processus eleve: la regle stricte de la preuve n'ecarte donc
-        /// pas les Administrateurs pendant que le daemon tourne.
+        /// Celui du daemon ne le permet pas a un compte ordinaire (seuls
+        /// SYSTEM et les Administrateurs ont `FILE_CREATE_PIPE_INSTANCE`; le
+        /// groupe d'acces, s'il y en a un, ne l'a pas: `MASQUE_DU_GROUPE`),
+        /// mais le permet a un processus eleve: la regle stricte de la preuve
+        /// n'ecarte donc pas les Administrateurs pendant que le daemon tourne.
         ///
         /// # Un pipe occupe n'est pas un pipe absent
         ///
@@ -1422,7 +1645,7 @@ mod imp {
         /// est en refus seulement) comme dans celui d'un compte ordinaire; vrai
         /// dans un jeton eleve et sous SYSTEM. C'est la ligne de partage de la
         /// regle des commandes, lue par le systeme et non devinee.
-        fn administrateurs_actifs() -> bool {
+        pub(super) fn administrateurs_actifs() -> bool {
             let mut ba = sid(WinBuiltinAdministratorsSid);
             let mut membre = 0;
             // SAFETY: jeton nul, donc celui du fil ou une copie du jeton
@@ -1716,6 +1939,7 @@ mod imp {
         use super::tests_identite_serveur::attendu_du_client;
         use super::*;
         use std::sync::mpsc;
+        use tokio::net::windows::named_pipe::ClientOptions;
         use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND};
 
         fn nom(suffixe: &str) -> String {
@@ -2034,6 +2258,691 @@ mod imp {
                 ok != 0,
                 "Windows refuse le SDDL du pipe, donc le daemon ne demarrera \
                  pas: {PIPE_SDDL} ({erreur})"
+            );
+        }
+    }
+
+    /// Le groupe d'acces, mesure sous le compte qui lance les recettes.
+    ///
+    /// Un compte non eleve ne cree aucun groupe; il porte en revanche son
+    /// propre SID, de la forme d'un compte cree (`S-1-5-21-a-b-c-RID`). Les
+    /// recettes nomment donc ce SID la ou le daemon nommerait le groupe: le
+    /// descripteur est celui de `bind`, et ce que le compte peut y faire est
+    /// ce qu'un membre du groupe pourrait faire face au pipe du daemon.
+    /// L'appartenance a un vrai groupe, sous des jetons d'autres comptes, se
+    /// mesure sur le runner jetable (`bifrost-coquille`, `groupe_d_acces`).
+    ///
+    /// Ce sont des mesures de poste de developpement, a une premisse: le
+    /// compte qui lance les recettes est un compte cree de la machine. Quand
+    /// elle manque (le compte du runner de la CI est l'administrateur
+    /// integre, un compte predefini), les recettes qui en dependent
+    /// s'abstiennent en le nommant, sous une seule raison
+    /// (`GroupeDAcces::compte_pour_le_miroir`); deux d'entre elles, qui
+    /// mesurent l'ouverture du pipe par l'ACE du groupe seule, s'abstiennent
+    /// aussi quand les Administrateurs sont actifs dans le jeton, leur ACE
+    /// ouvrant tout. Toute autre issue reste un rouge.
+    #[cfg(test)]
+    mod tests_groupe_d_acces {
+        use super::tests_identite_serveur::administrateurs_actifs;
+        use super::*;
+        use crate::groupe::RAISON_ADMINISTRATEURS_ACTIFS;
+        use crate::protocol::Command;
+        use tokio::net::windows::named_pipe::ClientOptions;
+        use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, GENERIC_ALL};
+        use windows_sys::Win32::Security::{
+            ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, DACL_SECURITY_INFORMATION, EqualSid, GetAce,
+        };
+        use windows_sys::Win32::Storage::FileSystem::{FILE_ALL_ACCESS, FILE_CREATE_PIPE_INSTANCE};
+
+        /// `ACCESS_ALLOWED_ACE_TYPE`.
+        const ACE_D_AUTORISATION: u8 = 0;
+
+        /// Une ACE `OWNER RIGHTS` dont le masque n'ouvre rien d'utile au
+        /// canal: elle remplace les droits implicites du proprietaire
+        /// (`READ_CONTROL`, `WRITE_DAC`). Le compte des recettes cree le pipe
+        /// et en est donc proprietaire; un membre du groupe ne l'est pas du
+        /// pipe du daemon. Avec elle, il ne tient que ce que l'ACE du groupe
+        /// lui donne.
+        const PROPRIETAIRE_NEUTRALISE: &str = "(A;;0x8;;;OW)";
+
+        fn nom(suffixe: &str) -> String {
+            format!(
+                r"\\.\pipe\bifrost-ipc-groupe-{}-{suffixe}",
+                std::process::id()
+            )
+        }
+
+        /// Le compte des recettes comme groupe d'acces, pour une recette
+        /// miroir; `None` apres l'abstention nommee quand ce compte n'est pas
+        /// un compte cree de la machine (`GroupeDAcces::compte_pour_le_miroir`).
+        fn groupe_du_compte(recette: &str) -> Option<GroupeDAcces> {
+            GroupeDAcces::compte_pour_le_miroir(recette)
+        }
+
+        /// Le meme, pour les deux miroirs qui mesurent l'ouverture du pipe par
+        /// l'ACE du groupe seule: leur descripteur porte aussi `(A;;GA;;;BA)`,
+        /// et un jeton aux Administrateurs actifs ouvre tout par elle. Seconde
+        /// premisse, jugee apres la premiere, abstention nommee si elle
+        /// manque; sur le runner de la CI, c'est la premiere qui parle.
+        fn groupe_du_compte_sous_un_jeton_ordinaire(recette: &str) -> Option<GroupeDAcces> {
+            let groupe = groupe_du_compte(recette)?;
+            if administrateurs_actifs() {
+                println!("SKIPPED {recette}: {RAISON_ADMINISTRATEURS_ACTIFS}");
+                return None;
+            }
+            Some(groupe)
+        }
+
+        /// Une ACE lue dans la DACL d'un pipe: type, masque, SID.
+        struct AceLue {
+            genre: u8,
+            masque: u32,
+            sid: Vec<u8>,
+        }
+
+        /// La DACL du pipe que designe `poignee`, telle que le noyau la
+        /// garde: les masques y sont deja traduits (`GA` y devient 0x1f01ff).
+        fn dacl(poignee: RawHandle) -> Vec<AceLue> {
+            let mut liste: *mut ACL = std::ptr::null_mut();
+            let mut descripteur: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+            // SAFETY: la poignee est vivante; seule la DACL est demandee, les
+            // autres sorties sont nulles; `liste` pointe DANS `descripteur`,
+            // alloue par le systeme et libere ci-dessous.
+            let rc = unsafe {
+                GetSecurityInfo(
+                    poignee as _,
+                    SE_KERNEL_OBJECT,
+                    DACL_SECURITY_INFORMATION,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    &mut liste,
+                    std::ptr::null_mut(),
+                    &mut descripteur,
+                )
+            };
+            assert_eq!(rc, 0, "GetSecurityInfo(DACL)");
+            assert!(!liste.is_null(), "le pipe n'a pas de DACL");
+            let mut aces = Vec::new();
+            // SAFETY: `liste` est une ACL valide rendue par le systeme.
+            let nombre = unsafe { (*liste).AceCount };
+            for rang in 0..u32::from(nombre) {
+                let mut ace: *mut c_void = std::ptr::null_mut();
+                // SAFETY: `rang` est sous AceCount; `ace` pointe dans la liste.
+                let lue = unsafe { GetAce(liste, rang, &mut ace) };
+                assert!(lue != 0, "GetAce({rang})");
+                // SAFETY: toute ACE commence par son en-tete.
+                let entete = unsafe { *(ace as *const ACE_HEADER) };
+                assert_eq!(
+                    entete.AceType, ACE_D_AUTORISATION,
+                    "ACE {rang}: seules des autorisations sont attendues"
+                );
+                // SAFETY: une ACE d'autorisation a la forme ACCESS_ALLOWED_ACE,
+                // son SID commence a SidStart et finit avec l'ACE (AceSize).
+                let (masque, sid) = unsafe {
+                    let a = ace as *const ACCESS_ALLOWED_ACE;
+                    let debut = std::ptr::addr_of!((*a).SidStart) as *const u8;
+                    let longueur = usize::from(entete.AceSize) - 8;
+                    (
+                        (*a).Mask,
+                        std::slice::from_raw_parts(debut, longueur).to_vec(),
+                    )
+                };
+                aces.push(AceLue {
+                    genre: entete.AceType,
+                    masque,
+                    sid,
+                });
+            }
+            // SAFETY: `descripteur` a ete alloue par GetSecurityInfo; `liste`,
+            // qui pointe dedans, n'est plus lue.
+            unsafe { LocalFree(descripteur as _) };
+            aces
+        }
+
+        fn est(sid: &[u8], genre: windows_sys::Win32::Security::WELL_KNOWN_SID_TYPE) -> bool {
+            // SAFETY: SID lu dans une DACL du systeme, dans un tampon vivant.
+            unsafe { IsWellKnownSid(sid.as_ptr() as PSID, genre) != 0 }
+        }
+
+        fn egaux(a: &[u8], b: &[u8]) -> bool {
+            // SAFETY: deux SID valides, lus seulement.
+            unsafe { EqualSid(a.as_ptr() as PSID, b.as_ptr() as PSID) != 0 }
+        }
+
+        /// Le masque et les droits du client, ecrits en clair: une garde qui
+        /// se comparerait aux constantes les suivrait dans leur mutation. Le
+        /// masque n'a ni le bit 0x4 (`FILE_CREATE_PIPE_INSTANCE`), ni aucun
+        /// droit sur le descripteur, ni la totalite des droits, ni
+        /// `GENERIC_ALL`; le client ne demande rien que le masque n'accorde.
+        #[test]
+        fn le_masque_du_groupe_echange_et_ne_cree_aucune_instance() {
+            assert_eq!(MASQUE_DU_GROUPE, 0x0012_0083);
+            assert_eq!(ACCES_DU_CLIENT, 0x0002_0003);
+            assert_eq!(MASQUE_DU_GROUPE & FILE_CREATE_PIPE_INSTANCE, 0);
+            assert_eq!(MASQUE_DU_GROUPE & 0x0004, 0);
+            assert_ne!(MASQUE_DU_GROUPE, FILE_ALL_ACCESS);
+            assert_eq!(MASQUE_DU_GROUPE & GENERIC_ALL, 0);
+            // DELETE, WRITE_DAC, WRITE_OWNER, et les generiques.
+            assert_eq!(MASQUE_DU_GROUPE & 0xF00D_0000, 0);
+            assert_eq!(ACCES_DU_CLIENT & !MASQUE_DU_GROUPE, 0);
+        }
+
+        /// Sans groupe, le descripteur est exactement celui de SYSTEM et des
+        /// Administrateurs; avec un groupe, le meme suivi d'UNE ACE, ecrite
+        /// en clair, qui nomme le SID canonique du groupe. Miroir: le groupe
+        /// est le compte des recettes; s'abstient, en le nommant, si ce
+        /// compte n'est pas un compte cree.
+        #[test]
+        fn le_descripteur_ajoute_une_seule_ace_pour_le_groupe() {
+            let Some(groupe) =
+                groupe_du_compte("le_descripteur_ajoute_une_seule_ace_pour_le_groupe")
+            else {
+                return;
+            };
+            assert_eq!(descripteur_du_pipe(None), "D:P(A;;GA;;;SY)(A;;GA;;;BA)");
+            assert_eq!(
+                descripteur_du_pipe(Some(&groupe)),
+                format!(
+                    "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x120083;;;{})",
+                    groupe.sid()
+                )
+            );
+        }
+
+        /// Ce que le noyau garde du pipe que `bind` cree sans groupe: SYSTEM
+        /// et les Administrateurs a la totalite des droits (`GA` y est
+        /// 0x1f01ff), deux ACE d'autorisation et rien d'autre. Sans premisse:
+        /// le descripteur du daemon se mesure sous tout compte, le runner de
+        /// la CI compris.
+        #[tokio::test]
+        async fn le_pipe_lie_sans_groupe_porte_system_et_les_administrateurs_a_tous_les_droits() {
+            let sans = IpcServer::bind(nom("sans"), AuthPolicy::default(), None)
+                .await
+                .expect("bind sans groupe");
+            assert_eq!(sans.sddl, "D:P(A;;GA;;;SY)(A;;GA;;;BA)");
+            let aces = dacl(sans.next.as_raw_handle());
+            assert_eq!(aces.len(), 2, "sans groupe: SYSTEM et Administrateurs");
+            assert!(est(&aces[0].sid, WinLocalSystemSid));
+            assert!(est(&aces[1].sid, WinBuiltinAdministratorsSid));
+            for ace in &aces {
+                assert_eq!(ace.genre, ACE_D_AUTORISATION);
+                assert_eq!(ace.masque, 0x001F_01FF);
+            }
+        }
+
+        /// Ce que le noyau garde du pipe que `bind` cree avec un groupe: le
+        /// meme descripteur suivi d'une troisieme ACE, pour CE SID (compare
+        /// par `EqualSid`), au masque exact; une ACE `GA` y serait 0x1f01ff.
+        /// Miroir: le groupe est le compte des recettes; s'abstient, en le
+        /// nommant, si ce compte n'est pas un compte cree.
+        #[tokio::test]
+        async fn le_pipe_lie_porte_l_ace_du_groupe_et_rien_de_plus() {
+            let Some(groupe) =
+                groupe_du_compte("le_pipe_lie_porte_l_ace_du_groupe_et_rien_de_plus")
+            else {
+                return;
+            };
+            let avec = IpcServer::bind(nom("avec"), AuthPolicy::default(), Some(groupe.clone()))
+                .await
+                .expect("bind avec groupe");
+            assert_eq!(avec.sddl, descripteur_du_pipe(Some(&groupe)));
+            let aces = dacl(avec.next.as_raw_handle());
+            assert_eq!(aces.len(), 3, "avec groupe: une ACE de plus, une seule");
+            assert!(est(&aces[0].sid, WinLocalSystemSid));
+            assert!(est(&aces[1].sid, WinBuiltinAdministratorsSid));
+            let ace = &aces[2];
+            assert_eq!(ace.genre, ACE_D_AUTORISATION);
+            assert!(
+                egaux(&ace.sid, groupe.sid_binaire()),
+                "l'ACE ne nomme pas le groupe"
+            );
+            assert_eq!(ace.masque, 0x0012_0083, "masque de l'ACE du groupe");
+            assert_eq!(ace.masque & 0x0004, 0, "l'ACE du groupe cree des instances");
+            assert_ne!(ace.masque, 0x001F_01FF, "l'ACE du groupe a tous les droits");
+        }
+
+        /// La recette MIROIR de
+        /// `sans_administrateurs_actifs_aucune_instance_ne_s_ajoute_au_pipe_du_daemon`.
+        ///
+        /// Le pipe porte le descripteur de `bind` avec ce compte pour groupe
+        /// d'acces, en deux variantes: tel que `bind` le pose (le compte en
+        /// est aussi proprietaire), et sans les droits implicites du
+        /// proprietaire. Dans les deux: ce compte n'ouvre pas le pipe en
+        /// `GENERIC_READ | GENERIC_WRITE`; il l'ouvre par l'ouverture du
+        /// client, y lit le proprietaire et echange une requete; et il NE
+        /// PEUT PAS y ajouter d'instance, meme en proposant son propre
+        /// descripteur grand ouvert (`ERROR_ACCESS_DENIED`).
+        ///
+        /// Deux premisses, abstention nommee si l'une manque: le compte des
+        /// recettes est un compte cree (sinon l'ACE du groupe ne peut pas le
+        /// nommer), et les Administrateurs ne sont pas actifs dans son jeton
+        /// (sinon leur ACE `GA` du descripteur ouvre tout, `GENERIC_WRITE` et
+        /// l'instance de plus comprises, et rien n'isole l'ACE du groupe). Le
+        /// runner jetable mesure le groupe reel sous le jeton d'un membre non
+        /// eleve.
+        #[tokio::test]
+        async fn miroir_le_compte_du_groupe_echange_sans_pouvoir_ajouter_d_instance() {
+            let Some(groupe) = groupe_du_compte_sous_un_jeton_ordinaire(
+                "miroir_le_compte_du_groupe_echange_sans_pouvoir_ajouter_d_instance",
+            ) else {
+                return;
+            };
+            for variante in ["bind", "non-proprietaire"] {
+                let nom = nom(variante);
+                let serveur = match variante {
+                    "bind" => IpcServer::bind(&nom, AuthPolicy::default(), Some(groupe.clone()))
+                        .await
+                        .expect("bind avec groupe"),
+                    _ => IpcServer::bind_avec_descripteur(
+                        Path::new(&nom),
+                        AuthPolicy::default(),
+                        &format!(
+                            "{}{PROPRIETAIRE_NEUTRALISE}",
+                            descripteur_du_pipe(Some(&groupe))
+                        ),
+                    )
+                    .expect("pipe sans droits implicites du proprietaire"),
+                };
+
+                // Les droits generiques: refuses a ce compte, avant qu'un
+                // client ne prenne l'unique instance.
+                match ClientOptions::new().open(&nom) {
+                    Err(e) => assert_eq!(
+                        e.raw_os_error(),
+                        Some(ERROR_ACCESS_DENIED as i32),
+                        "{variante}: {e}"
+                    ),
+                    Ok(_) => panic!("{variante}: GENERIC_READ|GENERIC_WRITE ouvre le pipe"),
+                }
+
+                // L'ouverture du client, le proprietaire, puis un echange par
+                // le cadrage du daemon et du client.
+                let pipe = ouvrir_le_pipe(&nom, ATTENTE_PIPE_OCCUPE)
+                    .await
+                    .unwrap_or_else(|e| panic!("{variante}: ouverture du client: {e}"));
+                assert_eq!(
+                    pipe_owner(pipe.as_raw_handle()),
+                    Ok(PipeOwner::Other),
+                    "{variante}: le proprietaire du pipe ne se lit pas, ou n'est pas ce compte"
+                );
+                let IpcServer {
+                    next,
+                    delai_requete,
+                    ..
+                } = serveur;
+                let mut client = IpcClient::from_pipe(pipe);
+                let requete = Request::new(Command::Status);
+                let cote_serveur = async move {
+                    next.connect().await?;
+                    let peer = peer_identity(&next);
+                    let mut connexion = Connection::new(next, peer, delai_requete);
+                    let requete = connexion.recv().await?;
+                    let status = matches!(requete.command, Command::Status);
+                    connexion.send(&Response::Ok).await?;
+                    Ok::<_, IpcError>((status, connexion))
+                };
+                let (serveur, reponse) = tokio::join!(cote_serveur, client.request(&requete));
+                let (status, _connexion) =
+                    serveur.unwrap_or_else(|e| panic!("{variante}: serveur: {e}"));
+                assert!(status, "{variante}: la requete recue n'est pas Status");
+                assert!(
+                    matches!(reponse, Ok(Response::Ok)),
+                    "{variante}: {reponse:?}"
+                );
+
+                // Et aucune instance de plus.
+                match create_pipe(&nom, "D:P(A;;GA;;;WD)", false) {
+                    Err(IpcError::Io(e)) => assert_eq!(
+                        e.raw_os_error(),
+                        Some(ERROR_ACCESS_DENIED as i32),
+                        "{variante}: {e}"
+                    ),
+                    Err(autre) => panic!("{variante}: {autre}"),
+                    Ok(_) => {
+                        panic!("{variante}: le compte du groupe a ajoute une instance au pipe")
+                    }
+                }
+            }
+        }
+
+        /// L'ouverture du client par droits individuels: sur un pipe qui
+        /// n'accorde a ce compte que le masque du groupe (sans droits
+        /// implicites de proprietaire), `ouvrir_une_fois` aboutit et la
+        /// poignee lit le proprietaire; `GENERIC_WRITE`, seul ou avec
+        /// `GENERIC_READ`, est refuse. Un pipe par ouverture: une instance
+        /// ne sert qu'un client. Memes deux premisses que la recette miroir
+        /// ci-dessus (compte cree, Administrateurs inactifs: sous un jeton
+        /// eleve leur ACE accorderait les trois ouvertures), abstention
+        /// nommee si l'une manque.
+        #[tokio::test]
+        async fn le_client_s_ouvre_par_les_droits_que_le_groupe_accorde() {
+            let Some(groupe) = groupe_du_compte_sous_un_jeton_ordinaire(
+                "le_client_s_ouvre_par_les_droits_que_le_groupe_accorde",
+            ) else {
+                return;
+            };
+            let sddl = format!(
+                "{}{PROPRIETAIRE_NEUTRALISE}",
+                descripteur_du_pipe(Some(&groupe))
+            );
+            let nom_individuel = nom("individuel");
+            let _serveur = create_pipe(&nom_individuel, &sddl, true).expect("pipe");
+            let pipe = ouvrir_une_fois(&nom_individuel).expect("ouverture par droits individuels");
+            assert_eq!(pipe_owner(pipe.as_raw_handle()), Ok(PipeOwner::Other));
+
+            for (etiquette, lecture) in
+                [("generique-ecriture", false), ("generique-les-deux", true)]
+            {
+                let nom = nom(etiquette);
+                let _serveur = create_pipe(&nom, &sddl, true).expect("pipe");
+                let issue = ClientOptions::new().read(lecture).write(true).open(&nom);
+                match issue {
+                    Err(e) => assert_eq!(
+                        e.raw_os_error(),
+                        Some(ERROR_ACCESS_DENIED as i32),
+                        "{etiquette}: {e}"
+                    ),
+                    Ok(_) => panic!("{etiquette}: GENERIC_WRITE ouvre le pipe au groupe"),
+                }
+            }
+        }
+    }
+
+    /// L'identification de l'appelant et la decision par requete, par le
+    /// chemin du daemon: un vrai `IpcServer`, `accept`, `Connection::recv`.
+    ///
+    /// Ce compte est l'appelant. Sous un jeton sans Administrateurs actifs
+    /// (dev-windows), il vaut le niveau restreint, comme un membre du groupe
+    /// d'acces, et c'est ce qui se mesure; sous un jeton eleve (le runner de
+    /// la CI), il vaut le niveau complet, et c'est ce qui se mesure aussi.
+    #[cfg(test)]
+    mod tests_appelant {
+        use super::tests_identite_serveur::administrateurs_actifs;
+        use super::*;
+        use crate::appelant::tests::une_de_chaque;
+        use crate::appelant::{CommandeReservee, EtapeDIdentification};
+        use crate::protocol::Command;
+        use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+        use windows_sys::Win32::Security::TOKEN_QUERY;
+        use windows_sys::Win32::Storage::FileSystem::SECURITY_ANONYMOUS;
+        use windows_sys::Win32::System::Threading::{GetCurrentThread, OpenThreadToken};
+
+        /// `ERROR_CANT_OPEN_ANONYMOUS`: le jeton d'un client anonyme ne
+        /// s'ouvre pas.
+        const ANONYME: u32 = 1347;
+
+        /// `ERROR_NO_TOKEN`: le fil n'a pas de jeton a lui, il agit sous
+        /// celui du processus.
+        const SANS_JETON: u32 = 1008;
+
+        fn nom(suffixe: &str) -> String {
+            format!(
+                r"\\.\pipe\bifrost-ipc-appelant-{}-{suffixe}",
+                std::process::id()
+            )
+        }
+
+        /// Un serveur de recette: le descripteur du daemon, plus ce compte.
+        fn serveur(nom: &str) -> IpcServer {
+            IpcServer::bind_avec_descripteur(Path::new(nom), AuthPolicy::default(), SDDL_RECETTE)
+                .expect("pipe de recette")
+        }
+
+        /// Une ouverture cote client, aux droits du client, au niveau
+        /// d'imitation `niveau` (`SECURITY_IDENTIFICATION` pour le client du
+        /// depot).
+        fn ouvrir_brut(nom: &str, niveau: u32) -> HANDLE {
+            let large: Vec<u16> = nom.encode_utf16().chain(Some(0)).collect();
+            // SAFETY: `large` est une chaine UTF-16 terminee par un zero,
+            // vivante pendant l'appel; ni attributs de securite ni modele.
+            let poignee = unsafe {
+                CreateFileW(
+                    large.as_ptr(),
+                    ACCES_DU_CLIENT,
+                    0,
+                    std::ptr::null(),
+                    OPEN_EXISTING,
+                    niveau | SECURITY_SQOS_PRESENT | FILE_FLAG_OVERLAPPED,
+                    std::ptr::null_mut(),
+                )
+            };
+            assert!(
+                poignee != INVALID_HANDLE_VALUE,
+                "ouverture du client: {}",
+                std::io::Error::last_os_error()
+            );
+            poignee
+        }
+
+        fn client(nom: &str, niveau: u32) -> IpcClient {
+            let poignee = ouvrir_brut(nom, niveau);
+            // SAFETY: la poignee vient d'etre ouverte en mode recouvre et
+            // n'est tenue par rien d'autre; `NamedPipeClient` la ferme.
+            let pipe = unsafe { NamedPipeClient::from_raw_handle(poignee as RawHandle) }
+                .expect("client de recette");
+            IpcClient::from_pipe(pipe)
+        }
+
+        /// Le fil courant a-t-il un jeton a lui? `Err(SANS_JETON)` quand il
+        /// agit sous le jeton du processus.
+        fn jeton_du_fil() -> std::result::Result<(), u32> {
+            let mut poignee: HANDLE = std::ptr::null_mut();
+            // SAFETY: pseudo-poignee du fil courant; `poignee` est locale et
+            // fermee ci-dessous si l'ouverture aboutit.
+            let ouvert =
+                unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, 1, &mut poignee) };
+            if ouvert == 0 {
+                return Err(std::io::Error::last_os_error().raw_os_error().unwrap_or(0) as u32);
+            }
+            // SAFETY: jeton ouvert ci-dessus, ferme une fois.
+            unsafe { CloseHandle(poignee) };
+            Ok(())
+        }
+
+        fn refus(commande: &'static str) -> String {
+            CommandeReservee { commande }.to_string()
+        }
+
+        /// Chaque commande du protocole, par le chemin du daemon: le
+        /// transport ne rend au serveur que ce que le niveau de l'appelant
+        /// admet.
+        ///
+        /// L'appelant ouvre comme le client du depot. Une commande admise est
+        /// rendue telle quelle. Une commande refusee recoit le refus qui la
+        /// nomme, et `recv` ne la rend pas: le serveur recoit a sa place la
+        /// requete suivante du client, `status`. Rien de la commande refusee
+        /// n'atteint donc le serveur, ni par consequent l'etat du daemon.
+        /// L'identification est celle de ce compte: jeton lu, pas SYSTEM, et
+        /// les Administrateurs actifs exactement quand ils le sont dans ce
+        /// processus (`CheckTokenMembership` du jeton du processus).
+        #[tokio::test]
+        async fn le_transport_ne_rend_au_serveur_que_ce_que_le_niveau_admet() {
+            let actifs = administrateurs_actifs();
+            let niveau = if actifs {
+                NiveauDAppelant::Complet
+            } else {
+                NiveauDAppelant::Restreint
+            };
+            println!("RELEVE appelant: administrateurs actifs={actifs}, niveau attendu={niveau:?}");
+            for (rang, (commande, _)) in une_de_chaque().into_iter().enumerate() {
+                let nom = nom(&format!("livre-{rang}"));
+                let nom_commande = commande.name();
+                let admise = appelant::decider(niveau, &commande).is_ok();
+                let mut serveur = serveur(&nom);
+                let mut client = client(&nom, SECURITY_IDENTIFICATION);
+                let cote_serveur = async {
+                    let mut connexion = serveur.accept().await?;
+                    let recue = connexion.recv().await?;
+                    connexion.send(&Response::Ok).await?;
+                    Ok::<_, IpcError>((
+                        recue.command.name(),
+                        connexion.identification(),
+                        connexion.niveau(),
+                    ))
+                };
+                let cote_client = async {
+                    let premiere = client.request(&Request::new(commande)).await?;
+                    let seconde = match premiere {
+                        Response::Error { .. } => {
+                            Some(client.request(&Request::new(Command::Status)).await?)
+                        }
+                        _ => None,
+                    };
+                    Ok::<_, IpcError>((premiere, seconde))
+                };
+                let (cote_serveur, cote_client) = tokio::join!(cote_serveur, cote_client);
+                let (rendue, identification, lu) =
+                    cote_serveur.unwrap_or_else(|e| panic!("{nom_commande}: serveur: {e}"));
+                let (premiere, seconde) =
+                    cote_client.unwrap_or_else(|e| panic!("{nom_commande}: client: {e}"));
+                assert_eq!(
+                    identification,
+                    Some(Identification::Lue {
+                        systeme: false,
+                        administrateurs: actifs
+                    }),
+                    "{nom_commande}"
+                );
+                assert_eq!(lu, niveau, "{nom_commande}");
+                if admise {
+                    assert_eq!(rendue, nom_commande, "commande admise non rendue");
+                    assert!(
+                        matches!(premiere, Response::Ok),
+                        "{nom_commande}: {premiere:?}"
+                    );
+                    assert!(seconde.is_none(), "{nom_commande}");
+                } else {
+                    assert_eq!(
+                        rendue, "status",
+                        "{nom_commande}: le transport a rendu au serveur une commande refusee"
+                    );
+                    match premiere {
+                        Response::Error { message } => {
+                            assert_eq!(message, refus(nom_commande), "{nom_commande}")
+                        }
+                        autre => panic!("{nom_commande}: refus attendu, recu {autre:?}"),
+                    }
+                    assert!(
+                        matches!(seconde, Some(Response::Ok)),
+                        "{nom_commande}: {seconde:?}"
+                    );
+                }
+            }
+        }
+
+        /// Un appelant que le daemon ne sait pas identifier n'a que les trois
+        /// commandes, meme sous un jeton eleve: un client ouvert en
+        /// `SECURITY_ANONYMOUS` passe l'imitation, son jeton ne s'ouvre pas
+        /// (1347), et `check` lui est refuse. Avant toute requete, le niveau
+        /// est deja le niveau restreint. Le fil qui a identifie est rendu a
+        /// son jeton.
+        #[tokio::test]
+        async fn un_appelant_non_identifie_n_a_que_les_trois_commandes() {
+            let nom = nom("anonyme");
+            let mut serveur = serveur(&nom);
+            let mut client = client(&nom, SECURITY_ANONYMOUS);
+            let cote_serveur = async {
+                let mut connexion = serveur.accept().await?;
+                let avant = (connexion.identification(), connexion.niveau());
+                let recue = connexion.recv().await?;
+                let fil = jeton_du_fil();
+                connexion.send(&Response::Ok).await?;
+                Ok::<_, IpcError>((
+                    avant,
+                    recue.command.name(),
+                    connexion.identification(),
+                    connexion.niveau(),
+                    fil,
+                ))
+            };
+            let cote_client = async {
+                let premiere = client.request(&Request::new(Command::Check)).await?;
+                let seconde = client.request(&Request::new(Command::Status)).await?;
+                Ok::<_, IpcError>((premiere, seconde))
+            };
+            let (cote_serveur, cote_client) = tokio::join!(cote_serveur, cote_client);
+            let (avant, rendue, identification, niveau, fil) = cote_serveur.expect("serveur");
+            let (premiere, seconde) = cote_client.expect("client");
+            assert_eq!(
+                avant,
+                (None, NiveauDAppelant::Restreint),
+                "avant toute requete"
+            );
+            assert_eq!(
+                identification,
+                Some(Identification::Impossible {
+                    etape: EtapeDIdentification::Jeton,
+                    code: ANONYME
+                })
+            );
+            assert_eq!(niveau, NiveauDAppelant::Restreint);
+            assert_eq!(rendue, "status", "check rendu au serveur");
+            match premiere {
+                Response::Error { message } => assert_eq!(message, refus("check")),
+                autre => panic!("refus attendu, recu {autre:?}"),
+            }
+            assert!(matches!(seconde, Response::Ok), "{seconde:?}");
+            assert_eq!(fil, Err(SANS_JETON), "le fil garde le jeton du client");
+        }
+
+        /// Le fil est rendu a son jeton sur chaque chemin de
+        /// l'identification: jeton lu; imitation reussie et jeton illisible
+        /// (client anonyme); imitation impossible (la poignee d'un client,
+        /// qui n'est pas une instance serveur). Apres chacun, le fil n'a plus
+        /// de jeton a lui (`ERROR_NO_TOKEN`). L'imitation se fait ici avant
+        /// toute lecture: mesure du 16/10/2026, elle aboutit deja.
+        #[tokio::test]
+        async fn l_identification_rend_le_fil_a_son_jeton_sur_chaque_chemin() {
+            let actifs = administrateurs_actifs();
+            assert_eq!(jeton_du_fil(), Err(SANS_JETON), "avant");
+
+            let nom_lu = nom("chemin-lu");
+            let mut serveur_lu = serveur(&nom_lu);
+            let _client_lu = client(&nom_lu, SECURITY_IDENTIFICATION);
+            let connexion = serveur_lu.accept().await.expect("acceptation");
+            assert_eq!(
+                appelant::identifier(connexion.poignee as RawHandle),
+                Identification::Lue {
+                    systeme: false,
+                    administrateurs: actifs
+                }
+            );
+            assert_eq!(jeton_du_fil(), Err(SANS_JETON), "apres un jeton lu");
+
+            let nom_anonyme = nom("chemin-anonyme");
+            let mut serveur_anonyme = serveur(&nom_anonyme);
+            let _client_anonyme = client(&nom_anonyme, SECURITY_ANONYMOUS);
+            let connexion = serveur_anonyme.accept().await.expect("acceptation");
+            assert_eq!(
+                appelant::identifier(connexion.poignee as RawHandle),
+                Identification::Impossible {
+                    etape: EtapeDIdentification::Jeton,
+                    code: ANONYME
+                }
+            );
+            assert_eq!(jeton_du_fil(), Err(SANS_JETON), "apres un jeton illisible");
+
+            let nom_client = nom("chemin-client");
+            let _serveur_client = serveur(&nom_client);
+            let brut = ouvrir_brut(&nom_client, SECURITY_IDENTIFICATION);
+            let issue = appelant::identifier(brut as RawHandle);
+            // SAFETY: poignee ouverte ci-dessus, fermee une fois.
+            unsafe { CloseHandle(brut) };
+            println!("RELEVE appelant: identification sur une poignee cliente: {issue:?}");
+            assert!(
+                matches!(
+                    issue,
+                    Identification::Impossible {
+                        etape: EtapeDIdentification::Imitation,
+                        code
+                    } if code != 0
+                ),
+                "{issue:?}"
+            );
+            assert_eq!(
+                jeton_du_fil(),
+                Err(SANS_JETON),
+                "apres une imitation impossible"
             );
         }
     }

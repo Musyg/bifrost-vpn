@@ -6,7 +6,9 @@
 //! jamais une cle lue par la coquille), et le demonter. `Connect` avec un
 //! profil fourni par l'appelant, `Check` et le reste ne sont pas ici: la
 //! coquille n'a aucune raison de les offrir, et une surface qu'on n'ouvre pas
-//! est une surface qu'on n'a pas a defendre.
+//! est une surface qu'on n'a pas a defendre. Ce sont aussi les trois
+//! commandes que le daemon ouvre, sous Windows, aux membres du groupe d'acces
+//! (`bifrost_ipc::appelant`): un membre a tout ce que la coquille offre.
 //!
 //! # Le serveur du canal, verifie avant le premier octet
 //!
@@ -32,11 +34,14 @@ const EXIGENCE: ServerRequirement = ServerRequirement::Elevated;
 /// L'erreur du poste de commande, typee: la coquille en tire une Vue distincte
 /// pour chaque cas.
 ///
-/// A l'ouverture du canal, trois cas qui ne se confondent pas, comme dans la
-/// CLI: personne ne tient le canal, ou personne que ce compte puisse joindre
-/// ([`ErreurCommande::DaemonInjoignable`], l'etat NORMAL quand la coquille
-/// tourne et que le service n'est pas la); un serveur tient le canal et n'a
-/// pris aucune connexion de plus dans le delai du client
+/// A l'ouverture du canal, quatre cas qui ne se confondent pas: personne ne
+/// tient le canal ([`ErreurCommande::DaemonInjoignable`], l'etat NORMAL quand
+/// la coquille tourne et que le service n'est pas la); le canal existe et le
+/// systeme refuse a ce compte de l'ouvrir
+/// ([`ErreurCommande::CompteNonAdmis`]: sous Windows un compte hors du groupe
+/// d'acces du pipe, sous Linux un compte hors du groupe du socket); un
+/// serveur tient le canal et n'a pris aucune connexion de plus dans le delai
+/// du client
 /// ([`ErreurCommande::DaemonSansReponse`]: rien ne dit qu'il soit arrete); un
 /// serveur tient le canal et n'a pas l'identite du daemon
 /// ([`ErreurCommande::ServeurNonAdmis`]: rien ne lui a ete envoye).
@@ -49,6 +54,8 @@ const EXIGENCE: ServerRequirement = ServerRequirement::Elevated;
 pub enum ErreurCommande {
     #[error("daemon injoignable: {0}")]
     DaemonInjoignable(String),
+    #[error("compte non admis par le canal: {0}")]
+    CompteNonAdmis(String),
     #[error("daemon sans reponse dans le delai: {0}")]
     DaemonSansReponse(String),
     #[error("serveur du canal non admis, rien ne lui a ete envoye: {0}")]
@@ -77,12 +84,18 @@ fn classer(message: String) -> ErreurCommande {
 /// `is_server_busy` ait un sens.
 ///
 /// L'identite du serveur passe avant tout: c'est le seul cas ou un serveur a
-/// ete joint et ecarte. Puis l'occupation, ou un serveur tient le canal sans
-/// prendre de connexion de plus. Le reste (canal absent, droits, erreur du
-/// systeme) dit qu'aucun daemon n'a pu etre joint.
+/// ete joint et ecarte. Puis le refus d'ouverture pour droits insuffisants
+/// (`ERROR_ACCESS_DENIED` sous Windows, `EACCES` sous Linux, tous deux
+/// `PermissionDenied`): le canal existe, et c'est ce compte qu'il n'admet pas.
+/// Puis l'occupation, ou un serveur tient le canal sans prendre de connexion
+/// de plus. Le reste (canal absent, erreur du systeme) dit qu'aucun daemon
+/// n'a pu etre joint.
 fn classer_ouverture(e: IpcError) -> ErreurCommande {
     match e {
         IpcError::ServerIdentity(cause) => ErreurCommande::ServeurNonAdmis(cause),
+        IpcError::Io(io) if io.kind() == std::io::ErrorKind::PermissionDenied => {
+            ErreurCommande::CompteNonAdmis(io.to_string())
+        }
         e if e.is_server_busy() => ErreurCommande::DaemonSansReponse(e.to_string()),
         e => ErreurCommande::DaemonInjoignable(e.to_string()),
     }
@@ -212,6 +225,14 @@ mod tests {
     #[cfg(windows)]
     const CANAL_OCCUPE: i32 = windows_sys::Win32::Foundation::ERROR_PIPE_BUSY as i32;
 
+    /// L'erreur que le systeme rend au client d'un canal qui existe et que
+    /// ses droits ferment a ce compte: `EACCES` au `connect(2)` sous Linux,
+    /// `ERROR_ACCESS_DENIED` a l'ouverture sous Windows.
+    #[cfg(unix)]
+    const ACCES_REFUSE: i32 = libc::EACCES;
+    #[cfg(windows)]
+    const ACCES_REFUSE: i32 = windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED as i32;
+
     #[test]
     fn la_commande_par_defaut_vise_le_canal_par_defaut() {
         assert_eq!(Commande::default().endpoint(), default_endpoint());
@@ -224,6 +245,54 @@ mod tests {
         assert_eq!(EXIGENCE, ServerRequirement::Elevated);
         assert_eq!(Commande::new("canal").exigence, ServerRequirement::Elevated);
         assert_eq!(Commande::default().exigence, ServerRequirement::Elevated);
+    }
+
+    /// La coquille n'envoie au daemon que `status`, `connect-stored` et
+    /// `disconnect`, les trois commandes que le daemon ouvre, sous Windows,
+    /// aux membres du groupe d'acces: le texte de production de ce module ne
+    /// nomme aucune autre variante de `Command`, la page graphique
+    /// (`gui/src/main.rs`) n'en nomme aucune, et la decision du daemon admet
+    /// chacune des trois au niveau restreint.
+    #[test]
+    fn la_coquille_n_envoie_que_les_trois_commandes_ouvertes_aux_membres() {
+        use bifrost_ipc::{NiveauDAppelant, decider};
+        let source = include_str!("commande.rs");
+        let production = &source[..source.find("\nmod tests {").expect("module des recettes")];
+        let nommees: std::collections::BTreeSet<String> = production
+            .match_indices("Command::")
+            .map(|(rang, motif)| {
+                production[rang + motif.len()..]
+                    .chars()
+                    .take_while(char::is_ascii_alphanumeric)
+                    .collect()
+            })
+            .collect();
+        let attendues: std::collections::BTreeSet<String> =
+            ["ConnectStored", "Disconnect", "Status"]
+                .map(String::from)
+                .into_iter()
+                .collect();
+        assert_eq!(
+            nommees, attendues,
+            "commandes nommees par le poste de commande"
+        );
+        let page = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../gui/src/main.rs"
+        ))
+        .expect("gui/src/main.rs");
+        assert!(
+            !page.contains("Command::"),
+            "la page graphique construit elle-meme une commande"
+        );
+        for commande in [Command::Status, Command::ConnectStored, Command::Disconnect] {
+            assert_eq!(
+                decider(NiveauDAppelant::Restreint, &commande),
+                Ok(()),
+                "{}",
+                commande.name()
+            );
+        }
     }
 
     #[test]
@@ -241,7 +310,8 @@ mod tests {
 
     /// Chaque echec d'ouverture du canal dans sa classe, et dans aucune
     /// autre: le serveur ecarte, quelle que soit la cause, n'est jamais pris
-    /// pour un daemon absent; le canal occupe non plus; le reste, si.
+    /// pour un daemon absent; le compte que le canal refuse non plus, ni le
+    /// canal occupe; le reste, si.
     #[test]
     fn chaque_echec_d_ouverture_a_sa_classe() {
         for cause in [
@@ -265,9 +335,22 @@ mod tests {
             "{classe:?}"
         );
 
+        // Le refus du systeme a l'ouverture, sous la forme ou il arrive:
+        // le code de la plateforme, et le genre seul.
+        for refus in [
+            std::io::Error::from_raw_os_error(ACCES_REFUSE),
+            std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        ] {
+            let classe = classer_ouverture(IpcError::Io(refus));
+            assert!(
+                matches!(classe, ErreurCommande::CompteNonAdmis(_)),
+                "{classe:?}"
+            );
+            assert!(!classe.to_string().contains("injoignable"), "{classe}");
+        }
+
         for genre in [
             std::io::ErrorKind::NotFound,
-            std::io::ErrorKind::PermissionDenied,
             std::io::ErrorKind::ConnectionRefused,
         ] {
             let e = IpcError::Io(std::io::Error::from(genre));
@@ -300,7 +383,7 @@ mod tests {
             allowed_gid: None,
         };
         let server = IpcServer::bind(&path, policy, None).await.expect("bind");
-        let tache = tokio::spawn(faux_daemon::servir(server));
+        let tache = tokio::spawn(faux_daemon::servir(server, Default::default()));
 
         let couture = Commande::admettant_l_uid(path.to_string_lossy(), euid);
         assert_eq!(couture.etat().await, Ok(faux_daemon::status_de_reference()));

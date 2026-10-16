@@ -37,11 +37,24 @@ const INTERVALLE: Duration = Duration::from_secs(2);
 /// Nom de l'evenement emis vers le front a chaque rafraichissement.
 const EVENEMENT_MAJ: &str = "maj-etat";
 
-/// Ce que la coquille garde: le poste de commande et la poignee de l'entree
-/// << Etat >> du menu, pour en changer le texte a chaque rafraichissement.
+/// Ce que la coquille garde: le poste de commande et les poignees des entrees
+/// du menu qu'elle repeint a chaque rafraichissement: le texte de << Etat >>,
+/// et l'activation de << Connecter >> et << Deconnecter >>.
 struct Contexte {
     commande: Commande,
     item_etat: MenuItem<Wry>,
+    item_connecter: MenuItem<Wry>,
+    item_deconnecter: MenuItem<Wry>,
+}
+
+/// Les entrees << Connecter >> et << Deconnecter >> du menu du tray actives
+/// pour une Vue: les MEMES champs que les boutons de la page
+/// (`vue.peut_connecter`, `vue.peut_deconnecter`), sans autre regle. Une action
+/// n'est offerte, dans le menu comme dans la fenetre, que quand elle a un sens
+/// dans l'etat courant; dans aucun etat d'erreur, << compte non admis par le
+/// canal >> compris.
+fn entrees_actives(vue: &Vue) -> (bool, bool) {
+    (vue.peut_connecter, vue.peut_deconnecter)
 }
 
 /// La Vue d'une reponse du poste de commande, pure: l'etat rendu par le daemon,
@@ -92,8 +105,9 @@ async fn deconnecter(ctx: tauri::State<'_, Contexte>) -> Result<Vue, String> {
     Ok(appliquer_action(&commande, r).await)
 }
 
-/// Peint une Vue: icone et info-bulle du tray, texte de l'entree << Etat >>, et
-/// un evenement vers le front.
+/// Peint une Vue: icone et info-bulle du tray, texte de l'entree << Etat >>,
+/// activation de << Connecter >> et << Deconnecter >>, et un evenement vers le
+/// front.
 fn appliquer_vue(app: &AppHandle, vue: &Vue) {
     if let Some(tray) = app.tray_by_id(ID_TRAY) {
         let _ = tray.set_icon(Some(icone::image_pour(vue.couleur)));
@@ -101,6 +115,9 @@ fn appliquer_vue(app: &AppHandle, vue: &Vue) {
     }
     if let Some(ctx) = app.try_state::<Contexte>() {
         let _ = ctx.item_etat.set_text(&vue.texte_menu_etat);
+        let (connecter, deconnecter) = entrees_actives(vue);
+        let _ = ctx.item_connecter.set_enabled(connecter);
+        let _ = ctx.item_deconnecter.set_enabled(deconnecter);
     }
     // Le front rend ce qu'on lui envoie; s'il n'ecoute pas encore, l'echec est
     // sans consequence, le prochain tour reessaiera.
@@ -168,13 +185,15 @@ fn main() {
             let commande = Commande::default();
 
             // Le menu du tray. << Etat >> est inactif: c'est un afficheur, pas
-            // une action. Son texte est repeint a chaque tour.
+            // une action. Son texte est repeint a chaque tour. << Connecter >>
+            // et << Deconnecter >> naissent inactifs, comme les boutons de la
+            // page, et chaque tour les active selon la Vue (`appliquer_vue`).
             let item_etat = MenuItem::with_id(app, "etat", "Etat: demarrage", false, None::<&str>)?;
             let sep1 = PredefinedMenuItem::separator(app)?;
             let item_connecter =
-                MenuItem::with_id(app, "connecter", "Connecter", true, None::<&str>)?;
+                MenuItem::with_id(app, "connecter", "Connecter", false, None::<&str>)?;
             let item_deconnecter =
-                MenuItem::with_id(app, "deconnecter", "Deconnecter", true, None::<&str>)?;
+                MenuItem::with_id(app, "deconnecter", "Deconnecter", false, None::<&str>)?;
             let sep2 = PredefinedMenuItem::separator(app)?;
             let item_afficher = MenuItem::with_id(app, "afficher", "Afficher", true, None::<&str>)?;
             let item_quitter = MenuItem::with_id(app, "quitter", "Quitter", true, None::<&str>)?;
@@ -202,6 +221,8 @@ fn main() {
             app.manage(Contexte {
                 commande: commande.clone(),
                 item_etat,
+                item_connecter,
+                item_deconnecter,
             });
 
             // La boucle de fond: interroge l'etat toutes les deux secondes et
@@ -231,6 +252,7 @@ fn une_erreur_de_chaque_sorte() -> Vec<ErreurCommande> {
     use bifrost_ipc::transport::ServerIdentityError;
     let erreurs = vec![
         ErreurCommande::DaemonInjoignable("canal absent".into()),
+        ErreurCommande::CompteNonAdmis("acces refuse a l'ouverture".into()),
         ErreurCommande::DaemonSansReponse("canal occupe".into()),
         ErreurCommande::ServeurNonAdmis(ServerIdentityError::Refused),
         ErreurCommande::ServeurNonAdmis(ServerIdentityError::Unreadable),
@@ -240,6 +262,7 @@ fn une_erreur_de_chaque_sorte() -> Vec<ErreurCommande> {
     for e in &erreurs {
         match e {
             ErreurCommande::DaemonInjoignable(_)
+            | ErreurCommande::CompteNonAdmis(_)
             | ErreurCommande::DaemonSansReponse(_)
             | ErreurCommande::ServeurNonAdmis(
                 ServerIdentityError::Refused | ServerIdentityError::Unreadable,
@@ -307,6 +330,45 @@ mod tests {
     fn chaque_erreur_est_peinte_telle_que_la_vue_la_derive() {
         for e in une_erreur_de_chaque_sorte() {
             assert_eq!(vue_de(Err(e.clone())), Vue::depuis_erreur(&e), "{e:?}");
+        }
+    }
+
+    /// Les entrees << Connecter >> et << Deconnecter >> du menu du tray, etat
+    /// par etat, ecrites en clair: celles qu'active la page pour ses boutons
+    /// (`peut_connecter`, `peut_deconnecter`), et aucune autre. Connecter n'a
+    /// de sens que deconnecte ou en echec, deconnecter que hors de
+    /// << deconnecte >>; aucune des deux dans un etat d'erreur, << compte non
+    /// admis par le canal >> compris.
+    #[test]
+    fn le_menu_du_tray_n_offre_que_ce_qu_offrent_les_boutons() {
+        for (state, attendu) in [
+            (State::Connected, (false, true)),
+            (State::Connecting { attempt: 1 }, (false, true)),
+            (State::Reconnecting { attempt: 2 }, (false, true)),
+            (
+                State::Error {
+                    reason: "handshake perime".into(),
+                },
+                (true, true),
+            ),
+            (State::Disconnected, (true, false)),
+        ] {
+            let vue = vue_de(Ok(status(state.clone())));
+            assert_eq!(entrees_actives(&vue), attendu, "{state:?}");
+            assert_eq!(
+                entrees_actives(&vue),
+                (vue.peut_connecter, vue.peut_deconnecter),
+                "{state:?}: le menu et les boutons divergent"
+            );
+        }
+        for e in une_erreur_de_chaque_sorte() {
+            let vue = vue_de(Err(e.clone()));
+            assert_eq!(entrees_actives(&vue), (false, false), "{e:?}");
+            assert_eq!(
+                entrees_actives(&vue),
+                (vue.peut_connecter, vue.peut_deconnecter),
+                "{e:?}: le menu et les boutons divergent"
+            );
         }
     }
 

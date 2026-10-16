@@ -181,6 +181,12 @@ jobs:
     concurrency:
       group: ${{ github.workflow }}-windows
       cancel-in-progress: false
+    # Ce runner est jetable, et cette variable le dit aux recettes qui creent
+    # un groupe et deux comptes locaux pour mesurer le groupe d'acces du canal
+    # (`bifrost-coquille`, `tests/groupe_d_acces.rs`). Elles exigent aussi
+    # GITHUB_ACTIONS et un processus eleve. Aucun autre job ne la pose.
+    env:
+      BIFROST_RUNNER_JETABLE: '1'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Outillage
