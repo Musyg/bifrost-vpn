@@ -1,0 +1,120 @@
+/* Front statique de Bifrost. ASCII strict, aucune ressource externe. */
+
+:root {
+  color-scheme: light dark;
+  --fond: #f4f5f7;
+  --carte: #ffffff;
+  --texte: #1b1d21;
+  --discret: #5b6068;
+  --bord: #d7dae0;
+  --accent: #2f6feb;
+  --vert: #2e7d32;
+  --gris: #9e9e9e;
+  --rouge: #c62828;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --fond: #16181d;
+    --carte: #1f232a;
+    --texte: #e8eaed;
+    --discret: #9aa0a8;
+    --bord: #333842;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, "Segoe UI", sans-serif;
+  background: var(--fond);
+  color: var(--texte);
+}
+
+main {
+  padding: 16px 20px;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+h1 {
+  font-size: 20px;
+  margin: 0;
+}
+
+.pastille {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  display: inline-block;
+  background: var(--gris);
+}
+
+.pastille.vert {
+  background: var(--vert);
+}
+.pastille.gris {
+  background: var(--gris);
+}
+.pastille.rouge {
+  background: var(--rouge);
+}
+
+dl.etat {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 14px;
+  margin: 0 0 16px 0;
+  background: var(--carte);
+  border: 1px solid var(--bord);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+
+dl.etat dt {
+  color: var(--discret);
+  font-size: 13px;
+}
+
+dl.etat dd {
+  margin: 0;
+  font-size: 13px;
+  word-break: break-word;
+}
+
+.boutons {
+  display: flex;
+  gap: 10px;
+}
+
+button {
+  flex: 1;
+  padding: 9px 12px;
+  font-size: 14px;
+  border: 1px solid var(--bord);
+  border-radius: 8px;
+  background: var(--accent);
+  color: #ffffff;
+  cursor: pointer;
+}
+
+button:disabled {
+  background: var(--gris);
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+.note {
+  min-height: 18px;
+  margin: 12px 0 0 0;
+  font-size: 12px;
+  color: var(--rouge);
+}

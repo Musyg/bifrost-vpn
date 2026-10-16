@@ -8,31 +8,51 @@
 //! une simple chaine la. Un seul reglage, deux endroits, deux syntaxes.
 //!
 //! C'est exactement la forme du defaut trouve trois fois en aout 2026 en
-//! portant le produit sur Windows: un reglage porte par une plateforme et pas
+//! portant le logiciel sur Windows: un reglage porte par une plateforme et pas
 //! par l'autre, qui ne se voit qu'a l'execution et seulement dans un cas. Ici
 //! la divergence serait pire que muette, elle serait rassurante: la CI
 //! resterait verte pendant qu'un des deux outils tairait un avis que l'autre
 //! signale, et personne ne saurait lequel des deux a raison.
 //!
+//! # Deux paires, pas une
+//!
+//! Le depot porte deux verrous, donc deux paires de listes: `deny.toml` et
+//! `.cargo/audit.toml` pour la racine, `gui/deny.toml` et
+//! `gui/.cargo/audit.toml` pour la coquille, espace de travail separe. Elles
+//! sont separees parce que cargo-deny rend une erreur quand un ignore ne
+//! matche aucun crate du verrou examine (`unused-ignored-advisory = "deny"`):
+//! une liste unique ferait rougir l'un des deux controles a coup sur. Chaque
+//! paire est gardee ici de la meme facon, et celle de la coquille exige en
+//! plus une raison datee sur chaque entree: ses avis sont acceptes sur des
+//! faits releves a une date, a relire quand la pile Tauri monte.
+//!
 //! # Ce qu'elle ne fait pas
 //!
 //! Elle ne juge aucun avis. Elle ne dit pas qu'ignorer RUSTSEC-2024-0436 est
 //! une bonne idee - ce raisonnement-la vit dans `deny.toml`, a cote de
-//! l'entree, et il est date. Elle dit seulement que les deux fichiers portent
-//! le meme ensemble d'identifiants, et que `deny.toml` porte les deux cles de
-//! reglage ci-dessous.
+//! l'entree, et il est date. Elle dit seulement que les deux fichiers d'une
+//! paire portent le meme ensemble d'identifiants, et que les deux `deny.toml`
+//! portent les deux cles de reglage ci-dessous.
 //!
-//! # Deux cles de reglage dans `deny.toml`
+//! # Deux cles de reglage, dans les deux `deny.toml`
 //!
 //! `unsound = "all"` et `unused-ignored-advisory = "deny"`, depuis le
-//! 2026-09-15. La premiere parce que le defaut `workspace` n'examine les avis
-//! unsound que sur les dependances DIRECTES et laisse passer un crate
-//! transitif unsound en silence, alors que ce lock est celui des binaires
-//! PRIVILEGIES; la seconde parce qu'un ignore perime doit rougir, pas avertir.
-//! Une ligne commentee ne compte pas, comme pour les identifiants.
+//! 2026-09-15 a la racine. La premiere parce que le defaut `workspace`
+//! n'examine les avis unsound que sur les dependances DIRECTES et laisse
+//! passer un crate transitif unsound en silence, alors que le verrou de la
+//! racine est celui des binaires PRIVILEGIES et que celui de la coquille porte
+//! un avis unsound transitif (glib); la seconde parce qu'un ignore perime doit
+//! rougir, pas avertir. Une ligne commentee ne compte pas, comme pour les
+//! identifiants.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
+
+/// Les paires (cargo-deny, cargo-audit) gardees, chacune pour son verrou.
+const PAIRES: [(&str, &str); 2] = [
+    ("deny.toml", ".cargo/audit.toml"),
+    ("gui/deny.toml", "gui/.cargo/audit.toml"),
+];
 
 fn racine() -> PathBuf {
     // `CARGO_MANIFEST_DIR` pointe sur crates/bifrost-evasion; la racine de
@@ -98,17 +118,44 @@ fn identifiants(ligne: &str) -> Vec<String> {
     trouves
 }
 
-#[test]
-fn les_deux_listes_d_avis_ignores_concordent() {
-    let deny = lire("deny.toml");
-    let audit = lire(".cargo/audit.toml");
+/// La raison portee par une entree `{ id = "...", reason = "..." }` ecrite sur
+/// une seule ligne, ou `None` si la ligne n'en porte pas.
+///
+/// Meme parti que `identifiants`: pas de parseur TOML. La forme est celle du
+/// fichier, une entree par ligne; une entree eclatee sur plusieurs lignes
+/// rendrait `None`, un rouge de trop plutot qu'un trou.
+fn raison(ligne: &str) -> Option<String> {
+    const CLE: &str = "reason = \"";
+    let debut = ligne.find(CLE)? + CLE.len();
+    let fin = ligne[debut..].find('"')?;
+    Some(ligne[debut..debut + fin].to_owned())
+}
+
+/// Les entrees actives d'un `deny.toml`: chaque identifiant avec la raison
+/// ecrite sur sa ligne, s'il y en a une.
+fn entrees_ignore(texte: &str) -> Vec<(String, Option<String>)> {
+    let mut entrees = Vec::new();
+    for ligne in texte.lines() {
+        if ligne.trim_start().starts_with('#') {
+            continue;
+        }
+        for id in identifiants(ligne) {
+            entrees.push((id, raison(ligne)));
+        }
+    }
+    entrees
+}
+
+fn verifier_concordance(fichier_deny: &str, fichier_audit: &str) {
+    let deny = lire(fichier_deny);
+    let audit = lire(fichier_audit);
 
     let cote_deny = avis_actifs(&deny);
     let cote_audit = avis_actifs(&audit);
 
     assert_eq!(
         cote_deny, cote_audit,
-        "deny.toml et .cargo/audit.toml n'ignorent pas les memes avis.\n\
+        "{fichier_deny} et {fichier_audit} n'ignorent pas les memes avis.\n\
          cargo-deny: {cote_deny:?}\n\
          cargo-audit: {cote_audit:?}\n\
          Un avis ignore d'un seul cote laisse la CI verte pendant qu'un des \
@@ -116,12 +163,63 @@ fn les_deux_listes_d_avis_ignores_concordent() {
     );
 }
 
+#[test]
+fn les_deux_listes_d_avis_ignores_concordent() {
+    let (deny, audit) = PAIRES[0];
+    verifier_concordance(deny, audit);
+}
+
+/// La meme garde pour la paire de la coquille. Une recette a part, et non une
+/// boucle sur les deux paires: quand l'une tombe, son nom dit laquelle sans
+/// lire le message.
+#[test]
+fn les_deux_listes_de_la_coquille_concordent() {
+    let (deny, audit) = PAIRES[1];
+    verifier_concordance(deny, audit);
+}
+
+/// Chaque entree ignoree de la coquille porte une raison NON VIDE et DATEE.
+///
+/// Les avis de `gui/Cargo.lock` sont acceptes sur des faits releves a une
+/// date (qui tire le crate, proc-macro ou non, dans le binaire livre ou non,
+/// plateforme, ce que la derniere version de Tauri exige). Une raison sans
+/// date ne dit pas quand ces faits etaient vrais, donc quand les reverifier;
+/// une raison vide ne dit rien. La date attendue commence par `2026-`: le jour
+/// ou on la relit une autre annee, c'est ce prefixe qu'il faudra changer,
+/// entree par entree, apres avoir remesure.
+#[test]
+fn chaque_ignore_de_la_coquille_porte_une_raison_datee() {
+    let (fichier, _) = PAIRES[1];
+    let entrees = entrees_ignore(&lire(fichier));
+
+    // Controle positif: une liste vide passerait la boucle sans rien prouver.
+    assert!(
+        !entrees.is_empty(),
+        "{fichier} ne porte aucune entree ignore active; cette recette suppose \
+         qu'il en porte, sinon elle ne garde rien"
+    );
+
+    for (id, raison) in entrees {
+        let raison = raison.unwrap_or_else(|| {
+            panic!("{fichier}: l'entree {id} n'a pas de champ reason sur sa ligne")
+        });
+        assert!(
+            !raison.trim().is_empty(),
+            "{fichier}: l'entree {id} a une raison vide"
+        );
+        assert!(
+            raison.contains("2026-"),
+            "{fichier}: la raison de {id} ne porte pas de date 2026-: {raison:?}"
+        );
+    }
+}
+
 /// Le controle positif. Sans lui, une extraction qui rendrait toujours
 /// l'ensemble vide ferait passer la recette precedente sans rien comparer -
 /// deux ensembles vides sont egaux.
 #[test]
 fn l_extraction_trouve_reellement_quelque_chose() {
-    for fichier in ["deny.toml", ".cargo/audit.toml"] {
+    for fichier in PAIRES.iter().flat_map(|(deny, audit)| [*deny, *audit]) {
         let texte = lire(fichier);
         if !texte.contains("RUSTSEC-") {
             // Legitime: le jour ou plus aucun avis n'est ignore, les deux
@@ -157,6 +255,32 @@ fn les_commentaires_ne_comptent_pas() {
         avis_actifs(&deny).len(),
         1,
         "un seul avis est ignore aujourd'hui, et il l'est sur une ligne active"
+    );
+}
+
+/// Le meme temoin pour la coquille, et plus tranchant: `gui/deny.toml` nomme
+/// en prose l'avis de la RACINE (RUSTSEC-2024-0436, `paste`) pour dire
+/// pourquoi il n'est pas dans sa liste. S'il comptait, la coquille ignorerait
+/// un avis absent de son verrou, ce que cargo-deny refuse, et la concordance
+/// avec `gui/.cargo/audit.toml` tomberait.
+#[test]
+fn les_commentaires_de_la_coquille_ne_comptent_pas() {
+    let (fichier, _) = PAIRES[1];
+    let deny = lire(fichier);
+    let en_commentaire: BTreeSet<String> = deny
+        .lines()
+        .filter(|l| l.trim_start().starts_with('#'))
+        .flat_map(identifiants)
+        .collect();
+    assert!(
+        en_commentaire.contains("RUSTSEC-2024-0436"),
+        "ce temoin suppose que {fichier} nomme l'avis de la racine en prose; \
+         il ne le fait plus, donc il ne prouve plus rien"
+    );
+    assert!(
+        !avis_actifs(&deny).contains("RUSTSEC-2024-0436"),
+        "{fichier} ignore activement un avis qui n'existe que dans le verrou de \
+         la racine"
     );
 }
 
@@ -238,6 +362,36 @@ fn deny_refuse_un_ignore_perime() {
         valeur.as_deref(),
         Some(r#""deny""#),
         "deny.toml: la section [advisories] doit porter la ligne active \
+         `{LIGNE_IGNORE_PERIME}`, sinon un ignore perime n'est qu'un avertissement"
+    );
+}
+
+/// Les deux memes lignes dans `gui/deny.toml`. Pour la coquille, `unsound =
+/// "all"` est aussi ce qui fait matcher son entree glib: glib est transitif
+/// (sous atk et gtk, sous tauri), et avec le defaut `workspace` cargo-deny ne
+/// l'examine pas; l'entree serait alors perimee et `unused-ignored-advisory`
+/// la ferait rougir, ou, sans cette cle, seul cargo-audit garderait glib.
+#[test]
+fn la_coquille_examine_les_avis_unsound_sur_tout_l_arbre() {
+    let (fichier, _) = PAIRES[1];
+    let valeur = valeur_dans_advisories(&lire(fichier), "unsound");
+    assert_eq!(
+        valeur.as_deref(),
+        Some(r#""all""#),
+        "{fichier}: la section [advisories] doit porter la ligne active \
+         `{LIGNE_UNSOUND}`; sans elle cargo-deny n'examine les avis unsound que \
+         sur les dependances directes et un crate transitif unsound passe en silence"
+    );
+}
+
+#[test]
+fn la_coquille_refuse_un_ignore_perime() {
+    let (fichier, _) = PAIRES[1];
+    let valeur = valeur_dans_advisories(&lire(fichier), "unused-ignored-advisory");
+    assert_eq!(
+        valeur.as_deref(),
+        Some(r#""deny""#),
+        "{fichier}: la section [advisories] doit porter la ligne active \
          `{LIGNE_IGNORE_PERIME}`, sinon un ignore perime n'est qu'un avertissement"
     );
 }

@@ -17,7 +17,7 @@ The software is called Bifrost. Early design documents used the working name "Hy
 
 ## Current implementation
 
-Bifrost is in development. The first-objective MVP is implemented. The daemon and CLI are available; the Tauri interface is a separate planned milestone, not part of this repository's current interface.
+Bifrost is in development. The first-objective MVP is implemented. The daemon and CLI are available. The graphical shell (Tauri window and tray, [document 08](docs/08-coquille-graphique.md), in French) is in the repository, outside the MVP and without packages. On Windows it does not command the daemon yet: the daemon's channel admits only SYSTEM and Administrators, and the shell refuses to run elevated.
 
 The connection path now uses transport selection. WireGuard runs directly; VLESS + REALITY and Hysteria2 profiles run through sing-box, with a TUN interface and a SOCKS5 forwarding path. DNS filtering and Windows telemetry settings are implemented. Service-specific WFP telemetry filters remain a separate defense-in-depth layer, with their measured effects recorded individually.
 
@@ -55,6 +55,8 @@ crates/
   bifrost-daemon/     privileged daemon, tunnel and test harness
   bifrost-cli/        unprivileged client and local comparisons
   bifrost-coquille/   graphical shell logic: state, commands, view
+  bifrost-icone/      Bifrost icon drawn by code (PNG and ICO, no dependency)
+gui/                  graphical shell window and tray (Tauri 2), separate workspace
 ```
 
 Two principles shape the implementation.
@@ -295,7 +297,7 @@ Reports contain categories and counts, not local addresses, domains, interfaces 
 
 ### CI and platform coverage
 
-Pull requests and pushes to `main` run Linux formatting/lint/tests, leak checks, dependency auditing and parser fuzzing. Fuzzing replays the seeds, then runs each target for 30 seconds. Every day at 04:37 UTC, a scheduled run executes only the dependency audit (`cargo audit`, `cargo deny`, `cargo vet`) on the latest commit of `main`, with a freshly downloaded RustSec advisory database, so an advisory published against a dependency in either lockfile turns it red without waiting for a commit. GitHub may delay scheduled runs and disables them after 60 days without repository activity. New revisions cancel obsolete automatic runs on the same PR or branch.
+Pull requests and pushes to `main` run Linux formatting/lint/tests, the graphical shell's Linux checks (format, build, clippy, tests), leak checks, dependency auditing and parser fuzzing. Fuzzing replays the seeds, then runs each target for 30 seconds. Every day at 04:37 UTC, a scheduled run executes only the dependency audit (`cargo audit`, `cargo deny`, `cargo vet`) on the latest commit of `main`, with a freshly downloaded RustSec advisory database, so an advisory published against a dependency in any lockfile (root, fuzzing harness, graphical shell) turns it red without waiting for a commit. GitHub may delay scheduled runs and disables them after 60 days without repository activity. New revisions cancel obsolete automatic runs on the same PR or branch.
 
 **Windows validation is manual.** Before a Windows delivery, run it on the revision being delivered through Actions > ci > Run workflow > `windows`, or:
 
@@ -303,7 +305,9 @@ Pull requests and pushes to `main` run Linux formatting/lint/tests, leak checks,
 gh workflow run ci.yml --repo Musyg/bifrost-vpn --ref main -f windows=true
 ```
 
-That dispatch runs only the Windows job, with a 30-minute limit and one active Windows job at a time. A skipped Windows job is not Windows validation. The recorded result must identify the SHA it actually checked.
+That dispatch runs only the two Windows jobs: lint and tests (30-minute limit) and the graphical shell (build, clippy and tests, 25-minute limit), each with one active run at a time. A skipped Windows job is not Windows validation. The recorded result must identify the SHA it actually checked.
+
+A pull request that touches `gui/`, `crates/bifrost-coquille`, `crates/bifrost-icone`, `crates/bifrost-ipc` or `packaging/msi` waits, before merging, for a green manual `windows` run on its revision: it is the only run where the shell is built on Windows.
 
 ### Local commands
 
@@ -556,6 +560,7 @@ The detailed design and measurement documents are currently in French:
 | [05: anonymity and chaining](docs/05-anonymat-chainage.md) | Threat models, exit architectures, Tor, Nym and correlation |
 | [06: software architecture and packaging](docs/06-architecture-logicielle-packaging.md) | IPC, services, planned interface and distribution |
 | [07: security programme](docs/07-programme-securite-produit.md) | Threat model, fuzzing, disclosure and regulatory planning |
+| [08: graphical shell](docs/08-coquille-graphique.md) | Scope, unprivileged shell, IPC rules, rendering of each state, what is not done |
 | [09: local verification](docs/09-souverainete-verifiable.md) | File, firewall, routing and DNS evidence; later verification milestones |
 
 The workspace declares MPL-2.0. Third-party executables are separate dependencies with their own licences. For a security report, follow [SECURITY.md](SECURITY.md), not a public issue containing exploit details or secrets. [packaging/security.txt](packaging/security.txt) carries the RFC 9116 contact information served by the publisher's site.

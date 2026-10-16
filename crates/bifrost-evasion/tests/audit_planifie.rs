@@ -31,8 +31,9 @@
 //!   environnement protege le fait attendre une approbation), `container`,
 //!   `services`, `env`, `strategy`;
 //! - une variable de l'`env:` du workflow, ou un reglage de `[advisories]`
-//!   dans `deny.toml` ou `fuzz/deny.toml`, qui deplace ou fige la base de
-//!   cargo-deny (`CARGO_HOME`, `db-urls`, `db-path`, `maximum-db-staleness`).
+//!   dans `deny.toml`, `fuzz/deny.toml` ou `gui/deny.toml`, qui deplace ou
+//!   fige la base de cargo-deny (`CARGO_HOME`, `db-urls`, `db-path`,
+//!   `maximum-db-staleness`).
 //!
 //! Et la recette elle-meme serait aveuglee par une ligne qu'elle decoderait
 //! autrement que GitHub: une valeur continuee sur la ligne suivante, dont elle
@@ -58,14 +59,18 @@
 //!    all jobs that need it are skipped >> (<< Workflow syntax for GitHub
 //!    Actions >>, `jobs.<job_id>.needs`, relevee le 15/10/2026).
 //! 3. Le job `dependances` porte ses juges, et ils tournent sur `schedule`:
-//!    `cargo audit`, `cargo deny check` a la racine et dans `fuzz/`
-//!    (`working-directory: fuzz`), `cargo vet` puis le `git diff` de
+//!    `cargo audit` a la racine et dans `gui/` (`working-directory: gui`),
+//!    `cargo deny check` a la racine, dans `fuzz/` (`working-directory:
+//!    fuzz`) et dans `gui/`, `cargo vet` puis le `git diff` de
 //!    `supply-chain/`. Chacun a la lettre (`cargo audit -D warnings`,
 //!    `cargo deny check`, `cargo vet --locked`,
-//!    `git diff --exit-code -- supply-chain/`) et a sa place: `cargo deny
-//!    check` a la racine et dans `fuzz/`, les autres a la racine
-//!    (`working-directory` lu sous forme canonique: `./fuzz`, `fuzz/` et
-//!    `./fuzz/` valent `fuzz`, `./` la racine). `cargo vet --locked` et le
+//!    `git diff --exit-code -- supply-chain/`) et a sa place: `cargo audit`
+//!    a la racine et dans `gui/`, `cargo deny check` a la racine, dans
+//!    `fuzz/` et dans `gui/`, les autres a la racine (`working-directory` lu
+//!    sous forme canonique: `./fuzz`, `fuzz/` et `./fuzz/` valent `fuzz`,
+//!    `./` la racine). `gui/` est la coquille, espace de travail separe avec
+//!    son propre verrou: sans ses deux juges, un avis contre la pile de la
+//!    WebView ne rougirait aucun run planifie. `cargo vet --locked` et le
 //!    `git diff` sont seuls dans leur etape, et dans cet ordre: vet reecrit
 //!    `supply-chain/` a sa forme canonique, le diff fait echouer l'etape des
 //!    qu'un octet change; place avant vet, il ne verrait pas la reecriture.
@@ -108,7 +113,8 @@
 //!    `ignore = ["RUSTSEC-AAAA-NNNN", ...]`. Toute autre ligne rougit en se
 //!    nommant: `[database]` et ses `fetch = false` ou `stale = true`, la cle
 //!    pointee `database.fetch = false`, `severity_threshold`, une liste
-//!    `ignore` sur plusieurs lignes.
+//!    `ignore` sur plusieurs lignes. `gui/.cargo/audit.toml`, que le juge de
+//!    la coquille lit depuis `gui/`, est ferme de la meme facon.
 //! 8. L'`env:` du workflow est celui de `69d846f`, `CARGO_TERM_COLOR:
 //!    always`, et rien d'autre: une variable ajoutee, retiree ou changee
 //!    rougit en se nommant. Une variable de l'`env:` du workflow atteint
@@ -124,7 +130,16 @@
 //!    choisit la base de cargo-deny et dit comment la prendre (`db-urls`,
 //!    `db-path`, `git-fetch-with-cli`, `maximum-db-staleness`). Fige par
 //!    decision du 15/10/2026; la recette lit ces deux fichiers, elle ne les
-//!    change pas.
+//!    change pas. La section `[advisories]` de `gui/deny.toml` est figee de
+//!    la meme facon, sous les memes regles, a `ADVISORIES_DE_LA_COQUILLE`:
+//!    les cinq reglages de la racine, puis la liste des avis que la coquille
+//!    ignore. Changer cette liste, c'est changer cette constante dans le meme
+//!    commit.
+//! 10. Les deux jobs de la coquille suivent la politique de lancement du
+//!     depot: `interface-linux` tourne sur un push, une PR et un lancement
+//!     manuel sans la case `windows`; `interface-windows` seulement sur un
+//!     lancement manuel avec elle; aucun des deux sur `schedule`, ce que la
+//!     regle 2 exige deja de tout job autre que `dependances`.
 //!
 //! # La grammaire qu'elle lit
 //!
@@ -192,13 +207,17 @@
 //!
 //! Elle ne lit pas les etapes sans juge du job `dependances` (checkout,
 //! outillage, installation de cargo-vet, SBOM): ni leurs commandes, ni leurs
-//! cles, ni leurs conditions. Elles tournent avant les juges et peuvent
-//! ecrire dans `$GITHUB_ENV`, `$GITHUB_PATH`, `.cargo/audit.toml` ou la
-//! configuration git de l'hote. Porte declaree, pas fermee, par decision du
-//! 15/10/2026: la fermer toucherait la recette a chaque montee d'une action
-//! epinglee ou d'un outil.
+//! cles, ni leurs conditions. Le checkout et l'outillage tournent avant tous
+//! les juges, l'installation de cargo-vet avant `cargo vet` (apres les
+//! juges cargo-audit et cargo-deny), et les deux etapes du SBOM apres le
+//! dernier juge; celles qui precedent un juge peuvent ecrire dans
+//! `$GITHUB_ENV`, `$GITHUB_PATH`, `.cargo/audit.toml` ou la configuration
+//! git de l'hote. Porte declaree, pas fermee, par decision du 15/10/2026: la
+//! fermer toucherait la recette a chaque montee d'une action epinglee ou
+//! d'un outil.
 //!
-//! De `deny.toml` et `fuzz/deny.toml`, elle ne lit que ce que dit la regle 9:
+//! De `deny.toml`, `fuzz/deny.toml` et `gui/deny.toml`, elle ne lit que ce
+//! que dit la regle 9:
 //! ni `[licenses]`, ni `[bans]`, ni `[sources]`, hors des en-tetes et des cles
 //! `advisories...`. Elle ne lit ni l'environnement ni la configuration git de
 //! l'hote, que cargo-deny 0.20.2 passe au binaire `git`
@@ -274,6 +293,85 @@ const ADVISORIES_A_69D846F: [&str; 8] = [
      binaire livre, transitif sous wireguard-control, aucune version corrigee\" },",
     "]",
 ];
+
+/// La coquille (`gui/`): un espace de travail separe, son verrou, ses deux
+/// fichiers de configuration des juges.
+const CONFIG_AUDIT_GUI: &str = "gui/.cargo/audit.toml";
+const CONFIG_DENY_GUI: &str = "gui/deny.toml";
+
+/// Le repertoire ou tournent les juges de la coquille, sous forme canonique.
+const REPERTOIRE_GUI: &str = "gui";
+
+/// Les lignes actives de `[advisories]` dans `gui/deny.toml`, figees (regle
+/// 9): les cinq reglages de la racine, puis la liste des avis que la coquille
+/// ignore, entree par entree, raison comprise. Changer la liste, c'est changer
+/// cette constante dans le meme commit.
+const ADVISORIES_DE_LA_COQUILLE: [&str; 14] = [
+    "db-urls = [\"https://github.com/rustsec/advisory-db\"]",
+    "yanked = \"deny\"",
+    "unmaintained = \"all\"",
+    "unsound = \"all\"",
+    "unused-ignored-advisory = \"deny\"",
+    "ignore = [",
+    "    { id = \"RUSTSEC-2024-0370\", reason = \"2026-10-16: proc-macro-error 1.0.4 non \
+     maintenu, aucune version corrigee; tire seulement par deux proc-macros de gtk-rs 0.18 \
+     (glib-macros, gtk3-macros), donc execute a la construction et absent du binaire livre; \
+     Linux seulement\" },",
+    "    { id = \"RUSTSEC-2025-0081\", reason = \"2026-10-16: unic-char-property 0.9.0 non \
+     maintenu, aucune version corrigee; tables Unicode statiques tirees par urlpattern 0.3.0 \
+     sous tauri-utils 2.9.3, dans le binaire livre sur les deux plateformes\" },",
+    "    { id = \"RUSTSEC-2025-0075\", reason = \"2026-10-16: unic-char-range 0.9.0 non \
+     maintenu, aucune version corrigee; tables Unicode statiques tirees par urlpattern 0.3.0 \
+     sous tauri-utils 2.9.3, dans le binaire livre sur les deux plateformes\" },",
+    "    { id = \"RUSTSEC-2025-0080\", reason = \"2026-10-16: unic-common 0.9.0 non maintenu, \
+     aucune version corrigee; tables Unicode statiques tirees par urlpattern 0.3.0 sous \
+     tauri-utils 2.9.3, dans le binaire livre sur les deux plateformes\" },",
+    "    { id = \"RUSTSEC-2025-0100\", reason = \"2026-10-16: unic-ucd-ident 0.9.0 non \
+     maintenu, aucune version corrigee; tables Unicode statiques tirees par urlpattern 0.3.0 \
+     sous tauri-utils 2.9.3, dans le binaire livre sur les deux plateformes\" },",
+    "    { id = \"RUSTSEC-2025-0098\", reason = \"2026-10-16: unic-ucd-version 0.9.0 non \
+     maintenu, aucune version corrigee; tables Unicode statiques tirees par urlpattern 0.3.0 \
+     sous tauri-utils 2.9.3, dans le binaire livre sur les deux plateformes\" },",
+    "    { id = \"RUSTSEC-2024-0429\", reason = \"2026-10-16: glib 0.18.5 unsound \
+     (VariantStrIter, corrige en 0.20.0); tauri 2.x epingle toujours gtk-rs 0.18 (tauri \
+     2.12.4 exige gtk ^0.18); aucune occurrence de VariantStrIter dans notre code; Linux \
+     seulement; processus non privilegie\" },",
+    "]",
+];
+
+/// Une section `[advisories]` figee (regle 9): ses lignes actives, et ce que
+/// les messages en disent.
+struct SectionFigee {
+    lignes: &'static [&'static str],
+    /// D'ou viennent les lignes, dans les messages.
+    origine: &'static str,
+    /// Pourquoi la section est figee, ajoute a chaque defaut.
+    pourquoi: &'static str,
+}
+
+/// `[advisories]` de `deny.toml` et de `fuzz/deny.toml`.
+const SECTION_A_69D846F: SectionFigee = SectionFigee {
+    lignes: &ADVISORIES_A_69D846F,
+    origine: "a `69d846f`",
+    pourquoi: "la section `[advisories]` est figee a son contenu de `69d846f` (decision du \
+               15/10/2026): elle choisit la base d'avis de cargo-deny et dit comment la \
+               prendre (`db-urls`, `db-path`, `git-fetch-with-cli`, `maximum-db-staleness`)",
+};
+
+/// `[advisories]` de `gui/deny.toml`.
+const SECTION_DE_LA_COQUILLE: SectionFigee = SectionFigee {
+    lignes: &ADVISORIES_DE_LA_COQUILLE,
+    origine: "de `ADVISORIES_DE_LA_COQUILLE`",
+    pourquoi: "la section `[advisories]` de la coquille est figee a \
+               `ADVISORIES_DE_LA_COQUILLE`: elle choisit la base d'avis de cargo-deny et dit \
+               comment la prendre (`db-urls`, `db-path`, `git-fetch-with-cli`, \
+               `maximum-db-staleness`), et porte la liste des avis ignores, qui ne change \
+               qu'avec cette constante, dans le meme commit",
+};
+
+/// Les deux jobs de la coquille, et ou chacun tourne (regle 10).
+const JOB_COQUILLE_LINUX: &str = "interface-linux";
+const JOB_COQUILLE_WINDOWS: &str = "interface-windows";
 
 /// L'`env:` du workflow tel que lu: sa ligne, et ses entrees (ligne, cle,
 /// valeur), ou `None` s'il n'est pas un mapping.
@@ -1804,10 +1902,10 @@ fn est_liste_ignore(actif: &str) -> bool {
     mots.iter().all(|m| id(m))
 }
 
-/// `.cargo/audit.toml`, ferme: lignes vides, commentaires, `[advisories]`
-/// une fois et, sous lui, une ligne `ignore = [...]` une fois. Toute autre
-/// ligne est un defaut qui la nomme.
-fn defauts_de_la_config_audit(config: &str) -> Vec<String> {
+/// `.cargo/audit.toml` (ou celui de la coquille, `fichier`), ferme: lignes
+/// vides, commentaires, `[advisories]` une fois et, sous lui, une ligne
+/// `ignore = [...]` une fois. Toute autre ligne est un defaut qui la nomme.
+fn defauts_de_la_config_audit(fichier: &str, config: &str) -> Vec<String> {
     let mut defauts = Vec::new();
     let mut dans_advisories = false;
     let (mut advisories_vue, mut ignore_vu) = (false, false);
@@ -1830,7 +1928,7 @@ fn defauts_de_la_config_audit(config: &str) -> Vec<String> {
         };
         if !admise {
             defauts.push(format!(
-                "{CONFIG_AUDIT}, ligne {}: `{t}`: hors des formes admises (ligne vide, \
+                "{fichier}, ligne {}: `{t}`: hors des formes admises (ligne vide, \
                  commentaire, `[advisories]`, puis `ignore = [\"RUSTSEC-AAAA-NNNN\", ...]` \
                  sur une ligne): la recette ne juge pas ce qu'elle regle a cargo-audit \
                  (`fetch = false` ou `stale = true` sous `[database]`, et \
@@ -1858,18 +1956,19 @@ fn en_tete_nu(t: &str) -> Option<&str> {
         .then_some(c)
 }
 
-/// `[advisories]` d'un fichier de cargo-deny, fige a son contenu de
-/// `69d846f` (regle 9). Ses lignes actives, ni vides ni commentaires, sont
-/// comparees a la lettre a `ADVISORIES_A_69D846F`; la racine du fichier,
-/// avant tout en-tete, n'a aucune ligne active; `[advisories]` est le premier
-/// en-tete et le seul de son nom; aucun autre en-tete ne commence par
-/// `advisories`; tout en-tete est sous forme nue; aucune ligne active hors de
-/// la section ne commence par `advisories`, entre guillemets ou non. Toute
-/// autre ligne est un defaut qui la nomme.
-fn defauts_de_deny(fichier: &str, texte_du_fichier: &str) -> Vec<String> {
-    let fige = "la section `[advisories]` est figee a son contenu de `69d846f` (decision du \
-                15/10/2026): elle choisit la base d'avis de cargo-deny et dit comment la \
-                prendre (`db-urls`, `db-path`, `git-fetch-with-cli`, `maximum-db-staleness`)";
+/// `[advisories]` d'un fichier de cargo-deny, fige (regle 9): a son contenu
+/// de `69d846f` pour `deny.toml` et `fuzz/deny.toml`, a
+/// `ADVISORIES_DE_LA_COQUILLE` pour `gui/deny.toml`. Ses lignes actives, ni
+/// vides ni commentaires, sont comparees a la lettre a celles de `section`;
+/// la racine du fichier, avant tout en-tete, n'a aucune ligne active;
+/// `[advisories]` est le premier en-tete et le seul de son nom; aucun autre
+/// en-tete ne commence par `advisories`; tout en-tete est sous forme nue;
+/// aucune ligne active hors de la section ne commence par `advisories`,
+/// entre guillemets ou non. Toute autre ligne est un defaut qui la nomme.
+fn defauts_de_deny(fichier: &str, texte_du_fichier: &str, section: &SectionFigee) -> Vec<String> {
+    let fige = section.pourquoi;
+    let origine = section.origine;
+    let attendues = section.lignes;
     let mut defauts = Vec::new();
     // None: avant tout en-tete; Some(true): dans `[advisories]`; Some(false):
     // dans une autre table.
@@ -1912,7 +2011,7 @@ fn defauts_de_deny(fichier: &str, texte_du_fichier: &str) -> Vec<String> {
         match dans {
             None => defauts.push(format!(
                 "{fichier}, ligne {n}: `{t}`: ligne active avant `[advisories]`, dont la racine \
-                 est vide a `69d846f` (une cle pointee `advisories.<x>` ou une table en ligne y \
+                 est vide {origine} (une cle pointee `advisories.<x>` ou une table en ligne y \
                  reglerait la base); {fige}"
             )),
             Some(true) => actives.push((n, ligne)),
@@ -1935,19 +2034,19 @@ fn defauts_de_deny(fichier: &str, texte_du_fichier: &str) -> Vec<String> {
         return defauts;
     }
     let vues: Vec<&str> = actives.iter().map(|(_, l)| *l).collect();
-    if vues != ADVISORIES_A_69D846F {
+    if vues != attendues {
         let avant = defauts.len();
         for (n, l) in &actives {
-            if !ADVISORIES_A_69D846F.contains(l) {
+            if !attendues.contains(l) {
                 defauts.push(format!(
-                    "{fichier}, ligne {n}: `{}` n'est pas une ligne de la section a \
-                     `69d846f`; {fige}",
+                    "{fichier}, ligne {n}: `{}` n'est pas une ligne de la section {origine}; \
+                     {fige}",
                     l.trim()
                 ));
             }
         }
-        for attendue in ADVISORIES_A_69D846F {
-            if !vues.contains(&attendue) {
+        for attendue in attendues {
+            if !vues.contains(attendue) {
                 defauts.push(format!(
                     "{fichier}: `{}` retiree de la section `[advisories]`; {fige}",
                     attendue.trim()
@@ -2016,6 +2115,8 @@ struct Configs<'a> {
     audit: &'a str,
     deny: &'a str,
     deny_fuzz: &'a str,
+    audit_gui: &'a str,
+    deny_gui: &'a str,
 }
 
 /// Juge un workflow et les configurations des juges. `Err`: un texte que la
@@ -2156,6 +2257,7 @@ fn juger(texte: &str, configs: &Configs) -> Result<Rapport, String> {
             ));
         }
         let (mut audit, mut deny_racine, mut deny_fuzz, mut vet) = (false, false, false, false);
+        let (mut audit_gui, mut deny_gui) = (false, false);
         let mut vet_puis_diff = false;
         for e in &job.etapes {
             let Some(corps) = &e.run else { continue };
@@ -2189,17 +2291,21 @@ fn juger(texte: &str, configs: &Configs) -> Result<Rapport, String> {
                     etrangeres.push(texte);
                     continue;
                 };
-                // Ou chaque juge a sa place: `cargo deny check` a la racine et
-                // dans `fuzz/`, les autres a la racine seulement.
+                // Ou chaque juge a sa place: `cargo audit` a la racine et dans
+                // `gui/`, `cargo deny check` a la racine, dans `fuzz/` et dans
+                // `gui/`, les autres a la racine seulement.
+                let gui = repertoire == REPERTOIRE_GUI;
                 let juge = match sous {
                     "audit" => {
                         audit |= tourne && racine;
-                        Some(racine)
+                        audit_gui |= tourne && gui;
+                        Some(racine || gui)
                     }
                     "deny" if autres.contains(&"check") => {
                         deny_racine |= tourne && racine;
                         deny_fuzz |= tourne && repertoire == "fuzz";
-                        Some(racine || repertoire == "fuzz")
+                        deny_gui |= tourne && gui;
+                        Some(racine || repertoire == "fuzz" || gui)
                     }
                     "vet" => {
                         vet |= tourne && racine;
@@ -2325,6 +2431,14 @@ fn juger(texte: &str, configs: &Configs) -> Result<Rapport, String> {
                 deny_fuzz,
                 "`cargo deny check` dans `fuzz/` (`working-directory: fuzz`)",
             ),
+            (
+                audit_gui,
+                "`cargo audit` dans `gui/` (`working-directory: gui`)",
+            ),
+            (
+                deny_gui,
+                "`cargo deny check` dans `gui/` (`working-directory: gui`)",
+            ),
             (vet, "`cargo vet`"),
             (
                 vet_puis_diff,
@@ -2339,13 +2453,30 @@ fn juger(texte: &str, configs: &Configs) -> Result<Rapport, String> {
             }
         }
     }
-    // 7. La configuration de cargo-audit, fermee.
-    defauts.extend(defauts_de_la_config_audit(configs.audit));
+    // 7. Les deux configurations de cargo-audit, fermees.
+    defauts.extend(defauts_de_la_config_audit(CONFIG_AUDIT, configs.audit));
+    defauts.extend(defauts_de_la_config_audit(
+        CONFIG_AUDIT_GUI,
+        configs.audit_gui,
+    ));
     // 8. L'`env:` du workflow, fige.
     defauts.extend(defauts_de_l_env(&wf.env));
-    // 9. `[advisories]` des deux fichiers de cargo-deny, figee.
-    defauts.extend(defauts_de_deny(CONFIG_DENY, configs.deny));
-    defauts.extend(defauts_de_deny(CONFIG_DENY_FUZZ, configs.deny_fuzz));
+    // 9. `[advisories]` des trois fichiers de cargo-deny, figee.
+    defauts.extend(defauts_de_deny(
+        CONFIG_DENY,
+        configs.deny,
+        &SECTION_A_69D846F,
+    ));
+    defauts.extend(defauts_de_deny(
+        CONFIG_DENY_FUZZ,
+        configs.deny_fuzz,
+        &SECTION_A_69D846F,
+    ));
+    defauts.extend(defauts_de_deny(
+        CONFIG_DENY_GUI,
+        configs.deny_gui,
+        &SECTION_DE_LA_COQUILLE,
+    ));
 
     // 4. Le groupe de concurrence du run planifie.
     if let Some(groupe) = &wf.groupe {
@@ -2370,15 +2501,19 @@ fn juger(texte: &str, configs: &Configs) -> Result<Rapport, String> {
 
 #[test]
 fn le_run_planifie_ne_lance_que_l_audit_sur_une_base_fraiche() {
-    let (audit, deny, deny_fuzz) = (
+    let (audit, deny, deny_fuzz, audit_gui, deny_gui) = (
         lire(CONFIG_AUDIT),
         lire(CONFIG_DENY),
         lire(CONFIG_DENY_FUZZ),
+        lire(CONFIG_AUDIT_GUI),
+        lire(CONFIG_DENY_GUI),
     );
     let configs = Configs {
         audit: &audit,
         deny: &deny,
         deny_fuzz: &deny_fuzz,
+        audit_gui: &audit_gui,
+        deny_gui: &deny_gui,
     };
     let rapport = juger(&lire(WORKFLOW), &configs)
         .unwrap_or_else(|e| panic!("{WORKFLOW} illisible pour la recette: {e}"));
@@ -2390,6 +2525,66 @@ fn le_run_planifie_ne_lance_que_l_audit_sur_une_base_fraiche() {
         "{} defaut(s) du run planifie de {WORKFLOW}:\n  {}",
         rapport.defauts.len(),
         rapport.defauts.join("\n  ")
+    );
+}
+
+/// Ou tournent les deux jobs de la coquille, d'apres le routage du workflow
+/// reel (regle 10): Linux a chaque push, PR et lancement manuel sans la case
+/// `windows`; Windows seulement sur un lancement manuel avec elle; aucun des
+/// deux sur `schedule`.
+fn defauts_des_jobs_de_la_coquille(table: &[(&'static str, Vec<String>)]) -> Vec<String> {
+    let mut defauts = Vec::new();
+    for (job, ou) in [
+        (
+            JOB_COQUILLE_LINUX,
+            ["push", "pull_request", "workflow_dispatch windows=false"].as_slice(),
+        ),
+        (
+            JOB_COQUILLE_WINDOWS,
+            ["workflow_dispatch windows=true"].as_slice(),
+        ),
+    ] {
+        let vus: Vec<&str> = table
+            .iter()
+            .filter(|(_, jobs)| jobs.iter().any(|j| j == job))
+            .map(|(s, _)| *s)
+            .collect();
+        if vus != ou {
+            defauts.push(format!(
+                "le job `{job}` tourne sur [{}], la politique de lancement du depot le veut \
+                 sur [{}]",
+                vus.join(", "),
+                ou.join(", ")
+            ));
+        }
+    }
+    defauts
+}
+
+#[test]
+fn les_jobs_de_la_coquille_suivent_la_politique_de_lancement() {
+    let (audit, deny, deny_fuzz, audit_gui, deny_gui) = (
+        lire(CONFIG_AUDIT),
+        lire(CONFIG_DENY),
+        lire(CONFIG_DENY_FUZZ),
+        lire(CONFIG_AUDIT_GUI),
+        lire(CONFIG_DENY_GUI),
+    );
+    let configs = Configs {
+        audit: &audit,
+        deny: &deny,
+        deny_fuzz: &deny_fuzz,
+        audit_gui: &audit_gui,
+        deny_gui: &deny_gui,
+    };
+    let rapport = juger(&lire(WORKFLOW), &configs)
+        .unwrap_or_else(|e| panic!("{WORKFLOW} illisible pour la recette: {e}"));
+    let defauts = defauts_des_jobs_de_la_coquille(&rapport.table);
+    assert!(
+        defauts.is_empty(),
+        "{} defaut(s) du routage de la coquille dans {WORKFLOW}:\n  {}",
+        defauts.len(),
+        defauts.join("\n  ")
     );
 }
 
@@ -2428,6 +2623,16 @@ jobs:
       group: ${{ github.workflow }}-windows
     steps:
       - run: cargo test
+  interface-linux:
+    if: github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.windows)
+    runs-on: ubuntu-24.04
+    steps:
+      - run: cargo test --manifest-path gui/Cargo.toml --locked
+  interface-windows:
+    if: github.event_name == 'workflow_dispatch' && inputs.windows
+    runs-on: windows-2025-vs2026
+    steps:
+      - run: cargo test --manifest-path gui/Cargo.toml --locked
   dependances:
     if: github.event_name != 'workflow_dispatch' || !inputs.windows
     runs-on: ubuntu-24.04
@@ -2439,6 +2644,12 @@ jobs:
         run: cargo deny check
       - name: Licences du harnais
         working-directory: fuzz
+        run: cargo deny check
+      - name: Avis de la coquille
+        working-directory: gui
+        run: cargo audit -D warnings
+      - name: Licences de la coquille
+        working-directory: gui
         run: cargo deny check
       # commentaire entre deux etapes
       - name: Vet
@@ -2452,6 +2663,10 @@ jobs:
 
 const CONFIG_TEMOIN: &str = "[advisories]\nignore = [\"RUSTSEC-2024-0436\"]\n";
 
+/// Le `gui/.cargo/audit.toml` du temoin: la meme forme, une autre liste.
+const CONFIG_TEMOIN_GUI: &str =
+    "# la coquille\n[advisories]\nignore = [\"RUSTSEC-2024-0370\", \"RUSTSEC-2024-0429\"]\n";
+
 /// Un `deny.toml` de la forme de ceux du depot: sa section `[advisories]` de
 /// `69d846f`, commentee, puis une autre table.
 fn deny_temoin() -> String {
@@ -2461,15 +2676,27 @@ fn deny_temoin() -> String {
     )
 }
 
+/// Le `gui/deny.toml` du temoin: sa section `[advisories]` figee, commentee,
+/// puis les autres tables.
+fn deny_gui_temoin() -> String {
+    format!(
+        "# politique de la coquille\n\n[advisories]\n# la base\n{}\n\n[licenses]\nallow = \
+         [\"MIT\"]\n\n[sources]\nunknown-git = \"deny\"\n",
+        ADVISORIES_DE_LA_COQUILLE.join("\n")
+    )
+}
+
 /// Juge un workflow avec les configurations du temoin.
 fn juger_temoin(texte: &str) -> Result<Rapport, String> {
-    let deny = deny_temoin();
+    let (deny, deny_gui) = (deny_temoin(), deny_gui_temoin());
     juger(
         texte,
         &Configs {
             audit: CONFIG_TEMOIN,
             deny: &deny,
             deny_fuzz: &deny,
+            audit_gui: CONFIG_TEMOIN_GUI,
+            deny_gui: &deny_gui,
         },
     )
 }
@@ -2484,16 +2711,36 @@ fn le_temoin_est_lu_et_juge_sain() {
     );
     assert_eq!(wf.crons, [(9, "37 4 * * *".to_string())]);
     let ids: Vec<&str> = wf.jobs.iter().map(|j| j.id.as_str()).collect();
-    assert_eq!(ids, ["controles", "windows", "dependances"]);
-    let dep = &wf.jobs[2];
+    assert_eq!(
+        ids,
+        [
+            "controles",
+            "windows",
+            "interface-linux",
+            "interface-windows",
+            "dependances"
+        ]
+    );
+    let dep = &wf.jobs[4];
     let noms: Vec<&str> = dep.etapes.iter().map(|e| e.nom.as_str()).collect();
     assert_eq!(
         noms,
-        ["", "Avis", "Licences", "Licences du harnais", "Vet", "SBOM"]
+        [
+            "",
+            "Avis",
+            "Licences",
+            "Licences du harnais",
+            "Avis de la coquille",
+            "Licences de la coquille",
+            "Vet",
+            "SBOM"
+        ]
     );
     assert_eq!(dep.etapes[3].repertoire.as_deref(), Some("fuzz"));
+    assert_eq!(dep.etapes[4].repertoire.as_deref(), Some("gui"));
+    assert_eq!(dep.etapes[5].repertoire.as_deref(), Some("gui"));
     assert_eq!(
-        dep.etapes[4].run.as_deref(),
+        dep.etapes[6].run.as_deref(),
         Some("cargo vet --locked\ngit diff --exit-code -- supply-chain/\n")
     );
 
@@ -2523,15 +2770,26 @@ fn le_temoin_est_lu_et_juge_sain() {
     assert_eq!(
         table,
         [
-            ("push", vec!["controles", "dependances"]),
-            ("pull_request", vec!["controles", "dependances"]),
+            ("push", vec!["controles", "interface-linux", "dependances"]),
+            (
+                "pull_request",
+                vec!["controles", "interface-linux", "dependances"]
+            ),
             ("schedule", vec!["dependances"]),
             (
                 "workflow_dispatch windows=false",
-                vec!["controles", "dependances"]
+                vec!["controles", "interface-linux", "dependances"]
             ),
-            ("workflow_dispatch windows=true", vec!["windows"]),
+            (
+                "workflow_dispatch windows=true",
+                vec!["windows", "interface-windows"]
+            ),
         ]
+    );
+    assert!(
+        defauts_des_jobs_de_la_coquille(&rapport.table).is_empty(),
+        "{:?}",
+        defauts_des_jobs_de_la_coquille(&rapport.table)
     );
 }
 
@@ -2843,6 +3101,80 @@ fn chaque_mutation_du_temoin_rougit() {
             "",
             "`env:` du workflow absent",
         ),
+        // Les juges de la coquille (`gui/`).
+        (
+            "audit de la coquille retire",
+            "      - name: Avis de la coquille\n        working-directory: gui\n        run: cargo \
+             audit -D warnings\n",
+            "",
+            "`cargo audit` dans `gui/` (`working-directory: gui`) ne tourne pas",
+        ),
+        (
+            "deny de la coquille retire",
+            "      - name: Licences de la coquille\n        working-directory: gui\n        run: \
+             cargo deny check\n",
+            "",
+            "`cargo deny check` dans `gui/` (`working-directory: gui`) ne tourne pas",
+        ),
+        (
+            "audit de la coquille sans son repertoire",
+            "        working-directory: gui\n        run: cargo audit -D warnings\n",
+            "        run: cargo audit -D warnings\n",
+            "`cargo audit` dans `gui/` (`working-directory: gui`) ne tourne pas",
+        ),
+        (
+            "audit de la coquille dans fuzz",
+            "        working-directory: gui\n        run: cargo audit -D warnings\n",
+            "        working-directory: fuzz\n        run: cargo audit -D warnings\n",
+            "`cargo audit -D warnings` lance dans `fuzz`",
+        ),
+        (
+            "deny de la coquille d'un seul controle",
+            "        working-directory: gui\n        run: cargo deny check\n",
+            "        working-directory: gui\n        run: cargo deny check advisories\n",
+            "`cargo deny check advisories`: forme que la recette ne connait pas",
+        ),
+        (
+            "audit de la coquille qui ecarte glib",
+            "        working-directory: gui\n        run: cargo audit -D warnings\n",
+            "        working-directory: gui\n        run: cargo audit -D warnings --ignore \
+             RUSTSEC-2024-0429\n",
+            "--ignore RUSTSEC-2024-0429`: forme",
+        ),
+        (
+            "audit de la coquille sans telechargement",
+            "        working-directory: gui\n        run: cargo audit -D warnings\n",
+            "        working-directory: gui\n        run: cargo audit --no-fetch -D warnings\n",
+            "porte --no-fetch",
+        ),
+        (
+            "deny de la coquille saute sur schedule",
+            "      - name: Licences de la coquille\n",
+            "      - name: Licences de la coquille\n        if: github.event_name != 'schedule'\n",
+            "`cargo deny` y est saute sur `schedule`",
+        ),
+        (
+            "cargo vet dans gui",
+            "        run: |\n          cargo vet --locked\n",
+            "        working-directory: gui\n        run: |\n          cargo vet --locked\n",
+            "`cargo vet --locked` lance dans `gui`",
+        ),
+        // Les jobs de la coquille, et tout job nouveau, sur `schedule`.
+        (
+            "coquille Linux sur schedule",
+            "  interface-linux:\n    if: github.event_name != 'schedule' && (github.event_name != \
+             'workflow_dispatch' || !inputs.windows)\n",
+            "  interface-linux:\n    if: github.event_name != 'workflow_dispatch' || \
+             !inputs.windows\n",
+            "en plus de `dependances`: interface-linux",
+        ),
+        (
+            "nouveau job sans condition de schedule",
+            "  dependances:\n",
+            "  paquets:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: cargo build\n  \
+             dependances:\n",
+            "en plus de `dependances`: paquets",
+        ),
     ];
     let mut ecarts = Vec::new();
     for (quoi, de, vers, attendu) in cas {
@@ -2851,6 +3183,43 @@ fn chaque_mutation_du_temoin_rougit() {
         match juger_temoin(&mute) {
             Ok(r) if r.defauts.iter().any(|d| d.contains(attendu)) => {}
             Ok(r) => ecarts.push(format!("{quoi}: attendu `{attendu}`, vu {:?}", r.defauts)),
+            Err(e) => ecarts.push(format!("{quoi}: illisible ({e}) au lieu d'un defaut")),
+        }
+    }
+    // La politique de lancement des deux jobs de la coquille (regle 10).
+    let linux_coquille = "  interface-linux:\n    if: github.event_name != 'schedule' && \
+                          (github.event_name != 'workflow_dispatch' || !inputs.windows)\n";
+    let windows_coquille = "  interface-windows:\n    if: github.event_name == 'workflow_dispatch' \
+                            && inputs.windows\n";
+    for (quoi, de, vers, attendu) in [
+        (
+            "coquille Windows sur chaque push",
+            windows_coquille,
+            "  interface-windows:\n    if: github.event_name != 'schedule'\n",
+            "le job `interface-windows` tourne sur [push, pull_request",
+        ),
+        (
+            "coquille Linux sur les seules PR",
+            linux_coquille,
+            "  interface-linux:\n    if: github.event_name == 'pull_request'\n",
+            "le job `interface-linux` tourne sur [pull_request], la politique",
+        ),
+        (
+            "coquille Linux retiree",
+            "  interface-linux:\n",
+            "  autre-linux:\n",
+            "le job `interface-linux` tourne sur [], la politique",
+        ),
+    ] {
+        assert!(TEMOIN.contains(de), "{quoi}: `{de}` absent du temoin");
+        let mute = TEMOIN.replacen(de, vers, 1);
+        match juger_temoin(&mute) {
+            Ok(r) => {
+                let d = defauts_des_jobs_de_la_coquille(&r.table);
+                if !d.iter().any(|x| x.contains(attendu)) {
+                    ecarts.push(format!("{quoi}: attendu `{attendu}`, vu {d:?}"));
+                }
+            }
             Err(e) => ecarts.push(format!("{quoi}: illisible ({e}) au lieu d'un defaut")),
         }
     }
@@ -2888,30 +3257,54 @@ fn chaque_mutation_du_temoin_rougit() {
             vec!["`ignore = [\"RUSTSEC-2024-0436\"]`"],
         ),
     ] {
-        let deny = deny_temoin();
-        let configs = Configs {
-            audit: &config,
-            deny: &deny,
-            deny_fuzz: &deny,
-        };
-        match juger(TEMOIN, &configs) {
-            Ok(r) => {
-                for a in &attendus {
-                    if !r
-                        .defauts
-                        .iter()
-                        .any(|d| d.contains(CONFIG_AUDIT) && d.contains(a))
-                    {
-                        ecarts.push(format!("{quoi}: attendu {a} nomme, vu {:?}", r.defauts));
+        let (deny, deny_gui) = (deny_temoin(), deny_gui_temoin());
+        // La meme ligne, dans la configuration de la racine puis dans celle
+        // de la coquille: chacune est nommee avec son fichier.
+        for (fichier, configs) in [
+            (
+                CONFIG_AUDIT,
+                Configs {
+                    audit: &config,
+                    deny: &deny,
+                    deny_fuzz: &deny,
+                    audit_gui: CONFIG_TEMOIN_GUI,
+                    deny_gui: &deny_gui,
+                },
+            ),
+            (
+                CONFIG_AUDIT_GUI,
+                Configs {
+                    audit: CONFIG_TEMOIN,
+                    deny: &deny,
+                    deny_fuzz: &deny,
+                    audit_gui: &config,
+                    deny_gui: &deny_gui,
+                },
+            ),
+        ] {
+            match juger(TEMOIN, &configs) {
+                Ok(r) => {
+                    for a in &attendus {
+                        if !r
+                            .defauts
+                            .iter()
+                            .any(|d| d.starts_with(&format!("{fichier}, ")) && d.contains(a))
+                        {
+                            ecarts.push(format!(
+                                "{quoi} ({fichier}): attendu {a} nomme, vu {:?}",
+                                r.defauts
+                            ));
+                        }
                     }
                 }
+                Err(e) => ecarts.push(format!("{quoi} ({fichier}): illisible ({e})")),
             }
-            Err(e) => ecarts.push(format!("{quoi}: illisible ({e})")),
         }
     }
-    // Chaque changement de `[advisories]` dans l'un des deux fichiers de
+    // Chaque changement de `[advisories]` dans l'un des trois fichiers de
     // cargo-deny est nomme, avec son fichier.
     let sain = deny_temoin();
+    let sain_gui = deny_gui_temoin();
     let urls = "db-urls = [\"https://github.com/rustsec/advisory-db\"]\n";
     let yanked = "yanked = \"deny\"\n";
     for (quoi, de, vers, attendus) in [
@@ -2995,7 +3388,12 @@ fn chaque_mutation_du_temoin_rougit() {
             sain.contains(de),
             "{quoi}: `{de}` absent du deny.toml temoin"
         );
+        assert!(
+            sain_gui.contains(de),
+            "{quoi}: `{de}` absent du gui/deny.toml temoin"
+        );
         let mute = sain.replacen(de, vers, 1);
+        let mute_gui = sain_gui.replacen(de, vers, 1);
         for (fichier, configs) in [
             (
                 CONFIG_DENY,
@@ -3003,6 +3401,8 @@ fn chaque_mutation_du_temoin_rougit() {
                     audit: CONFIG_TEMOIN,
                     deny: &mute,
                     deny_fuzz: &sain,
+                    audit_gui: CONFIG_TEMOIN_GUI,
+                    deny_gui: &sain_gui,
                 },
             ),
             (
@@ -3011,6 +3411,18 @@ fn chaque_mutation_du_temoin_rougit() {
                     audit: CONFIG_TEMOIN,
                     deny: &sain,
                     deny_fuzz: &mute,
+                    audit_gui: CONFIG_TEMOIN_GUI,
+                    deny_gui: &sain_gui,
+                },
+            ),
+            (
+                CONFIG_DENY_GUI,
+                Configs {
+                    audit: CONFIG_TEMOIN,
+                    deny: &sain,
+                    deny_fuzz: &sain,
+                    audit_gui: CONFIG_TEMOIN_GUI,
+                    deny_gui: &mute_gui,
                 },
             ),
         ] {
@@ -3032,6 +3444,68 @@ fn chaque_mutation_du_temoin_rougit() {
                 Err(e) => ecarts.push(format!("{quoi} ({fichier}): illisible ({e})")),
             }
         }
+    }
+    // La liste des avis de la coquille est figee avec le reste de sa
+    // section: une entree retiree, ajoutee ou dont la raison change est
+    // nommee dans `gui/deny.toml`, et la section de la racine ne l'admet pas.
+    let glib = ADVISORIES_DE_LA_COQUILLE[ADVISORIES_DE_LA_COQUILLE.len() - 2];
+    assert!(glib.contains("RUSTSEC-2024-0429"), "{glib}");
+    let perime = "    { id = \"RUSTSEC-2099-0001\", reason = \"2026-10-16: perime\" },";
+    for (quoi, de, vers, attendu) in [
+        (
+            "entree glib retiree de la coquille",
+            format!("{glib}\n"),
+            String::new(),
+            "retiree de la section `[advisories]`".to_string(),
+        ),
+        (
+            "entree ajoutee a la coquille",
+            format!("{glib}\n"),
+            format!("{glib}\n{perime}\n"),
+            format!("`{}` n'est pas une ligne de la section", perime.trim()),
+        ),
+        (
+            "raison de glib changee",
+            "processus non privilegie\" },".to_string(),
+            "processus non privilegie, a revoir\" },".to_string(),
+            "n'est pas une ligne de la section de `ADVISORIES_DE_LA_COQUILLE`".to_string(),
+        ),
+    ] {
+        assert!(sain_gui.contains(&de), "{quoi}: `{de}` absent du temoin");
+        let mute_gui = sain_gui.replacen(&de, &vers, 1);
+        let configs = Configs {
+            audit: CONFIG_TEMOIN,
+            deny: &sain,
+            deny_fuzz: &sain,
+            audit_gui: CONFIG_TEMOIN_GUI,
+            deny_gui: &mute_gui,
+        };
+        match juger(TEMOIN, &configs) {
+            Ok(r)
+                if r.defauts
+                    .iter()
+                    .any(|d| d.starts_with(CONFIG_DENY_GUI) && d.contains(&attendu)) => {}
+            Ok(r) => ecarts.push(format!("{quoi}: attendu `{attendu}`, vu {:?}", r.defauts)),
+            Err(e) => ecarts.push(format!("{quoi}: illisible ({e})")),
+        }
+    }
+    // Et la section de la coquille n'est pas admise a la racine: chaque
+    // fichier a la sienne.
+    let configs = Configs {
+        audit: CONFIG_TEMOIN,
+        deny: &sain_gui,
+        deny_fuzz: &sain,
+        audit_gui: CONFIG_TEMOIN_GUI,
+        deny_gui: &sain_gui,
+    };
+    match juger(TEMOIN, &configs) {
+        Ok(r)
+            if r.defauts.iter().any(|d| {
+                d.starts_with(&format!("{CONFIG_DENY}, ")) && d.contains("RUSTSEC-2024-0429")
+            }) => {}
+        autre => ecarts.push(format!(
+            "section de la coquille dans deny.toml: attendu un defaut qui nomme glib, vu {autre:?}"
+        )),
     }
     assert!(
         ecarts.is_empty(),
@@ -3478,6 +3952,14 @@ fn les_commentaires_et_les_formes_admises_ne_changent_rien() {
             "        working-directory: ./fuzz/\n",
         ),
         (
+            "        working-directory: gui\n",
+            "        working-directory: ./gui/\n",
+        ),
+        (
+            "        working-directory: gui\n        run: cargo deny check\n",
+            "        working-directory: gui/\n        run: cargo deny check\n",
+        ),
+        (
             "      - name: Avis\n",
             "      - name: Avis\n        working-directory: ./\n",
         ),
@@ -3507,31 +3989,47 @@ fn les_commentaires_et_les_formes_admises_ne_changent_rien() {
             "{vers:?}"
         );
     }
-    // Les formes admises de `.cargo/audit.toml`.
-    let deny = deny_temoin();
+    // Les formes admises de `.cargo/audit.toml`, et de celui de la coquille.
+    let (deny, deny_gui) = (deny_temoin(), deny_gui_temoin());
     for config in [
         "# un commentaire\n\n[advisories] # la seule table\nignore = []\n",
         "[advisories]\n  ignore = [ \"RUSTSEC-2024-0436\", \"RUSTSEC-2025-0001\", ] # deux\n",
     ] {
-        let configs = Configs {
-            audit: config,
-            deny: &deny,
-            deny_fuzz: &deny,
-        };
-        let r = juger(TEMOIN, &configs).unwrap_or_else(|e| panic!("{config:?}: illisible: {e}"));
-        assert!(r.defauts.is_empty(), "{config:?}: {:?}", r.defauts);
+        for configs in [
+            Configs {
+                audit: config,
+                deny: &deny,
+                deny_fuzz: &deny,
+                audit_gui: CONFIG_TEMOIN_GUI,
+                deny_gui: &deny_gui,
+            },
+            Configs {
+                audit: CONFIG_TEMOIN,
+                deny: &deny,
+                deny_fuzz: &deny,
+                audit_gui: config,
+                deny_gui: &deny_gui,
+            },
+        ] {
+            let r =
+                juger(TEMOIN, &configs).unwrap_or_else(|e| panic!("{config:?}: illisible: {e}"));
+            assert!(r.defauts.is_empty(), "{config:?}: {:?}", r.defauts);
+        }
     }
-    // Les commentaires et les lignes vides de `deny.toml`, dans la section
-    // comme ailleurs, ne changent rien.
-    let commente = deny.replacen("yanked", "\n# un mot\n\nyanked", 1).replacen(
-        "[licenses]",
-        "# avant les licences\n[licenses]",
-        1,
-    );
+    // Les commentaires et les lignes vides des fichiers de cargo-deny, dans la
+    // section comme ailleurs, ne changent rien.
+    let commenter = |texte: &str| {
+        texte
+            .replacen("yanked", "\n# un mot\n\nyanked", 1)
+            .replacen("[licenses]", "# avant les licences\n[licenses]", 1)
+    };
+    let (commente, commente_gui) = (commenter(&deny), commenter(&deny_gui));
     let configs = Configs {
         audit: CONFIG_TEMOIN,
         deny: &commente,
         deny_fuzz: &commente,
+        audit_gui: CONFIG_TEMOIN_GUI,
+        deny_gui: &commente_gui,
     };
     let r = juger(TEMOIN, &configs).expect("temoin lisible");
     assert!(r.defauts.is_empty(), "{:?}", r.defauts);

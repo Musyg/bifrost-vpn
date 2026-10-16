@@ -2,7 +2,7 @@
 
 Date: 27 septembre 2026. Specification du logiciel et criteres de livraison.
 Ce document complete 01 a 07, sans promouvoir leurs pistes en fonctions livrees.
-Le numero 08 est reserve au chantier d'interface maintenu separement.
+Le document 08 decrit la coquille graphique.
 L'etat de reference PUBLIC est e983fb9. Voir ETAT.md pour les tranches suivantes.
 
 ## Promesse et limites

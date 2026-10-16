@@ -421,6 +421,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "bifrost-icone"
+version = "0.1.0"
+
+[[package]]
 name = "bifrost-ipc"
 version = "0.1.0"
 dependencies = [

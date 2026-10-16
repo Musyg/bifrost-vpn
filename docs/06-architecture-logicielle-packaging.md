@@ -565,6 +565,8 @@ Jalons avec critere de validation objectif:
 
 Note du 05/09/2026 (arbitrage 4): le critere de J1 a ete amende. Il portait "GUI Tauri pilote le daemon"; il porte desormais "CLI pilote le daemon", et la GUI Tauri devient un jalon propre place apres J2 (polkit, reauthentification, DACL du tube nomme). Motif: les documents 01 et 06 ne disaient pas la meme chose du MVP. Le document 01, AXE 7, decrit la phase 0 (MVP) comme "WireGuard + kill switch + DNS local + client CLI" et place l'UI Tauri en phase 1; le README dit deja "Daemon et CLI uniquement, pas d'interface graphique". Le MVP est une ligne de commande; la GUI suppose J2 et son test d'intrusion.
 
+Note du 16/10/2026: la coquille graphique est dans le depot (document 08): une fenetre et un tray Tauri 2 non privilegies, qui refusent de demarrer eleves et ne parlent au daemon que par l'IPC, apres avoir verifie l'identite du serveur du canal; trois commandes seulement (etat, `connect-stored`, `disconnect`), aucun paquet. Le jalon GUI n'est pas atteint: sous Windows, le pipe du daemon n'admet que SYSTEM et les Administrateurs, et la coquille, qui tourne sans elevation, ne le pilote pas encore; un groupe d'acces au canal, pose par l'installeur, reste a faire.
+
 Estimation d'effort par composant (jours-homme, calibree sur la taille/complexite des projets etudies; a affiner):
 
 | Composant | Effort (j-h) | Reference |

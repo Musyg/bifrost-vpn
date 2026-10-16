@@ -264,6 +264,80 @@ jobs:
       # le resultat n'a pas de sens: la recette Windows se fait sur une machine
       # dediee, voir la section correspondante du README.
 
+  # La coquille graphique (`gui/`, Tauri) est un espace de travail separe, avec
+  # son propre verrou (`exclude = ["gui"]` a la racine): `cargo fmt --all`,
+  # `--workspace` et les autres jobs ne la voient pas. Ces deux jobs la
+  # formatent, la compilent, la passent a clippy et lancent ses recettes, tout
+  # par `--manifest-path gui/Cargo.toml --locked` (`--locked` exige
+  # `gui/Cargo.lock` a jour). Aucun cache, aucun filtre de chemins: la coquille
+  # se juge a chaque run de son evenement, comme le reste. Ni l'un ni l'autre
+  # ne tourne sur le run planifie.
+  interface-linux:
+    name: coquille graphique (Linux)
+    # La condition de `controles`: chaque push sur `main` et chaque PR, saute
+    # sur le run planifie et sur un lancement manuel `windows`.
+    if: github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.windows)
+    runs-on: ubuntu-24.04
+    # Une borne pour un job bloque, pas une duree mesuree sur ce runner: sur
+    # dev-windows, la construction a froid de la coquille prend 3 min 32 s,
+    # clippy et les recettes 2 min de plus (16/10/2026); l'installation des
+    # paquets apt s'y ajoute ici.
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Les paquets de developpement que la pile Linux de Tauri lie:
+      # WebKitGTK 4.1, GTK 3, l'indicateur de la zone de notification,
+      # librsvg, libxdo et OpenSSL. Non epingles, comme ceux du job de fuite:
+      # les index d'Ubuntu ne gardent que la version de sortie et la derniere
+      # mise a jour.
+      - name: Bibliotheques de la WebView
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev
+      - name: Outillage
+        run: rustup component add rustfmt clippy
+      # Sans `--locked`: `cargo fmt` ne resout rien et refuse l'option.
+      - name: Format
+        run: cargo fmt --manifest-path gui/Cargo.toml --check
+      - name: Compilation
+        run: cargo build --manifest-path gui/Cargo.toml --locked
+      - name: Clippy
+        run: cargo clippy --manifest-path gui/Cargo.toml --all-targets --locked -- -D warnings
+      - name: Recettes
+        run: cargo test --manifest-path gui/Cargo.toml --locked -- --nocapture
+
+  interface-windows:
+    name: coquille graphique (Windows)
+    # La condition du job `windows`: seulement sur un lancement manuel avec la
+    # case `windows`, pour la meme raison de quota. Une PR qui touche `gui/`,
+    # `crates/bifrost-coquille`, `crates/bifrost-icone`, `crates/bifrost-ipc`
+    # ou `packaging/msi` attend donc, avant sa fusion, un run manuel `windows`
+    # vert sur sa revision: c'est le seul ou la coquille se construit sous
+    # Windows. Le job Linux ci-dessus ne le remplace pas: la WebView2, la zone
+    # de notification et la garde d'elevation de Windows n'y sont pas.
+    if: github.event_name == 'workflow_dispatch' && inputs.windows
+    runs-on: windows-2025-vs2026
+    # Meme borne que le job Linux, voir plus haut.
+    timeout-minutes: 25
+    # Son propre groupe, sans annulation: un seul run de ce job a la fois,
+    # sans attendre ni annuler le job `windows` du meme lancement.
+    concurrency:
+      group: ${{ github.workflow }}-interface-windows
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Outillage
+        run: rustup component add clippy
+      # Une commande cargo par etape, sous le shell par defaut du runner
+      # (PowerShell): aucun script bash, aucun tube, et le code de sortie de
+      # la commande est celui de l'etape.
+      - name: Compilation
+        run: cargo build --manifest-path gui/Cargo.toml --locked
+      - name: Clippy
+        run: cargo clippy --manifest-path gui/Cargo.toml --all-targets --locked -- -D warnings
+      - name: Recettes
+        run: cargo test --manifest-path gui/Cargo.toml --locked -- --nocapture
+
   fuite:
     name: suite de fuite
     if: github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.windows)
@@ -528,6 +602,24 @@ jobs:
       # deux, ce qui garde le passage d'une version a l'autre sans surprise.
       - name: Licences, sources, doublons et avis du harnais de fuzzing
         working-directory: fuzz
+        run: cargo deny check
+
+      # La coquille (`gui/`) est un espace de travail separe, avec son propre
+      # verrou que les etapes precedentes ne lisent pas: la pile de la WebView
+      # (Tauri, et sous Linux gtk-rs et WebKitGTK). Ses deux juges tournent
+      # DEPUIS `gui/`, comme celui du harnais depuis `fuzz/`: cargo-audit y lit
+      # `gui/Cargo.lock` et `gui/.cargo/audit.toml`, cargo-deny `gui/Cargo.toml`
+      # puis `gui/deny.toml`, politique complete de ce verrou. Ses avis ignores
+      # sont les siens, chacun avec sa raison datee dans `gui/deny.toml`; la
+      # recette `avis_ignores.rs` tient les deux listes d'accord. Les deux
+      # tournent aussi sur le run planifie: un avis publie contre la pile de la
+      # WebView le fait rougir comme un avis contre le daemon.
+      - name: Avis RustSec de la coquille
+        working-directory: gui
+        run: cargo audit -D warnings
+
+      - name: Licences, sources, doublons et avis de la coquille
+        working-directory: gui
         run: cargo deny check
 
       # Compile depuis crates.io a une version fixe, avec son propre verrou,

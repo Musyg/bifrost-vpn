@@ -13,6 +13,12 @@ credentials/
 **/*.rs.bk
 Cargo.lock.bak
 
+# Coquille Tauri: `build.rs` y ecrit ses icones (`gui/target/gen-icons`) et
+# tauri-build ses schemas (`gui/gen/`), meme quand CARGO_TARGET_DIR est
+# ailleurs.
+/gui/target/
+/gui/gen/
+
 # Node / Tauri
 node_modules/
 dist/

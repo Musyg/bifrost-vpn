@@ -36,6 +36,7 @@
 //! tous: aucun cas legitime ne tombe sur C ou C + 1.
 //!
 //! # Ce qu'elle refuse, dans un litteral NON brut de `crates/**/*.rs`
+//! et de `gui/**/*.rs` (la coquille, espace de travail separe)
 //!
 //! 1. Une SOUDURE: une suite de C ou C + 1 espaces au milieu d'une ligne
 //!    (precedee et suivie d'un autre caractere): `\` et son saut ont ete
@@ -240,6 +241,20 @@ fn aucun_litteral_ne_porte_un_antislash_mange() {
         "parcours casse: seulement {} source(s) Rust sous crates/",
         fichiers.len()
     );
+
+    // La coquille, espace de travail a part sous `gui/`: ses sources Rust
+    // sont lues comme celles de `crates/`, et nommement, pour qu'un parcours
+    // qui manquerait `gui/` ne passe pas pour un succes.
+    let mut coquille = Vec::new();
+    ramasser(&racine.join("gui"), &racine, &mut coquille);
+    for attendu in ["gui/build.rs", "gui/src/icone.rs", "gui/src/main.rs"] {
+        assert!(
+            coquille.iter().any(|(rel, _)| rel == attendu),
+            "parcours casse: {attendu} absent des sources Rust de gui/ ({} lue(s))",
+            coquille.len()
+        );
+    }
+    fichiers.extend(coquille);
 
     let mut violations = Vec::new();
     let mut non_bruts = 0usize;

@@ -1,0 +1,49 @@
+[package]
+name = "bifrost-gui"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+license = "MPL-2.0"
+repository = "https://github.com/Musyg/bifrost-vpn"
+description = "Coquille Tauri v2 non privilegiee: connecter, deconnecter, etat du kill switch, tray"
+
+[[bin]]
+name = "bifrost-gui"
+path = "src/main.rs"
+
+[build-dependencies]
+# Jamais la 3.0.0-alpha: la serie 2 stable.
+tauri-build = "2"
+# Source unique de l'icone: engendre le PNG de fenetre (generate_context!) et le
+# .ico de ressource Windows. Ecrit PNG et ICO a la main, donc aucun crate ni
+# licence ajoutes (png/flate2 n'entrent pas).
+bifrost-icone = { path = "../crates/bifrost-icone" }
+
+[dependencies]
+# tray-icon, et jamais la 3.0.0-alpha. `tauri = "2"` resout 2.11.x (rust-version
+# 1.77.2, sous notre 1.98). withGlobalTauri est pose dans tauri.conf.json.
+tauri = { version = "2", features = ["tray-icon"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+# time pour l'attente de la boucle de fond; le reste du reseau est dans l'IPC.
+tokio = { version = "1.53", features = ["time"] }
+# La logique testable vit ici, hors Tauri. bifrost-ipc et bifrost-core sont
+# tires transitivement par bifrost-coquille; on les nomme quand meme, pour que
+# le lock et l'audit de licences de gui/ les portent explicitement.
+bifrost-coquille = { path = "../crates/bifrost-coquille" }
+bifrost-ipc = { path = "../crates/bifrost-ipc" }
+bifrost-core = { path = "../crates/bifrost-core" }
+# La meme source d'icone que build.rs, ici pour le tray: rgba_tray(16, teinte)
+# construit l'image des trois etats depuis le meme pont que l'icone de Bifrost.
+bifrost-icone = { path = "../crates/bifrost-icone" }
+
+# Espace de travail SEPARE: son propre Cargo.lock commite. La racine porte
+# exclude = ["gui"]. Les crates bifrost-* restent membres de la racine et sont
+# tires ici par chemin.
+[workspace]
+
+# [workspace.lints] ne traverse pas un autre espace de travail: on recopie le
+# bloc de la racine plutot que de l'heriter.
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"
+missing_safety_doc = "deny"

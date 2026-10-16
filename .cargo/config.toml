@@ -29,6 +29,11 @@
 #   sous-repertoires: pas avec `--manifest-path` depuis ailleurs, pas par
 #   `cargo install` sans `--path`.
 #
+# Ces tables valent aussi pour la coquille (`gui/`, espace de travail a part):
+# cargo cherche ce fichier a partir du repertoire d'ou il est lance, pas a
+# partir du manifeste, et la coquille se construit depuis la racine du depot
+# (`--manifest-path gui/Cargo.toml`) ou depuis `gui/`.
+#
 # Garde: `crates/bifrost-daemon/tests/durcissement_binaire.rs` lit les
 # en-tetes de son propre executable, construit avec les memes drapeaux, et,
 # dans la CI, ceux des binaires livres construits en `--release`.

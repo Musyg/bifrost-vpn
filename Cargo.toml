@@ -12,8 +12,13 @@ members = [
     "crates/bifrost-daemon",
     "crates/bifrost-cli",
     "crates/bifrost-coquille",
+    "crates/bifrost-icone",
     "crates/bifrost-temoin-svchost",
 ]
+# La fenetre de la coquille (Tauri) est un espace de travail SEPARE, avec son
+# propre Cargo.lock: la pile de la WebView n'entre pas dans le lock des
+# binaires privilegies.
+exclude = ["gui"]
 
 [workspace.package]
 version = "0.1.0"

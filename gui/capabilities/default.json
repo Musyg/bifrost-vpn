@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Le strict minimum: le coeur de Tauri et les evenements pour la fenetre principale. Aucun plugin shell, fs, http, updater ou dialog. Les commandes de l'application (etat, connecter, deconnecter) sont autorisees par defaut et n'ont pas a figurer ici.",
+  "windows": ["main"],
+  "permissions": ["core:default", "core:event:default"]
+}

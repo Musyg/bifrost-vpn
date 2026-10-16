@@ -1,0 +1,23 @@
+# Une seule source pour l'icone de Bifrost: la coquille (build.rs et tray) et le
+# binaire `bifrost-icone`, qui ecrit les fichiers d'icone hors du depot,
+# appellent tous ce crate au lieu de porter chacun son dessin. AUCUNE
+# dependance: le PNG est ecrit a la main (zlib << stored >>, CRC32 et Adler32)
+# et l'ICO assemble a la main, pour ne pas faire entrer png/flate2/miniz_oxide
+# dans le lock des binaires privilegies (daemon, CLI). publish = false: ce
+# crate ne quitte pas le depot.
+[package]
+name = "bifrost-icone"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Icone de Bifrost engendree (PNG et ICO a la main, dessin procedural), source unique de la coquille et des fichiers d'icone"
+
+[[bin]]
+name = "bifrost-icone"
+path = "src/main.rs"
+
+[lints]
+workspace = true

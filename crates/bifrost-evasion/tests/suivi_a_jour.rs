@@ -54,9 +54,10 @@ const LISEZ_MOI: &str = "README.md";
 
 /// Les documents du plan, tels qu'ils existent sur le disque.
 ///
-/// Releves et non recopies: c'est tout l'interet. Le jour ou un document 08
+/// Releves et non recopies: c'est tout l'interet. Le jour ou un document
 /// apparait, cette recette le remarque avant qu'un lecteur ne se demande
-/// pourquoi la page d'etat n'en parle pas.
+/// pourquoi la page d'etat n'en parle pas. Elle en lit neuf, de 01 a 09, dont
+/// le 08 (la coquille graphique).
 fn documents_du_plan() -> Vec<String> {
     let mut trouves = Vec::new();
     let entrees = std::fs::read_dir(racine().join("docs")).expect("docs/ doit exister");
@@ -82,8 +83,10 @@ fn chaque_document_du_plan_figure_dans_la_page_d_etat() {
     let etat = lire(ETAT);
     let documents = documents_du_plan();
 
+    // Neuf documents, de 01 a 09: un releve qui en rendrait moins a perdu un
+    // fichier, ou ne lit plus docs/.
     assert!(
-        documents.len() >= 7,
+        documents.len() >= 9,
         "seuls {} document(s) du plan trouves dans docs/: le releve est casse, \
          donc la recette ne verifie rien",
         documents.len()

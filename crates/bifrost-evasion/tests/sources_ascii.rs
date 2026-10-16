@@ -27,17 +27,22 @@
 //! # Son perimetre
 //!
 //! `crates/**/*.rs`, tous les fichiers de `scripts/`, tous ceux de
-//! `packaging/`, et tous ceux de `supply-chain/`, ou cargo vet tient sa
+//! `packaging/`, tous ceux de `supply-chain/`, ou cargo vet tient sa
 //! configuration (`config.toml`), le verrou de ses imports (`imports.lock`)
-//! et les audits du depot (`audits.toml`). Les documents `.md` ne sont PAS
-//! gardes ici: c'est une decision de la tranche qui a ecrit cette recette,
-//! `docs/` portant du non-ASCII anterieur qu'une autre passe traitera.
+//! et les audits du depot (`audits.toml`), et tous ceux de `gui/`, la
+//! coquille: sources Rust, page (HTML, JavaScript, CSS), configuration de
+//! Tauri, capacites, verrou et politiques d'avis. De `gui/`, la recette ne
+//! descend ni `gui/target/` ni `gui/gen/`: la construction les engendre et
+//! git les ignore. Les documents `.md` ne sont PAS gardes ici: c'est une
+//! decision de la tranche qui a ecrit cette recette, `docs/` portant du
+//! non-ASCII anterieur qu'une autre passe traitera.
 //!
 //! Chaque racine est ramassee dans son propre lot, et la meme regle s'applique
-//! a chaque octet des quatre. Un lot doit avoir ete lu pour que la recette
+//! a chaque octet des cinq. Un lot doit avoir ete lu pour que la recette
 //! passe: une racine absente ou vide la fait rougir au lieu de la laisser
-//! verte sans rien avoir regarde. Pour `supply-chain/`, ce controle est
-//! nominatif: les trois fichiers de cargo vet doivent etre dans le lot.
+//! verte sans rien avoir regarde. Pour `supply-chain/` et pour `gui/`, ce
+//! controle est nominatif: les trois fichiers de cargo vet, et chaque fichier
+//! source de la coquille, doivent etre dans leur lot.
 //!
 //! Le parcours se fait sur le disque, sans git: sur essai-linux le depot est
 //! copie par `tar` et n'a pas de `.git`. Une recette qui appellerait
@@ -135,6 +140,21 @@ type Lot = Vec<(String, Vec<u8>)>;
 /// Les repertoires que le parcours ne descend jamais.
 const DOSSIERS_IGNORES: [&str; 2] = [".git", "target"];
 
+/// Les repertoires de la coquille que sa construction engendre (icones,
+/// schemas de Tauri) et que git ignore, chemin relatif a la racine: le
+/// parcours ne les descend pas.
+const DOSSIERS_ENGENDRES: [&str; 2] = ["gui/gen", "gui/target"];
+
+/// Le chemin de `chemin` relatif a la racine, en `/`.
+fn relatif(chemin: &Path) -> String {
+    chemin
+        .strip_prefix(racine())
+        .unwrap_or(chemin)
+        .display()
+        .to_string()
+        .replace('\\', "/")
+}
+
 /// Parcourt `dossier` et ramasse les fichiers, en octets bruts.
 ///
 /// `extension` filtre par extension quand elle est fournie (`Some("rs")` pour
@@ -149,7 +169,9 @@ fn ramasser(dossier: &Path, extension: Option<&str>, trouves: &mut Lot) {
         let chemin = entree.path();
         let nom = entree.file_name().to_string_lossy().into_owned();
         if chemin.is_dir() {
-            if !DOSSIERS_IGNORES.contains(&nom.as_str()) {
+            if !DOSSIERS_IGNORES.contains(&nom.as_str())
+                && !DOSSIERS_ENGENDRES.contains(&relatif(&chemin).as_str())
+            {
                 ramasser(&chemin, extension, trouves);
             }
         } else {
@@ -158,13 +180,7 @@ fn ramasser(dossier: &Path, extension: Option<&str>, trouves: &mut Lot) {
                 None => true,
             };
             if garder && let Ok(octets) = std::fs::read(&chemin) {
-                let relatif = chemin
-                    .strip_prefix(racine())
-                    .unwrap_or(&chemin)
-                    .display()
-                    .to_string()
-                    .replace('\\', "/");
-                trouves.push((relatif, octets));
+                trouves.push((relatif(&chemin), octets));
             }
         }
     }
@@ -178,9 +194,26 @@ const FICHIERS_DE_CARGO_VET: [&str; 3] = [
     "supply-chain/imports.lock",
 ];
 
-/// Les quatre racines du perimetre, chacune dans son propre lot pour que le
-/// controle positif verifie qu'AUCUNE des quatre n'est restee vide.
-fn collecter() -> (Lot, Lot, Lot, Lot) {
+/// Les fichiers sources de la coquille, chemin relatif a la racine. Le lot de
+/// `gui/` doit les porter tous.
+const FICHIERS_DE_LA_COQUILLE: [&str; 12] = [
+    "gui/.cargo/audit.toml",
+    "gui/Cargo.lock",
+    "gui/Cargo.toml",
+    "gui/build.rs",
+    "gui/capabilities/default.json",
+    "gui/deny.toml",
+    "gui/src/icone.rs",
+    "gui/src/main.rs",
+    "gui/tauri.conf.json",
+    "gui/ui/index.html",
+    "gui/ui/main.js",
+    "gui/ui/style.css",
+];
+
+/// Les cinq racines du perimetre, chacune dans son propre lot pour que le
+/// controle positif verifie qu'AUCUNE des cinq n'est restee vide.
+fn collecter() -> (Lot, Lot, Lot, Lot, Lot) {
     let mut rust = Vec::new();
     ramasser(&racine().join("crates"), Some("rs"), &mut rust);
     let mut scripts = Vec::new();
@@ -189,7 +222,9 @@ fn collecter() -> (Lot, Lot, Lot, Lot) {
     ramasser(&racine().join("packaging"), None, &mut packaging);
     let mut approvisionnement = Vec::new();
     ramasser(&racine().join("supply-chain"), None, &mut approvisionnement);
-    (rust, scripts, packaging, approvisionnement)
+    let mut coquille = Vec::new();
+    ramasser(&racine().join("gui"), None, &mut coquille);
+    (rust, scripts, packaging, approvisionnement, coquille)
 }
 
 /// Un ecart, forme lisible: `chemin:ligne:colonne: U+XXXX`.
@@ -220,11 +255,11 @@ fn ecarts_de(rel: &str, bytes: &[u8]) -> Vec<String> {
 
 #[test]
 fn aucun_octet_non_ascii_hors_admis_et_exceptions() {
-    let (rust, scripts, packaging, approvisionnement) = collecter();
+    let (rust, scripts, packaging, approvisionnement, coquille) = collecter();
 
     // Controle positif par racine: un parcours casse - mauvaise racine, lecture
     // qui echoue en silence - rendrait un lot vide, donc un succes, sans avoir
-    // rien lu. Les quatre racines doivent chacune avoir ete descendues.
+    // rien lu. Les cinq racines doivent chacune avoir ete descendues.
     assert!(
         rust.len() > 100,
         "seules {} source(s) Rust trouvees: le parcours de crates/ est casse",
@@ -250,6 +285,25 @@ fn aucun_octet_non_ascii_hors_admis_et_exceptions() {
             approvisionnement.len()
         );
     }
+    // Nominatif pour `gui/` aussi, et sans rien de ce que la construction
+    // engendre: un lot qui ne porterait que `gui/gen/` serait non vide sans
+    // garder une seule source.
+    for attendu in FICHIERS_DE_LA_COQUILLE {
+        assert!(
+            coquille.iter().any(|(rel, _)| rel == attendu),
+            "{attendu} absent du lot de gui/ ({} fichier(s) trouves): le fichier \
+             manque, ou le parcours est casse",
+            coquille.len()
+        );
+    }
+    for (rel, _) in &coquille {
+        assert!(
+            !DOSSIERS_ENGENDRES
+                .iter()
+                .any(|d| rel.starts_with(&format!("{d}/"))),
+            "{rel}: fichier engendre par la construction dans le lot de gui/"
+        );
+    }
 
     let mut ecarts = Vec::new();
     for (rel, bytes) in rust
@@ -257,6 +311,7 @@ fn aucun_octet_non_ascii_hors_admis_et_exceptions() {
         .chain(&scripts)
         .chain(&packaging)
         .chain(&approvisionnement)
+        .chain(&coquille)
     {
         ecarts.extend(ecarts_de(rel, bytes));
     }
@@ -275,12 +330,13 @@ fn chaque_exception_designe_encore_du_non_ascii_reel() {
     // Une derogation qui ne sert plus elargit la regle en silence. Chaque
     // exception doit encore designer un fichier scanne, dont le litteral admis
     // est present ET porte vraiment du non-ASCII.
-    let (rust, scripts, packaging, approvisionnement) = collecter();
+    let (rust, scripts, packaging, approvisionnement, coquille) = collecter();
     let tous: Lot = rust
         .into_iter()
         .chain(scripts)
         .chain(packaging)
         .chain(approvisionnement)
+        .chain(coquille)
         .collect();
 
     for ex in EXCEPTIONS {

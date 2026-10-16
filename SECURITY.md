@@ -79,8 +79,9 @@ d'abord sans details.
 
 ### Perimetre
 
-Le code de ce depot: le daemon, la ligne de commande (CLI) et les crates. Les
-documents (docs/, README.md, ETAT.md) ne sont pas dans le perimetre.
+Le code de ce depot: le daemon, la ligne de commande (CLI), la coquille
+graphique (`gui/`) et les crates. Les documents (docs/, README.md, ETAT.md) ne
+sont pas dans le perimetre.
 
 Hors perimetre: le deni de service volumetrique, l'ingenierie sociale, et les
 machines de l'editeur (postes, serveurs, infrastructure). Ces sujets ne relevent
@@ -148,8 +149,9 @@ send anything sensitive: write first without details.
 
 ### Scope
 
-The code in this repository: the daemon, the command line (CLI) and the crates.
-The documents (docs/, README.md, ETAT.md) are out of scope.
+The code in this repository: the daemon, the command line (CLI), the graphical
+shell (`gui/`) and the crates. The documents (docs/, README.md, ETAT.md) are out
+of scope.
 
 Out of scope: volumetric denial of service, social engineering, and the
 publisher's machines (workstations, servers, infrastructure). Those are not

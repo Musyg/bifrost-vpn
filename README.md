@@ -17,7 +17,7 @@ Le logiciel s'appelle Bifrost. Les documents de conception ont porte le nom de t
 
 ## Statut actuel
 
-Bifrost est en developpement. Le MVP de l'objectif 1 est implemente. Daemon et CLI uniquement; l'interface Tauri est un jalon separe, hors MVP. Le flux de connexion appelle la selection des transports: WireGuard directement, VLESS+REALITY et Hysteria2 par sing-box, avec interface TUN et passage SOCKS5. La couche DNS anti-telemetrie et les reglages Windows du registre, des services et des taches planifiees sont implementes; les filtres WFP par service restent une defense en profondeur, dont l'effet mesure est documente cible par cible.
+Bifrost est en developpement. Le MVP de l'objectif 1 est implemente. Daemon et CLI; la coquille graphique (fenetre Tauri et tray, [document 08](docs/08-coquille-graphique.md)) est dans le depot, hors MVP et sans paquet. Sous Windows, elle ne commande pas encore le daemon: le canal du daemon n'admet que SYSTEM et les Administrateurs, et la coquille refuse de tourner elevee. Le flux de connexion appelle la selection des transports: WireGuard directement, VLESS+REALITY et Hysteria2 par sing-box, avec interface TUN et passage SOCKS5. La couche DNS anti-telemetrie et les reglages Windows du registre, des services et des taches planifiees sont implementes; les filtres WFP par service restent une defense en profondeur, dont l'effet mesure est documente cible par cible.
 
 Les commandes `prove` confrontent aussi le pare-feu et le routage a une reference explicite ou a ce que le daemon declare avoir pose; la preuve des resolveurs DNS effectifs est livree sous Linux. Elles rendent MATCH, MISMATCH ou UNMEASURED, avec le perimetre de chaque mesure. Les chantiers ouverts restent dans [`ETAT.md`](ETAT.md); les sections detaillees ci-dessous conservent aussi l'historique des mesures et des corrections.
 
@@ -54,6 +54,8 @@ crates/
   bifrost-daemon/     daemon privilegie, tunnel, suite de fuite
   bifrost-cli/        client non privilegie
   bifrost-coquille/   logique de la coquille graphique: etat, commandes, vue
+  bifrost-icone/      icone de Bifrost dessinee par le code (PNG et ICO, sans dependance)
+gui/                  fenetre et tray de la coquille (Tauri 2), espace de travail separe
 ```
 
 Deux principes de conception structurent tout le reste.
@@ -460,13 +462,15 @@ MATCH n'est pas une preuve d'etancheite du VPN. Voir
 
 ### Quota de CI et validation Windows
 
-Les PR et les push sur `main` lancent les controles Linux, la suite de fuite,
-l'audit des dependances et le fuzzing des parseurs (graines rejouees, puis
-30 secondes par cible). Chaque jour a 04:37 UTC, un run planifie ne lance que
-l'audit des dependances (`cargo audit`, `cargo deny`, `cargo vet`) sur le
+Les PR et les push sur `main` lancent les controles Linux, la coquille
+graphique sous Linux (format, compilation, clippy, recettes), la suite de
+fuite, l'audit des dependances et le fuzzing des parseurs (graines rejouees,
+puis 30 secondes par cible). Chaque jour a 04:37 UTC, un run planifie ne lance
+que l'audit des dependances (`cargo audit`, `cargo deny`, `cargo vet`) sur le
 dernier commit de `main`, avec une base d'avis RustSec telechargee a chaque
-run: un avis publie contre une dependance d'un des deux verrous le fait rougir
-sans attendre un commit. GitHub peut retarder ce declenchement, et le desactive
+run: un avis publie contre une dependance d'un des verrous (racine, harnais de
+fuzzing, coquille) le fait rougir sans attendre un commit. GitHub peut
+retarder ce declenchement, et le desactive
 apres 60 jours sans activite dans le depot. Windows est **uniquement manuel**:
 aucune execution automatique sur une PR ou sa fusion. Une nouvelle revision
 annule le run automatique obsolete de la meme PR ou branche.
@@ -478,11 +482,18 @@ revision a livrer (Actions > ci > Run workflow > cocher `windows`), ou:
 gh workflow run ci.yml --repo Musyg/bifrost-vpn --ref main -f windows=true
 ```
 
-Ce lancement ne fait tourner que le job Windows, avec une limite de 30 minutes
-et un seul job Windows actif a la fois. Sans la case `windows`, un lancement
-manuel execute les controles Linux habituels. Un job Windows `skipped` n'est
-pas une validation Windows; ne pas presenter le vert Linux comme tel. La
-derniere validation Windows doit nommer le SHA effectivement controle.
+Ce lancement ne fait tourner que les deux jobs Windows: lint et tests (limite
+de 30 minutes) et la coquille graphique (compilation, clippy et recettes,
+limite de 25 minutes), chacun avec un seul run actif a la fois. Sans la case
+`windows`, un lancement manuel execute les controles Linux habituels. Un job
+Windows `skipped` n'est pas une validation Windows; ne pas presenter le vert
+Linux comme tel. La derniere validation Windows doit nommer le SHA
+effectivement controle.
+
+Une PR qui touche `gui/`, `crates/bifrost-coquille`, `crates/bifrost-icone`,
+`crates/bifrost-ipc` ou `packaging/msi` attend, avant sa fusion, un run manuel
+`windows` vert sur sa revision: c'est le seul run ou la coquille se construit
+sous Windows.
 
 ### Recettes locales
 
@@ -820,11 +831,12 @@ Les politiques DoH disposent maintenant des commandes explicites `--doh-policy c
 | `docs/05-anonymat-chainage.md` | Modeles de menace, architectures de sortie comparees, multi-hop, Tor, Nym, defense contre la correlation de trafic |
 | `docs/06-architecture-logicielle-packaging.md` | Daemon Rust et interface Tauri, IPC privilegie, MSI et paquets Linux, signature, mise a jour TUF, provisioning serveur |
 | `docs/07-programme-securite-produit.md` | Modele de menace du logiciel, fuzzing, audit externe, divulgation coordonnee, conformite Cyber Resilience Act |
+| `docs/08-coquille-graphique.md` | Coquille graphique: perimetre, coquille non privilegiee, regles de l'IPC, rendu de chaque etat, ce qui n'est pas fait |
 | `docs/09-souverainete-verifiable.md` | Controle utilisateur, preuves locales, builds reproductibles, sorties reseau, ODoH et multihop: criteres mesurables et ordre de livraison |
 
 ## Decisions structurantes deja actees
 
-- **Stack** : daemon Rust privilegie, IPC authentifie. L'interface Tauri v2 non privilegiee est prevue hors MVP, en jalon propre apres J2. Les coeurs anti-censure sing-box et Xray tourneront en processus separes, jamais lies statiquement, pour eviter la contamination GPL.
+- **Stack** : daemon Rust privilegie, IPC authentifie. La coquille Tauri v2 non privilegiee est dans le depot, hors MVP; la piloter sous Windows sans elevation reste un jalon propre, apres J2. Les coeurs anti-censure sing-box et Xray tourneront en processus separes, jamais lies statiquement, pour eviter la contamination GPL.
 - **Kill switch** : Windows Filtering Platform en mode utilisateur sur Windows, nftables avec fwmark sur Linux. Aucun driver noyau au depart.
 - **Licence** : MPL-2.0 pour le client (champ `license` du workspace).
 - **Conformite** : le classement et le calendrier du Cyber Resilience Act sont documentes dans [`docs/07`](docs/07-programme-securite-produit.md), distinctement des mesures techniques.

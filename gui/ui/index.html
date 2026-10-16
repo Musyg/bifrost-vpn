@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Bifrost</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <span id="pastille" class="pastille gris" aria-hidden="true"></span>
+        <h1>Bifrost</h1>
+      </header>
+
+      <dl class="etat">
+        <dt>Etat</dt>
+        <dd id="etat">demarrage</dd>
+        <dt>Kill switch</dt>
+        <dd id="kill-switch">-</dd>
+        <dt>Interface</dt>
+        <dd id="interface">-</dd>
+        <dt>Serveur</dt>
+        <dd id="endpoint">-</dd>
+        <dt>Transfert</dt>
+        <dd id="transfert">-</dd>
+      </dl>
+
+      <div class="boutons">
+        <button id="connecter" type="button" disabled>Connecter</button>
+        <button id="deconnecter" type="button" disabled>Deconnecter</button>
+      </div>
+
+      <p id="note" class="note"></p>
+    </main>
+
+    <script src="main.js"></script>
+  </body>
+</html>
