@@ -58,9 +58,10 @@ Du cote de la coquille:
 - trois commandes seulement: l'etat, `connect-stored` et `disconnect`.
 
 Du cote du daemon: il admet sous Linux root et les membres du groupe
-`bifrost`, qui ont tout le canal; sous Windows SYSTEM, les Administrateurs
-et, si le service en nomme un, les membres de son groupe d'acces, qui n'y
-ont que trois commandes (partie suivante). La coquille d'un compte admis
+`bifrost`; sous Windows SYSTEM, les Administrateurs et, si le service en
+nomme un, les membres de son groupe d'acces. Sur les deux plateformes, un
+membre du groupe n'y a que trois commandes (partie suivante); root, SYSTEM
+et un jeton aux Administrateurs actifs gardent tout le canal. La coquille d'un compte admis
 lui envoie l'etat, `connect-stored` et `disconnect`, et rien d'autre: pour
 ces trois gestes, elle fait ce que fait la CLI du meme compte. Sous Linux,
 ce point est lu dans le code, pas mesure par un lancement reel.
@@ -109,8 +110,11 @@ groupe local, le groupe d'acces que le daemon recoit par `--group <nom>`.
   exemple un client ouvert en `SECURITY_ANONYMOUS`, a les trois commandes
   et elles seules. Toute autre commande recoit un refus qui la nomme
   (`commande <nom> refusee: reservee aux administrateurs`, suivi de ce que
-  le compte peut demander) et n'atteint jamais le daemon. Sous Linux, un
-  membre du groupe `bifrost` garde tout le canal.
+  le compte peut demander) et n'atteint jamais le daemon. Sous Linux, la
+  regle est la meme pour un membre du groupe `bifrost` (gid primaire ou
+  groupe supplementaire), identifie a l'acceptation par `SO_PEERCRED`, une
+  fois par connexion; son refus dit `reservee a root`, et root garde tout
+  le canal.
 - **Ce qu'il ne peut pas faire.** Creer une instance du pipe: le masque ne
   porte ni `FILE_CREATE_PIPE_INSTANCE` (0x4, la valeur de `FILE_APPEND_DATA`
   pour un pipe), ni `GENERIC_ALL`; un membre ne peut donc pas tenir le canal
@@ -179,8 +183,12 @@ cette page`), jamais comme un autre.
 - `crates/bifrost-ipc`: la decision, commande par commande et niveau par
   niveau (le niveau des membres n'admet que les trois commandes, et le
   refus nomme la commande), et une garde qui lit la decision et rougit sur
-  tout bras qui ne nomme pas sa commande; sous Linux, chaque commande
-  rendue au serveur telle quelle.
+  tout bras qui ne nomme pas sa commande; la raison de l'admission sous
+  Linux (uid ou groupe) et le niveau qu'elle vaut; sous Linux, par le
+  chemin du daemon, chaque commande rendue au serveur pour un appelant
+  admis par son uid, et, pour un appelant admis par le seul groupe (gid
+  primaire, puis groupe supplementaire), les trois commandes rendues et
+  chacune des sept autres refusee sans atteindre le serveur.
 - `crates/bifrost-ipc`, sous Windows: la forme des groupes admissibles
   (comptes et groupes predefinis, zeros de tete, RID sous 1000, domaine
   etranger refuses), le descripteur sans groupe et avec groupe (une ACE de
@@ -260,6 +268,11 @@ cette page`), jamais comme un autre.
   `windows`, face a un `IpcServer` de recette et non au service installe.
   Aucun lancement reel de la fenetre par un membre du groupe n'est mesure,
   ni l'identification d'un appelant par le daemon installe en service.
+- Sous Linux, la regle des trois commandes est mesuree par les recettes de
+  `bifrost-ipc` (un vrai `IpcServer`; le groupe de la politique est le gid
+  effectif de la recette, ou l'un de ses groupes supplementaires), pas par
+  le daemon installe sous systemd ni par un compte cree membre du groupe
+  `bifrost`.
 - Les trois scripts Windows qui creent le groupe et le passent au service
   (`packaging/install-windows.ps1`, `scripts/service-windows.ps1`,
   `scripts/packaging-windows.ps1`) sont gardes par la lecture de leur

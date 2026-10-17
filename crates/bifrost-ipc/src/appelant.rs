@@ -1,35 +1,41 @@
 //! Ce qu'un appelant admis par le canal peut demander au daemon.
 //!
 //! L'acceptation dit QUI ouvre le canal (`SO_PEERCRED` sous Linux, DACL du
-//! pipe sous Windows). Sous Windows, elle ne suffit plus a dire ce qu'il peut
-//! y demander: le groupe d'acces (`groupe::GroupeDAcces`) ouvre le pipe a des
-//! comptes qui ne sont pas administrateurs, et ceux-la n'ont que trois
-//! commandes. La regle, en une phrase: un appelant admis SEULEMENT parce
-//! qu'il est membre du groupe d'acces (ni SYSTEM, ni Administrateurs actifs
-//! dans son jeton) n'a que `status`, `connect-stored` et `disconnect`; SYSTEM
-//! et un jeton aux Administrateurs actifs gardent tout le canal. C'est la
-//! separation de l'option `LimitedOperatorUI` de WireGuard pour Windows: les
-//! membres demarrent et arretent un tunnel enregistre, ils n'en ajoutent ni
-//! n'en modifient aucun; ici sur un groupe local cree pour Bifrost, jamais
-//! sur un groupe predefini.
+//! pipe sous Windows). Elle ne suffit pas a dire ce qu'il peut y demander: un
+//! groupe ouvre le canal a des comptes qui ne sont pas administrateurs (le
+//! groupe `bifrost` du socket sous Linux, le groupe d'acces du pipe sous
+//! Windows, `groupe::GroupeDAcces`), et ceux-la n'ont que trois commandes. La
+//! regle, en une phrase, la meme sur les deux plateformes: un appelant admis
+//! SEULEMENT parce qu'il est membre du groupe n'a que `status`,
+//! `connect-stored` et `disconnect`; un administrateur garde tout le canal.
+//! Sous Linux, l'administrateur est un appelant admis par son uid (root, ou
+//! un uid de `allowed_uids`); sous Windows, SYSTEM ou un jeton aux
+//! Administrateurs actifs. C'est la separation de l'option
+//! `LimitedOperatorUI` de WireGuard pour Windows: les membres demarrent et
+//! arretent un tunnel enregistre, ils n'en ajoutent ni n'en modifient aucun;
+//! sous Windows sur un groupe local cree pour Bifrost, jamais sur un groupe
+//! predefini.
 //!
-//! Deux pieces, separees pour etre jugees chacune:
+//! Trois pieces, separees pour etre jugees chacune:
 //!
-//! - [`decider`], fonction pure du niveau de l'appelant et de la commande.
-//!   Chaque commande y est classee par un bras a elle, sans bras joker: une
-//!   commande ajoutee au protocole ne compile pas tant qu'elle n'est pas
-//!   classee ici.
+//! - [`decider`], fonction pure du niveau de l'appelant et de la commande,
+//!   commune aux deux plateformes. Chaque commande y est classee par un bras
+//!   a elle, sans bras joker: une commande ajoutee au protocole ne compile
+//!   pas tant qu'elle n'est pas classee ici.
+//! - sous Linux, le niveau tire de la raison de l'admission
+//!   ([`niveau_admis`], depuis [`crate::auth::Admission`]): l'appelant est
+//!   identifie a l'acceptation, par `SO_PEERCRED`, une fois par connexion.
 //! - sous Windows, l'identification de l'appelant, par requete, sur le jeton
 //!   que le canal presente au daemon (`identifier`). Elle est SURE PAR
 //!   DEFAUT: une identification impossible range l'appelant au niveau
 //!   [`NiveauDAppelant::Restreint`], jamais au niveau complet.
 //!
 //! Le transport applique la decision a chaque requete lue, avant de la rendre
-//! au serveur (`Connection::recv`): une commande refusee recoit sa reponse de
-//! refus et ne sort jamais du transport, donc le daemon n'en execute rien.
-//! Linux ne change pas: tout appelant que le socket admet (root, uid
-//! autorise, groupe `bifrost`) a tout le canal, comme avant.
+//! au serveur (`Connection::recv`), sur les deux plateformes: une commande
+//! refusee recoit sa reponse de refus et ne sort jamais du transport, donc le
+//! daemon n'en execute rien.
 
+use crate::auth::Admission;
 use crate::protocol::Command;
 
 /// Ce qu'un appelant admis peut demander au daemon.
@@ -37,11 +43,14 @@ use crate::protocol::Command;
 pub enum NiveauDAppelant {
     /// Tout le canal. Sous Windows: un jeton de SYSTEM, ou dont les
     /// Administrateurs sont actifs (une console elevee, le service). Sous
-    /// Linux: tout appelant que le socket admet.
+    /// Linux: un appelant que le socket admet par son uid (root, ou un uid
+    /// de `allowed_uids`).
     Complet,
     /// `status`, `connect-stored` et `disconnect`, et rien d'autre. Sous
     /// Windows: un appelant admis seulement comme membre du groupe d'acces,
-    /// et tout appelant que le daemon n'a pas su identifier.
+    /// et tout appelant que le daemon n'a pas su identifier. Sous Linux: un
+    /// appelant admis seulement par le groupe `bifrost` (gid primaire ou
+    /// groupe supplementaire).
     Restreint,
 }
 
@@ -56,13 +65,24 @@ impl NiveauDAppelant {
 }
 
 /// Le refus d'une commande reservee aux administrateurs, tel que le daemon le
-/// rend a l'appelant (`Response::Error`). Il nomme la commande et dit ce que
-/// ce compte peut demander.
+/// rend a l'appelant (`Response::Error`). Il nomme la commande, dit a qui
+/// elle est reservee sur cette plateforme (Windows: SYSTEM ou Administrateurs
+/// actifs; Linux: root), et ce que ce compte peut demander.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error(
-    "commande {commande} refusee: reservee aux administrateurs (SYSTEM ou \
-     Administrateurs actifs); ce compte n'a sur ce canal que status, \
-     connect-stored et disconnect"
+#[cfg_attr(
+    windows,
+    error(
+        "commande {commande} refusee: reservee aux administrateurs (SYSTEM ou \
+         Administrateurs actifs); ce compte n'a sur ce canal que status, \
+         connect-stored et disconnect"
+    )
+)]
+#[cfg_attr(
+    unix,
+    error(
+        "commande {commande} refusee: reservee a root; ce compte n'a sur ce \
+         canal que status, connect-stored et disconnect"
+    )
 )]
 pub struct CommandeReservee {
     /// Le nom de la commande, celui du protocole (`Command::name`).
@@ -81,6 +101,17 @@ pub fn decider(niveau: NiveauDAppelant, commande: &Command) -> Result<(), Comman
         (NiveauDAppelant::Restreint, true) => Err(CommandeReservee {
             commande: commande.name(),
         }),
+    }
+}
+
+/// Le niveau que vaut une admission par le socket (Linux): l'uid admet au
+/// niveau complet, le groupe seul au niveau restreint. Pure et commune aux
+/// deux plateformes, pour etre jugee sur chacune; seul le transport Unix
+/// l'appelle, a l'acceptation.
+pub fn niveau_admis(admission: Admission) -> NiveauDAppelant {
+    match admission {
+        Admission::ParUid => NiveauDAppelant::Complet,
+        Admission::ParGroupe => NiveauDAppelant::Restreint,
     }
 }
 
@@ -445,18 +476,92 @@ pub(crate) mod tests {
             } else {
                 let refus = issue.expect_err(commande.name());
                 assert_eq!(refus.commande, commande.name());
-                assert_eq!(
-                    refus.to_string(),
-                    format!(
-                        "commande {} refusee: reservee aux administrateurs (SYSTEM ou \
-                         Administrateurs actifs); ce compte n'a sur ce canal que status, \
-                         connect-stored et disconnect",
-                        commande.name()
-                    )
-                );
+                assert_eq!(refus.to_string(), refus_attendu(commande.name()));
             }
         }
         assert_eq!(admises, ["status", "connect-stored", "disconnect"]);
+    }
+
+    /// Le texte du refus sous Windows, tel qu'il etait avant la regle Linux,
+    /// octet pour octet.
+    #[cfg(windows)]
+    pub(crate) fn refus_attendu(commande: &str) -> String {
+        format!(
+            "commande {} refusee: reservee aux administrateurs (SYSTEM ou \
+             Administrateurs actifs); ce compte n'a sur ce canal que status, \
+             connect-stored et disconnect",
+            commande
+        )
+    }
+
+    /// Le texte du refus sous Linux: reservee a root.
+    #[cfg(unix)]
+    pub(crate) fn refus_attendu(commande: &str) -> String {
+        format!(
+            "commande {} refusee: reservee a root; ce compte n'a sur ce canal \
+             que status, connect-stored et disconnect",
+            commande
+        )
+    }
+
+    /// Le refus nomme la regle de SA plateforme, et seulement elle: sous
+    /// Windows le texte d'avant, inchange, qui nomme SYSTEM et les
+    /// Administrateurs actifs; sous Linux root, sans rien de Windows.
+    #[test]
+    fn le_refus_nomme_la_regle_de_sa_plateforme() {
+        let texte = CommandeReservee { commande: "check" }.to_string();
+        #[cfg(windows)]
+        assert_eq!(
+            texte,
+            "commande check refusee: reservee aux administrateurs (SYSTEM ou Administrateurs \
+             actifs); ce compte n'a sur ce canal que status, connect-stored et disconnect"
+        );
+        #[cfg(unix)]
+        {
+            assert_eq!(
+                texte,
+                "commande check refusee: reservee a root; ce compte n'a sur ce canal que \
+                 status, connect-stored et disconnect"
+            );
+            assert!(
+                !texte.contains("SYSTEM") && !texte.contains("Administrateurs"),
+                "{texte}"
+            );
+        }
+    }
+
+    /// La raison de l'admission par le socket vaut son niveau: l'uid le
+    /// niveau complet, le groupe seul le niveau restreint; et ce niveau-la
+    /// refuse chacune des sept commandes reservees.
+    #[test]
+    fn l_admission_par_le_groupe_seul_vaut_le_niveau_restreint() {
+        assert_eq!(niveau_admis(Admission::ParUid), NiveauDAppelant::Complet);
+        assert_eq!(
+            niveau_admis(Admission::ParGroupe),
+            NiveauDAppelant::Restreint
+        );
+        let refusees: Vec<&str> = une_de_chaque()
+            .iter()
+            .filter(|(c, _)| decider(niveau_admis(Admission::ParGroupe), c).is_err())
+            .map(|(c, _)| c.name())
+            .collect();
+        assert_eq!(
+            refusees,
+            [
+                "connect",
+                "check",
+                "verdict-inspection-tls",
+                "reprise",
+                "declaration-pare-feu",
+                "declaration-routage",
+                "declaration-dns"
+            ]
+        );
+        assert!(
+            une_de_chaque()
+                .iter()
+                .all(|(c, _)| decider(niveau_admis(Admission::ParUid), c).is_ok())
+        );
     }
 
     /// Le corps d'une fonction de `appelant.rs`, de sa signature a la ligne

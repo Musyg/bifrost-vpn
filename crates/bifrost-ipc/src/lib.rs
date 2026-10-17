@@ -21,13 +21,17 @@
 //! client attend une instance libre, dans une borne courte, et exige
 //! l'identite de celle qu'il obtient.
 //!
-//! Sous Windows, un groupe d'acces ([`groupe::GroupeDAcces`]) ouvre le canal a
-//! ses membres sans elevation: une ACE de plus dans la DACL du pipe, a un
+//! Un groupe ouvre le canal a des comptes qui ne sont pas administrateurs, et
+//! ses membres n'y ont que trois commandes, `status`, `connect-stored` et
+//! `disconnect`: le transport applique la decision de [`appelant`] a chaque
+//! requete avant de la rendre au serveur. Sous Linux, c'est le groupe de la
+//! politique (`AuthPolicy::allowed_gid`, le groupe `bifrost` du daemon): un
+//! appelant admis seulement par lui a ces trois commandes, un appelant admis
+//! par son uid (root) a tout le canal. Sous Windows, c'est un groupe d'acces
+//! ([`groupe::GroupeDAcces`]): une ACE de plus dans la DACL du pipe, a un
 //! masque qui permet d'echanger et rien d'autre, et seulement pour un groupe
-//! cree localement par un administrateur. Ses membres n'y ont que trois
-//! commandes, `status`, `connect-stored` et `disconnect`: le transport
-//! identifie l'appelant de chaque requete et applique la decision de
-//! [`appelant`] avant de la rendre au serveur.
+//! cree localement par un administrateur; le transport identifie l'appelant
+//! de chaque requete.
 
 pub mod appelant;
 pub mod auth;
@@ -39,7 +43,7 @@ pub mod transport;
 pub use appelant::{CommandeReservee, NiveauDAppelant, decider};
 #[cfg(windows)]
 pub use appelant::{EtapeDIdentification, Identification};
-pub use auth::{AuthError, AuthPolicy, PeerIdentity, SupplementaryGroups};
+pub use auth::{Admission, AuthError, AuthPolicy, PeerIdentity, SupplementaryGroups};
 #[cfg(windows)]
 pub use groupe::{ErreurGroupe, GroupeDAcces};
 pub use protocol::{Command, Request, Response};

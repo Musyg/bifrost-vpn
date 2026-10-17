@@ -2,10 +2,12 @@
 //!
 //! Les deux cotes appliquent la meme regle: le canal n'est joignable que par
 //! les identites autorisees, et la verification se fait a l'acceptation, avant
-//! de lire le moindre octet du client. Sous Windows, une seconde decision
-//! suit, par requete: l'appelant est identifie sur le jeton que le canal
-//! presente, et un membre du groupe d'acces n'obtient que trois commandes
-//! (`crate::appelant`); Linux n'a que la premiere.
+//! de lire le moindre octet du client. Une seconde decision suit, par
+//! requete, sur les deux cotes: un appelant admis seulement comme membre du
+//! groupe n'obtient que trois commandes (`crate::appelant`). Linux tire son
+//! niveau de la raison de l'admission (`SO_PEERCRED`, une fois par
+//! connexion); Windows identifie l'appelant de chaque requete sur le jeton
+//! que le canal presente.
 
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
@@ -322,6 +324,7 @@ impl Journal {
 #[cfg(unix)]
 mod imp {
     use super::*;
+    use crate::appelant::{self, NiveauDAppelant};
     use crate::auth::authorize;
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
@@ -535,17 +538,28 @@ mod imp {
                     }
                 };
                 match authorize(&peer, &self.policy) {
-                    Ok(()) => {
-                        tracing::debug!(%peer, "client accepte");
-                        return Ok(Connection::new(stream, peer, self.delai_requete));
+                    Ok(admission) => {
+                        // Le niveau est fixe ici, une fois pour la connexion:
+                        // `SO_PEERCRED` a ete lu a l'acceptation, et rien de
+                        // ce que le client ecrira ne le change.
+                        let niveau = appelant::niveau_admis(admission);
+                        tracing::debug!(%peer, niveau = niveau.nom(), "client accepte");
+                        return Ok(Connection::new(stream, peer, niveau, self.delai_requete));
                     }
                     Err(e) => {
                         // On refuse sans rien lire du client, et on continue a
                         // servir: un refus ne doit pas arreter le daemon. La
                         // cause va au journal comme au client: des groupes
                         // illisibles ne s'y lisent pas comme un non-membre.
+                        // La connexion ne sert qu'a ecrire ce refus: le niveau
+                        // restreint, sur par defaut, n'y est jamais consulte.
                         tracing::warn!(%peer, error = %e, "connexion refusee");
-                        let mut conn = Connection::new(stream, peer, self.delai_requete);
+                        let mut conn = Connection::new(
+                            stream,
+                            peer,
+                            NiveauDAppelant::Restreint,
+                            self.delai_requete,
+                        );
                         let _ = conn.send(&Response::error(e.to_string())).await;
                     }
                 }
@@ -707,16 +721,25 @@ mod imp {
         reader: BufReader<tokio::io::ReadHalf<UnixStream>>,
         writer: tokio::io::WriteHalf<UnixStream>,
         peer: PeerIdentity,
+        /// Le niveau de l'appelant, fixe a l'acceptation depuis la raison de
+        /// son admission ([`appelant::niveau_admis`]).
+        niveau: NiveauDAppelant,
         delai: std::time::Duration,
     }
 
     impl Connection {
-        fn new(stream: UnixStream, peer: PeerIdentity, delai: std::time::Duration) -> Self {
+        fn new(
+            stream: UnixStream,
+            peer: PeerIdentity,
+            niveau: NiveauDAppelant,
+            delai: std::time::Duration,
+        ) -> Self {
             let (r, w) = tokio::io::split(stream);
             Self {
                 reader: BufReader::new(r),
                 writer: w,
                 peer,
+                niveau,
                 delai,
             }
         }
@@ -725,17 +748,28 @@ mod imp {
             &self.peer
         }
 
-        /// Sous Linux, tout appelant que le socket admet a tout le canal:
-        /// root, un uid autorise, un membre du groupe `bifrost`. Rien ne
-        /// change par rapport a l'acceptation, et `recv` n'applique aucune
-        /// decision par commande.
-        pub fn niveau(&self) -> crate::appelant::NiveauDAppelant {
-            crate::appelant::NiveauDAppelant::Complet
+        /// Ce que l'appelant peut demander, fixe a l'acceptation: le niveau
+        /// complet s'il est admis par son uid (root, ou un uid de
+        /// `allowed_uids`), le niveau restreint s'il ne l'est que par le
+        /// groupe (gid primaire ou groupe supplementaire). L'identite vient de
+        /// `SO_PEERCRED`, lue une fois par connexion: elle ne change pas d'une
+        /// requete a l'autre.
+        pub fn niveau(&self) -> NiveauDAppelant {
+            self.niveau
         }
 
         /// La requete suivante, lue dans `DELAI_REQUETE`. Au-dela, `recv`
         /// rend [`IpcError::RequestTimeout`] et la connexion est a abandonner:
         /// une trame entamee a pu y etre lue en partie.
+        ///
+        /// Chaque requete lue passe par [`appelant::decider`], au niveau fixe
+        /// a l'acceptation ([`Connection::niveau`]). Une commande admise est
+        /// rendue. Une commande refusee recoit ici sa reponse, le refus qui
+        /// la nomme ([`appelant::CommandeReservee`]), et la lecture passe a la
+        /// requete suivante, dans un nouveau delai: elle ne sort jamais du
+        /// transport, et le serveur n'en execute rien. Meme contrat que la
+        /// version Windows, qui identifie en plus l'appelant de chaque
+        /// requete.
         ///
         /// # Pilote de temps requis
         ///
@@ -743,12 +777,23 @@ mod imp {
         /// dont le pilote de temps est actif (`enable_time`, ou `enable_all`
         /// comme le daemon). Sans lui, tokio panique des le premier appel.
         pub async fn recv(&mut self) -> Result<Request> {
-            let bytes = read_request_frame(&mut self.reader, self.delai).await?;
-            let req: Request = serde_json::from_slice(&bytes)?;
-            if req.version != PROTOCOL_VERSION {
-                return Err(IpcError::VersionMismatch { got: req.version });
+            loop {
+                let bytes = read_request_frame(&mut self.reader, self.delai).await?;
+                let req: Request = serde_json::from_slice(&bytes)?;
+                if req.version != PROTOCOL_VERSION {
+                    return Err(IpcError::VersionMismatch { got: req.version });
+                }
+                match appelant::decider(self.niveau, &req.command) {
+                    Ok(()) => return Ok(req),
+                    Err(refus) => {
+                        tracing::warn!(
+                            command = refus.commande,
+                            "commande reservee a root, refusee"
+                        );
+                        self.send(&Response::error(refus.to_string())).await?;
+                    }
+                }
             }
-            Ok(req)
         }
 
         pub async fn send(&mut self, response: &Response) -> Result<()> {
@@ -926,56 +971,243 @@ mod imp {
         }
     }
 
-    /// Sous Linux, aucune decision par commande: tout appelant que le socket
-    /// admet a tout le canal, comme avant le groupe d'acces Windows.
+    /// Sous Linux, la decision par commande tient a la raison de l'admission:
+    /// l'uid admet au niveau complet, le groupe seul au niveau restreint
+    /// (`crate::appelant`). Par le chemin du daemon: `bind`, `accept`,
+    /// `Connection::recv`, et un client qui exige l'uid de la recette. Aucun
+    /// compte ni groupe n'est cree: le groupe de la politique est le gid
+    /// effectif de la recette, ou l'un de ses groupes supplementaires.
     #[cfg(test)]
     mod tests_niveau_linux {
         use super::*;
-        use crate::appelant::NiveauDAppelant;
-        use crate::appelant::tests::une_de_chaque;
+        use crate::appelant::CommandeReservee;
+        use crate::appelant::tests::{refus_attendu, une_de_chaque};
+        use crate::protocol::Command;
 
-        /// Chaque commande du protocole, envoyee par un client admis, est
-        /// rendue au serveur telle quelle, et le niveau de l'appelant est le
-        /// niveau complet.
-        #[tokio::test]
-        async fn sous_linux_chaque_commande_est_rendue_au_serveur() {
+        fn euid() -> u32 {
             // SAFETY: geteuid ne prend aucun argument et ne touche aucune memoire.
-            let euid = unsafe { libc::geteuid() };
+            unsafe { libc::geteuid() }
+        }
+
+        fn egid() -> u32 {
+            // SAFETY: getegid ne prend aucun argument et ne touche aucune memoire.
+            unsafe { libc::getegid() }
+        }
+
+        /// Les groupes supplementaires de ce processus, tels que le noyau
+        /// les rend.
+        fn groupes_supplementaires() -> Vec<u32> {
+            // SAFETY: getgroups(0, NULL) ne lit ni n'ecrit aucune memoire et
+            // rend le nombre de groupes supplementaires.
+            let n = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
+            assert!(n >= 0, "getgroups: {}", std::io::Error::last_os_error());
+            let mut groupes = vec![libc::gid_t::default(); n as usize];
+            // SAFETY: le tampon a la place de `n` groupes, la taille passee.
+            let lus = unsafe { libc::getgroups(n, groupes.as_mut_ptr()) };
+            assert_eq!(lus, n, "getgroups: {}", std::io::Error::last_os_error());
+            groupes
+        }
+
+        /// Ce qu'un echange a montre: le niveau que le serveur lit sur la
+        /// connexion, les commandes que `recv` lui a rendues, et les reponses
+        /// que le client a lues.
+        struct Echange {
+            niveau: NiveauDAppelant,
+            rendues: Vec<&'static str>,
+            reponses: Vec<Response>,
+        }
+
+        /// Un serveur sous `politique`, un client qui envoie `commande` puis,
+        /// SUR LA MEME CONNEXION et seulement si la premiere reponse est une
+        /// erreur, `status`, avant de fermer. Le serveur repond `Ok` a chaque
+        /// requete que `recv` lui rend, jusqu'a la fermeture du client.
+        async fn echanger(
+            etiquette: &str,
+            rang: usize,
+            politique: AuthPolicy,
+            commande: Command,
+        ) -> Echange {
+            let path = std::env::temp_dir().join(format!(
+                "bifrost-ipc-niveau-{}-{etiquette}-{rang}.sock",
+                std::process::id()
+            ));
+            let nom_commande = commande.name();
+            let mut serveur =
+                IpcServer::bind(&path, politique, None, ProprietaireDuPipe::ParDefaut)
+                    .await
+                    .expect("bind");
+            let cote_serveur = async {
+                let mut connexion = serveur.accept().await?;
+                let niveau = connexion.niveau();
+                let mut rendues = Vec::new();
+                loop {
+                    match connexion.recv().await {
+                        Ok(recue) => {
+                            rendues.push(recue.command.name());
+                            // Le client ne ferme qu'apres sa derniere
+                            // reponse: une ecriture qui echoue dit qu'il
+                            // n'attend plus rien, et ce que `recv` a rendu
+                            // reste a juger.
+                            if connexion.send(&Response::Ok).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(IpcError::Closed) => break,
+                        Err(e) => return Err(e),
+                    }
+                }
+                Ok::<_, IpcError>((niveau, rendues))
+            };
+            let cote_client = async {
+                let (mut client, _) =
+                    IpcClient::connect_verified(&path, ServerRequirement::Uid(euid())).await?;
+                let premiere = client.request(&Request::new(commande)).await?;
+                let refusee = matches!(premiere, Response::Error { .. });
+                let mut reponses = vec![premiere];
+                if refusee {
+                    reponses.push(client.request(&Request::new(Command::Status)).await?);
+                }
+                Ok::<_, IpcError>(reponses)
+            };
+            // Borne: un client refuse a l'acceptation laisserait `accept`
+            // attendre le suivant; la recette rougit au lieu d'attendre.
+            let (cote_serveur, cote_client) = tokio::join!(
+                tokio::time::timeout(std::time::Duration::from_secs(10), cote_serveur),
+                cote_client
+            );
+            let (niveau, rendues) = cote_serveur
+                .unwrap_or_else(|_| panic!("{etiquette} {nom_commande}: serveur sans issue"))
+                .unwrap_or_else(|e| panic!("{etiquette} {nom_commande}: serveur: {e}"));
+            let reponses =
+                cote_client.unwrap_or_else(|e| panic!("{etiquette} {nom_commande}: client: {e}"));
+            Echange {
+                niveau,
+                rendues,
+                reponses,
+            }
+        }
+
+        /// Sous `politique`, qui n'admet ce compte que par un groupe: le
+        /// niveau restreint, chacune des trois commandes ouvertes rendue au
+        /// serveur, et chacune des sept autres refusee par le refus qui la
+        /// nomme sans atteindre le serveur, qui recoit a sa place le `status`
+        /// suivant de la meme connexion.
+        async fn le_groupe_seul_n_ouvre_que_les_trois_commandes(
+            etiquette: &str,
+            politique: AuthPolicy,
+        ) {
+            let mut ouvertes = Vec::new();
+            for (rang, (commande, admise)) in une_de_chaque().into_iter().enumerate() {
+                let nom = commande.name();
+                let echange = echanger(etiquette, rang, politique.clone(), commande).await;
+                assert_eq!(
+                    echange.niveau,
+                    NiveauDAppelant::Restreint,
+                    "{etiquette} {nom}"
+                );
+                if admise {
+                    ouvertes.push(nom);
+                    assert_eq!(echange.rendues, [nom], "{etiquette}: {nom} non rendue");
+                    assert!(
+                        matches!(echange.reponses.as_slice(), [Response::Ok]),
+                        "{etiquette} {nom}: {:?}",
+                        echange.reponses
+                    );
+                    continue;
+                }
+                assert_eq!(
+                    echange.rendues,
+                    ["status"],
+                    "{etiquette}: le transport a rendu au serveur la commande refusee {nom}"
+                );
+                match echange.reponses.as_slice() {
+                    [Response::Error { message }, Response::Ok] => {
+                        assert_eq!(
+                            *message,
+                            CommandeReservee { commande: nom }.to_string(),
+                            "{etiquette} {nom}"
+                        );
+                        assert_eq!(*message, refus_attendu(nom), "{etiquette} {nom}");
+                    }
+                    autre => panic!("{etiquette} {nom}: refus puis Ok attendus, recu {autre:?}"),
+                }
+            }
+            assert_eq!(ouvertes, ["status", "connect-stored", "disconnect"]);
+        }
+
+        /// (a) Admis par son uid (`allowed_uids` le nomme): le niveau
+        /// complet, et chaque commande du protocole rendue au serveur telle
+        /// quelle.
+        #[tokio::test]
+        async fn admis_par_son_uid_l_appelant_a_tout_le_canal() {
             for (rang, (commande, _)) in une_de_chaque().into_iter().enumerate() {
-                let path = std::env::temp_dir().join(format!(
-                    "bifrost-ipc-niveau-{}-{rang}.sock",
-                    std::process::id()
-                ));
+                let nom = commande.name();
                 let politique = AuthPolicy {
-                    allowed_uids: vec![0, euid],
+                    allowed_uids: vec![0, euid()],
                     allowed_gid: None,
                 };
-                let mut serveur =
-                    IpcServer::bind(&path, politique, None, ProprietaireDuPipe::ParDefaut)
-                        .await
-                        .expect("bind");
-                let nom_commande = commande.name();
-                let cote_serveur = async {
-                    let mut connexion = serveur.accept().await?;
-                    let recue = connexion.recv().await?;
-                    connexion.send(&Response::Ok).await?;
-                    Ok::<_, IpcError>((recue.command.name(), connexion.niveau()))
-                };
-                let cote_client = async {
-                    let (mut client, _) =
-                        IpcClient::connect_verified(&path, ServerRequirement::Uid(euid)).await?;
-                    client.request(&Request::new(commande)).await
-                };
-                let (cote_serveur, cote_client) = tokio::join!(cote_serveur, cote_client);
-                let (rendue, niveau) =
-                    cote_serveur.unwrap_or_else(|e| panic!("{nom_commande}: serveur: {e}"));
-                assert_eq!(rendue, nom_commande);
-                assert_eq!(niveau, NiveauDAppelant::Complet, "{nom_commande}");
+                let echange = echanger("uid", rang, politique, commande).await;
+                assert_eq!(echange.niveau, NiveauDAppelant::Complet, "{nom}");
+                assert_eq!(echange.rendues, [nom]);
                 assert!(
-                    matches!(cote_client, Ok(Response::Ok)),
-                    "{nom_commande}: {cote_client:?}"
+                    matches!(echange.reponses.as_slice(), [Response::Ok]),
+                    "{nom}: {:?}",
+                    echange.reponses
                 );
             }
+        }
+
+        /// (b) Admis SEULEMENT par son gid primaire: la politique ne nomme
+        /// que root comme uid, et le gid effectif de la recette comme groupe.
+        /// Root est toujours admis par son uid: sous root, rien ne se mesure,
+        /// et la recette le dit.
+        #[tokio::test]
+        async fn admis_par_son_seul_gid_primaire_l_appelant_n_a_que_les_trois_commandes() {
+            if euid() == 0 {
+                println!(
+                    "SKIPPED admis_par_son_seul_gid_primaire_l_appelant_n_a_que_les_trois_commandes: \
+                     lance en root, toujours admis par son uid: le groupe seul ne se mesure pas"
+                );
+                return;
+            }
+            let politique = AuthPolicy {
+                allowed_uids: vec![0],
+                allowed_gid: Some(egid()),
+            };
+            le_groupe_seul_n_ouvre_que_les_trois_commandes("gid-primaire", politique).await;
+        }
+
+        /// (c) Admis SEULEMENT par un groupe supplementaire: la politique
+        /// nomme un groupe que le noyau donne a la recette (`getgroups`) et
+        /// qui n'est pas son gid effectif; le serveur le lit dans
+        /// `/proc/<pid>/status`. Sous root, ou sans groupe supplementaire
+        /// distinct du gid effectif, rien ne se mesure, et la recette le dit.
+        #[tokio::test]
+        async fn admis_par_un_seul_groupe_supplementaire_l_appelant_n_a_que_les_trois_commandes() {
+            if euid() == 0 {
+                println!(
+                    "SKIPPED admis_par_un_seul_groupe_supplementaire_l_appelant_n_a_que_les_trois_commandes: \
+                     lance en root, toujours admis par son uid: le groupe seul ne se mesure pas"
+                );
+                return;
+            }
+            let effectif = egid();
+            let Some(groupe) = groupes_supplementaires()
+                .into_iter()
+                .find(|g| *g != effectif)
+            else {
+                println!(
+                    "SKIPPED admis_par_un_seul_groupe_supplementaire_l_appelant_n_a_que_les_trois_commandes: \
+                     ce compte n'a aucun groupe supplementaire distinct de son groupe effectif"
+                );
+                return;
+            };
+            let politique = AuthPolicy {
+                allowed_uids: vec![0],
+                allowed_gid: Some(groupe),
+            };
+            le_groupe_seul_n_ouvre_que_les_trois_commandes("groupe-supplementaire", politique)
+                .await;
         }
     }
 }

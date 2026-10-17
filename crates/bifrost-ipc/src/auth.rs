@@ -3,6 +3,12 @@
 //! La decision est une fonction pure de l'identite du pair et de la politique,
 //! donc testable sans socket. La recuperation de l'identite, elle, est
 //! specifique a l'OS: `SO_PEERCRED` sur Linux, DACL du named pipe sur Windows.
+//!
+//! Elle rend la RAISON de l'admission ([`Admission`]), et pas seulement un
+//! oui: un pair admis par son uid (root, ou un uid de `allowed_uids`) n'a pas
+//! le meme canal qu'un pair admis seulement par le groupe `allowed_gid`. La
+//! correspondance vers ce qu'il peut demander est dans `crate::appelant`
+//! (`niveau_admis`).
 
 use std::fmt;
 
@@ -44,9 +50,11 @@ impl fmt::Display for PeerIdentity {
 /// Qui a le droit de piloter le daemon.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthPolicy {
-    /// UIDs explicitement autorises. root (uid 0) l'est toujours.
+    /// UIDs explicitement autorises. root (uid 0) l'est toujours. Un pair
+    /// admis par son uid a tout le canal.
     pub allowed_uids: Vec<u32>,
-    /// GID du groupe `bifrost`. Un membre de ce groupe peut piloter le daemon.
+    /// GID du groupe `bifrost`. Un membre de ce groupe ouvre le canal, et n'y
+    /// a que `status`, `connect-stored` et `disconnect` (`crate::appelant`).
     pub allowed_gid: Option<u32>,
 }
 
@@ -80,22 +88,36 @@ pub enum AuthError {
     Unavailable(String),
 }
 
-/// Decide si le pair peut piloter le daemon.
-pub fn authorize(peer: &PeerIdentity, policy: &AuthPolicy) -> Result<(), AuthError> {
+/// Pourquoi un pair est admis sur le canal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Admission {
+    /// Par son uid: root, toujours, meme s'il est aussi membre du groupe; ou
+    /// un uid de `allowed_uids`.
+    ParUid,
+    /// Seulement par le groupe `allowed_gid`: son gid primaire, ou l'un de ses
+    /// groupes supplementaires.
+    ParGroupe,
+}
+
+/// Decide si le pair peut ouvrir le canal, et pourquoi.
+///
+/// L'uid est juge avant le groupe: un pair que son uid admet est
+/// [`Admission::ParUid`] quels que soient ses groupes, lus ou non.
+pub fn authorize(peer: &PeerIdentity, policy: &AuthPolicy) -> Result<Admission, AuthError> {
     if peer.uid == 0 {
-        return Ok(());
+        return Ok(Admission::ParUid);
     }
     if policy.allowed_uids.contains(&peer.uid) {
-        return Ok(());
+        return Ok(Admission::ParUid);
     }
     if let Some(gid) = policy.allowed_gid {
         if peer.gid == gid {
-            return Ok(());
+            return Ok(Admission::ParGroupe);
         }
         match &peer.supplementary_groups {
             SupplementaryGroups::Known(groupes) => {
                 if groupes.contains(&gid) {
-                    return Ok(());
+                    return Ok(Admission::ParGroupe);
                 }
             }
             SupplementaryGroups::Unreadable(cause) => {
@@ -184,7 +206,84 @@ mod tests {
 
     #[test]
     fn root_est_toujours_autorise() {
-        assert!(authorize(&peer(0, 0), &AuthPolicy::default()).is_ok());
+        assert_eq!(
+            authorize(&peer(0, 0), &AuthPolicy::default()),
+            Ok(Admission::ParUid)
+        );
+    }
+
+    /// La table d'admission: la raison rendue pour chaque facon d'etre admis,
+    /// et les refus inchanges. root est admis par son uid meme quand son gid
+    /// primaire ou un groupe supplementaire est celui de la politique; un uid
+    /// autorise aussi; le gid primaire et un groupe supplementaire admettent
+    /// par le groupe.
+    #[test]
+    fn la_table_d_admission_rend_la_raison() {
+        let politique = AuthPolicy {
+            allowed_uids: vec![0, 1001],
+            allowed_gid: Some(970),
+        };
+        let avec_groupes = |uid: u32, gid: u32, groupes: Vec<u32>| PeerIdentity {
+            supplementary_groups: SupplementaryGroups::Known(groupes),
+            ..peer(uid, gid)
+        };
+        for (nom, pair, issue) in [
+            ("root", peer(0, 0), Ok(Admission::ParUid)),
+            (
+                "root au gid primaire du groupe",
+                peer(0, 970),
+                Ok(Admission::ParUid),
+            ),
+            (
+                "root membre supplementaire du groupe",
+                avec_groupes(0, 0, vec![970]),
+                Ok(Admission::ParUid),
+            ),
+            (
+                "root, groupes illisibles",
+                sans_groupes_lus(0, 970),
+                Ok(Admission::ParUid),
+            ),
+            ("uid autorise", peer(1001, 1001), Ok(Admission::ParUid)),
+            (
+                "uid autorise et membre du groupe",
+                avec_groupes(1001, 970, vec![970]),
+                Ok(Admission::ParUid),
+            ),
+            (
+                "uid autorise, groupes illisibles",
+                sans_groupes_lus(1001, 1001),
+                Ok(Admission::ParUid),
+            ),
+            ("gid primaire", peer(1000, 970), Ok(Admission::ParGroupe)),
+            (
+                "gid primaire, groupes illisibles",
+                sans_groupes_lus(1000, 970),
+                Ok(Admission::ParGroupe),
+            ),
+            (
+                "groupe supplementaire",
+                avec_groupes(1000, 1000, vec![4, 27, 970]),
+                Ok(Admission::ParGroupe),
+            ),
+        ] {
+            assert_eq!(authorize(&pair, &politique), issue, "{nom}");
+        }
+        assert_eq!(
+            authorize(&avec_groupes(1000, 1000, vec![4, 27]), &politique),
+            Err(AuthError::Denied {
+                peer: "uid=1000 gid=1000 pid=4242".to_owned()
+            }),
+            "non membre"
+        );
+        assert_eq!(
+            authorize(&sans_groupes_lus(1000, 1000), &politique),
+            Err(AuthError::GroupsUnreadable {
+                peer: "uid=1000 gid=1000 pid=4242".to_owned(),
+                cause: "Too many open files (os error 24)".to_owned(),
+            }),
+            "groupes illisibles"
+        );
     }
 
     /// Le test que demande le jalon J2 du document 06: un processus non
@@ -202,7 +301,7 @@ mod tests {
             allowed_uids: vec![0, 1000],
             allowed_gid: None,
         };
-        assert!(authorize(&peer(1000, 1000), &policy).is_ok());
+        assert_eq!(authorize(&peer(1000, 1000), &policy), Ok(Admission::ParUid));
         assert!(authorize(&peer(1001, 1001), &policy).is_err());
     }
 
@@ -212,7 +311,10 @@ mod tests {
             allowed_uids: vec![0],
             allowed_gid: Some(970),
         };
-        assert!(authorize(&peer(1000, 970), &policy).is_ok());
+        assert_eq!(
+            authorize(&peer(1000, 970), &policy),
+            Ok(Admission::ParGroupe)
+        );
         assert!(authorize(&peer(1000, 971), &policy).is_err());
     }
 
@@ -224,7 +326,7 @@ mod tests {
         };
         let mut p = peer(1000, 1000);
         p.supplementary_groups = SupplementaryGroups::Known(vec![4, 27, 970]);
-        assert!(authorize(&p, &policy).is_ok());
+        assert_eq!(authorize(&p, &policy), Ok(Admission::ParGroupe));
 
         p.supplementary_groups = SupplementaryGroups::Known(vec![4, 27]);
         assert!(authorize(&p, &policy).is_err());
@@ -256,12 +358,18 @@ mod tests {
             allowed_uids: vec![0, 1001],
             allowed_gid: Some(970),
         };
-        assert_eq!(authorize(&sans_groupes_lus(0, 0), &par_groupe), Ok(()));
+        assert_eq!(
+            authorize(&sans_groupes_lus(0, 0), &par_groupe),
+            Ok(Admission::ParUid)
+        );
         assert_eq!(
             authorize(&sans_groupes_lus(1001, 1001), &par_groupe),
-            Ok(())
+            Ok(Admission::ParUid)
         );
-        assert_eq!(authorize(&sans_groupes_lus(1000, 970), &par_groupe), Ok(()));
+        assert_eq!(
+            authorize(&sans_groupes_lus(1000, 970), &par_groupe),
+            Ok(Admission::ParGroupe)
+        );
         assert!(matches!(
             authorize(&sans_groupes_lus(1000, 1000), &AuthPolicy::default()),
             Err(AuthError::Denied { .. })

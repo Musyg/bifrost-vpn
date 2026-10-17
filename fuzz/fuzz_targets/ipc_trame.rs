@@ -5,7 +5,10 @@
 //! du groupe `bifrost`) ecrit ces octets; le daemon les lit en root sous Linux
 //! (LocalSystem sous Windows, par le pipe nomme, non couvert ici). C'est le
 //! chemin de production complet: cadrage borne (`read_frame`, prive),
-//! deserialisation, controle de version.
+//! deserialisation, controle de version, puis la decision par commande, que
+//! le pair de la cible, admis par son uid, passe toujours (niveau complet).
+//! Le refus d'une commande a un membre du groupe se mesure dans les recettes
+//! du transport, pas ici.
 //!
 //! La cible ouvre UNE fois, par processus, un vrai serveur sur un socket Unix
 //! du repertoire temporaire (aucun reseau), admet son propre uid, puis a

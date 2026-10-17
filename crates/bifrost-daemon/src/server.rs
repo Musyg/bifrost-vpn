@@ -182,9 +182,10 @@ async fn handle(
         };
 
         // Toute commande privilegiee est tracee avec son appelant: sans cela il
-        // est impossible de savoir apres coup qui a coupe le tunnel. Sous
-        // Windows, le niveau dit si c'etait un administrateur ou un membre du
-        // groupe d'acces; sous Linux, il est toujours complet.
+        // est impossible de savoir apres coup qui a coupe le tunnel. Le niveau
+        // dit si c'etait un administrateur (root sous Linux; SYSTEM ou
+        // Administrateurs actifs sous Windows) ou un membre du groupe (le
+        // groupe `bifrost` sous Linux, le groupe d'acces sous Windows).
         if request.command.is_mutating() {
             tracing::info!(
                 peer = %peer,

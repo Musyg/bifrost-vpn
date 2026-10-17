@@ -4,9 +4,9 @@
 //! d'acces y ajoute UNE ACE: ses membres, sans elevation, ouvrent le canal en
 //! lecture et en ecriture, et n'y peuvent rien d'autre (le masque et sa
 //! mesure sont dans `transport`, `MASQUE_DU_GROUPE`). C'est le pendant du
-//! groupe `bifrost` du socket Linux, avec une difference: un membre n'a que
+//! groupe `bifrost` du socket Linux, avec la meme regle: un membre n'a que
 //! trois commandes, `status`, `connect-stored` et `disconnect`
-//! (`crate::appelant`), quand un membre du groupe `bifrost` a tout le canal.
+//! (`crate::appelant`).
 //!
 //! # Qui peut etre groupe d'acces
 //!

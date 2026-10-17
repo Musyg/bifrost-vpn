@@ -108,9 +108,12 @@ pub enum Command {
     /// Elle ne porte aucun parametre, et ne peut donc rien decrire. Ce qu'elle
     /// declenche est `Event::SystemResumed`, qui ne change aucun etat et repose
     /// la politique que l'etat courant exige DEJA - dont `Disconnected`, ou
-    /// elle ne pose rien du tout. Un membre du groupe qui l'enverrait en
-    /// rafale couterait des transactions de pare-feu, pas une fuite ni une
-    /// coupure. `Disconnect`, deja exposee, est strictement plus puissante.
+    /// elle ne pose rien du tout. Un appelant qui l'enverrait en rafale
+    /// couterait des transactions de pare-feu, pas une fuite ni une coupure.
+    /// Elle est pourtant reservee aux administrateurs, comme toute commande
+    /// hors de `status`, `connect-stored` et `disconnect`
+    /// (`crate::appelant`): le crochet de veille tourne en root, et un membre
+    /// du groupe la recoit refusee.
     Reprise,
     /// Ce que le daemon dit avoir remis a son moteur de pare-feu, en dernier.
     ///
@@ -125,10 +128,12 @@ pub enum Command {
     ///
     /// # Ce qu'un appelant y gagne: une lecture
     ///
-    /// Aucun parametre, aucun effet: elle ne pose rien, ne change aucun etat,
-    /// et passe par le meme controle d'acces que `Status`. Elle ne transporte
-    /// ni cle ni profil, seulement les champs que le moteur appele lit (voir
-    /// [`DeclarationPareFeu`]).
+    /// Aucun parametre, aucun effet: elle ne pose rien, ne change aucun etat.
+    /// Elle n'en est pas moins reservee aux administrateurs, comme toute
+    /// commande hors de `status`, `connect-stored` et `disconnect`
+    /// (`crate::appelant`): un membre du groupe la recoit refusee. Elle ne
+    /// transporte ni cle ni profil, seulement les champs que le moteur appele
+    /// lit (voir [`DeclarationPareFeu`]).
     DeclarationPareFeu,
     /// Le plan de routage que le PERIPHERIQUE du tunnel a pose en dernier.
     ///
@@ -144,9 +149,10 @@ pub enum Command {
     ///
     /// # Ce qu'un appelant y gagne: une lecture
     ///
-    /// Aucun parametre, aucun effet, meme controle d'acces que `Status`. Elle ne
-    /// transporte ni cle ni profil: seulement les champs qui definissent le plan
-    /// (voir [`DeclarationRoutage`]), et l'etat (pose, rien, non applicable).
+    /// Aucun parametre, aucun effet, et reservee aux administrateurs comme
+    /// `DeclarationPareFeu` (`crate::appelant`). Elle ne transporte ni cle ni
+    /// profil: seulement les champs qui definissent le plan (voir
+    /// [`DeclarationRoutage`]), et l'etat (pose, rien, non applicable).
     ///
     /// # Deux formes de reponse, une par plateforme
     ///
@@ -171,10 +177,10 @@ pub enum Command {
     ///
     /// # Ce qu'un appelant y gagne: une lecture
     ///
-    /// Aucun parametre, aucun effet, meme controle d'acces que `Status`. Elle ne
-    /// transporte ni cle ni profil: seulement ce qui suffit a reconstruire le
-    /// plan DNS pose (voir [`PoseDns`]), et l'etat (pose, rien, echec, non
-    /// applicable).
+    /// Aucun parametre, aucun effet, et reservee aux administrateurs comme
+    /// `DeclarationPareFeu` (`crate::appelant`). Elle ne transporte ni cle ni
+    /// profil: seulement ce qui suffit a reconstruire le plan DNS pose (voir
+    /// [`PoseDns`]), et l'etat (pose, rien, echec, non applicable).
     DeclarationDns,
 }
 

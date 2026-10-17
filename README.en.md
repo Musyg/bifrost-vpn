@@ -27,7 +27,7 @@ The connection path now uses transport selection. WireGuard runs directly; VLESS
 | WireGuard | Kernel module controlled through netlink | WireGuardNT, with handshake and data-path tests |
 | Third-party transport path | TUN, routing by the core's identity, SOCKS5 forwarding | Wintun, interface-bound transport sockets, SOCKS5 forwarding |
 | DNS | systemd-resolved or `/etc/resolv.conf`; optional dnscrypt-proxy | Interface DNS configuration, WFP restrictions; optional dnscrypt-proxy under LocalService |
-| Authenticated IPC | Unix socket and `SO_PEERCRED` | Named pipe and an explicit security descriptor: SYSTEM, Administrators and an optional local access group (`--group`) limited to three commands |
+| Authenticated IPC | Unix socket and `SO_PEERCRED`: root, and the `bifrost` group limited to three commands | Named pipe and an explicit security descriptor: SYSTEM, Administrators and an optional local access group (`--group`) limited to three commands |
 | Local comparisons | File integrity, nftables, routing and effective DNS | File integrity, WFP and routing |
 | Leak-test harness | Ten vectors, network namespaces and packet captures | `check` runs the DoH-policy check; the other vectors refer to dedicated commands |
 | Telemetry controls | DNS filtering | DNS filtering, reversible registry/service/task settings, and separately measured WFP filters |
@@ -141,7 +141,7 @@ sudo RESOLVEUR=/path/to/dnscrypt-proxy ./packaging/install-linux.sh
 
 The installer creates the accounts, installs the binaries and unit, then stops. **It neither enables nor starts the service.** Starting it is an explicit operational decision.
 
-- The `bifrost` group allows humans to control the daemon. An administrator manages its membership.
+- The `bifrost` group opens the daemon's channel to its members, who have three commands there: status, `connect-stored` (the profile the daemon holds) and `disconnect`. Every other command (`connect --config`, `check`, resume after sleep, the declarations, the TLS inspection verdict) is reserved to root and receives a refusal that names it. An administrator manages its membership.
 - `bifrost-coeur` runs third-party transport cores. It has no login shell or home directory and does not belong to the control group.
 - `bifrost-resolveur` runs the encrypted DNS resolver. Unlike the core, it has no general cleartext network exemption. Its identity restricts who may use port 53.
 
