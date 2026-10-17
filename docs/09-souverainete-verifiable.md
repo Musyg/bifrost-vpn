@@ -227,10 +227,14 @@ Un refus du moteur est declare `echec`, sans politique: la precedente n'est pas
 redeclaree.
 
 La requete IPC `declaration-pare-feu` est une lecture sans parametre, classee
-non mutante. Elle passe par le controle d'acces existant, inchange: socket 0660
-et SO_PEERCRED sous Linux (root et le groupe `--group`), DACL du pipe sous
-Windows (SYSTEM et Administrateurs). Qui peut la lire pouvait deja connecter et
-deconnecter. Elle ne porte ni cle, ni profil, ni point d'acces: version, alea,
+non mutante. Elle est reservee aux appelants qui ont tout le canal: sous Linux,
+root, admis par son uid (SO_PEERCRED, socket 0660); sous Windows, SYSTEM et un
+jeton aux Administrateurs actifs. Un membre du groupe d'acces (`--group` sous
+Linux, le groupe d'acces du service sous Windows) n'y a que `status`,
+`connect-stored` et `disconnect`: la declaration lui est refusee par une
+reponse qui nomme la commande, et la preuve rend UNMEASURED (`le daemon a
+refuse la demande`). Qui peut la lire pouvait deja connecter et deconnecter.
+Elle ne porte ni cle, ni profil, ni point d'acces: version, alea,
 numero, moteur, issue (`aucune`, `posee`, `retiree`, `echec`) et, si posee, la
 projection v1 des six champs que le rendu nft lit. Une recette verifie sur le
 rendu reel que ces six champs suffisent a le reproduire.
@@ -269,8 +273,10 @@ reel dans un namespace sans veth, profil a coeur dont le binaire manque; le kill
 switch est pose, le tunnel ne monte jamais, le DNS de l'hote n'est pas touche.
 Daemon neuf: UNMEASURED. Etat erreur: MATCH sans mutation. Regle retiree,
 exception elargie, filtre tiers prioritaire, interface remplacee: MISMATCH,
-puis MATCH apres reprise. Lecteur sans droit noyau, hors du groupe, ou refuse
-par le daemon: UNMEASURED. Trente reprises concurrentes: MATCH ou UNMEASURED
+puis MATCH apres reprise. Root sans capacite (declaration lue, noyau refuse),
+membre du seul groupe du daemon (declaration refusee par le daemon, qui nomme
+la commande; l'etat lui reste ouvert), hors du groupe, ou refuse par le
+daemon: UNMEASURED. Trente reprises concurrentes: MATCH ou UNMEASURED
 explique, jamais MISMATCH. Deconnexion, daemon arrete avec sa table en place:
 UNMEASURED. Aucun processus ne survit aux namespaces. Non mesures en banc:
 etat connecte, montee de l'interface, reconnexion, chemin WireGuard (marque),

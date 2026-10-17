@@ -281,8 +281,10 @@ declare avoir remise a son moteur nftables.
 bifrost-cli --json prove nft --politique-daemon --actif
 ```
 
-La commande lit cette declaration sur le socket du daemon (memes droits que
-`status`), collecte le noyau encadre par sa generation, puis relit la
+La commande lit cette declaration sur le socket du daemon (reservee a root:
+un membre du groupe `bifrost`, qui a `status`, recoit un refus qui nomme la
+commande, et le rapport rend UNMEASURED), collecte le noyau encadre par sa
+generation, puis relit la
 declaration. Si elle a change entre-temps, si le daemon est injoignable ou
 sans reponse dans le delai, refuse
 l'acces, n'a encore rien pose, a retire son kill switch ou a vu son moteur

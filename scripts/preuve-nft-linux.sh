@@ -716,11 +716,29 @@ reposer
 correspond
 echo 'PASSED: interface remplacee -> ecart'
 
-# Droits retires, trois fois. Membre du groupe du daemon mais sans droit noyau:
-# la declaration est lue, le noyau ne l'est pas.
+# Droits retires, quatre fois.
+#
+# Root sans aucune capacite: admis par son uid, il a tout le canal et le daemon
+# lui sert la declaration; sans CAP_NET_ADMIN, le noyau lui refuse la
+# generation nft. La declaration est lue, le noyau ne l'est pas. Un membre du
+# groupe n'atteint plus ce chemin: la declaration est reservee a root. Les
+# bornes et les heritables vides retirent les capacites que l'exec rendrait a
+# l'uid 0.
 non_mesure 'acces noyau refuse; aucune elevation automatique' \
-  setpriv --reuid=65534 --regid=65534 --clear-groups
-jq -e '.failed_input == "observed" and (.live_kernel | not)' "$BAC/decl.json" >/dev/null
+  setpriv --reuid=0 --regid=0 --clear-groups --inh-caps=-all --bounding-set=-all
+jq -e '.failed_input == "observed" and .daemon_identity == "root-peer-credentials" and (.live_kernel | not)' "$BAC/decl.json" >/dev/null
+# Membre du groupe du daemon, admis par ce seul groupe: il n'a sur le canal que
+# status, connect-stored et disconnect. La declaration lui est refusee avant
+# toute lecture du noyau, et le journal du daemon nomme la commande refusee:
+# jamais une correspondance pour lui. L'etat lui reste ouvert: la regle lui
+# retire la declaration, pas le canal.
+REFUS_DECL='commande reservee a root, refusee command="declaration-pare-feu"'
+REFUS_AVANT=$(grep -cF "$REFUS_DECL" "$BAC/daemon.log" || true)
+non_mesure 'le daemon a refuse la demande' setpriv --reuid=65534 --regid=65534 --clear-groups
+jq -e '.failed_input == "daemon-declaration" and (.live_kernel | not) and (.generation_verified | not)' "$BAC/decl.json" >/dev/null
+test "$(grep -cF "$REFUS_DECL" "$BAC/daemon.log")" = "$((REFUS_AVANT + 1))"
+ip netns exec "$NSD" setpriv --reuid=65534 --regid=65534 --clear-groups \
+  "$CLI" --json --socket "$SOCKET" status | jq -e '.kill_switch_engaged' >/dev/null
 # Hors du groupe: le systeme de fichiers refuse le socket (0660).
 non_mesure 'acces au daemon refuse' setpriv --reuid=65533 --regid=65533 --clear-groups
 # Socket ouvert a tous le temps d'une preuve: c'est alors le daemon lui-meme
@@ -729,7 +747,7 @@ chmod 0666 "$SOCKET"
 non_mesure 'acces au daemon refuse' setpriv --reuid=65533 --regid=65533 --clear-groups
 chmod 0660 "$SOCKET"
 grep -qF 'connexion refusee' "$BAC/daemon.log"
-echo 'PASSED: droits retires -> non mesure, cote noyau comme cote daemon'
+echo 'PASSED: droits retires -> non mesure: root sans capacite (noyau), membre du seul groupe (declaration refusee, etat ouvert), hors du groupe (socket, puis daemon)'
 
 # Course: trente reprises concurrentes. Chaque preuve rend une correspondance ou
 # un non mesure explique; jamais un ecart, puisque rien ne s'ecarte de ce qui
