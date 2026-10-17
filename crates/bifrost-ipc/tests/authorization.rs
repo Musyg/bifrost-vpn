@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 use bifrost_ipc::protocol::{Command, Request, Response};
 use bifrost_ipc::transport::{IpcClient, IpcServer};
-use bifrost_ipc::{AuthPolicy, PeerIdentity, ServerRequirement};
+use bifrost_ipc::{AuthPolicy, PeerIdentity, ProprietaireDuPipe, ServerRequirement};
 
 fn socket_path(nom: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
@@ -59,9 +59,14 @@ async fn un_processus_non_autorise_ne_peut_pas_piloter_le_daemon() {
 
     let path = socket_path("refus");
     // Politique par defaut: root uniquement.
-    let server = IpcServer::bind(&path, AuthPolicy::default(), None)
-        .await
-        .expect("bind");
+    let server = IpcServer::bind(
+        &path,
+        AuthPolicy::default(),
+        None,
+        ProprietaireDuPipe::ParDefaut,
+    )
+    .await
+    .expect("bind");
     tokio::spawn(serve_once(server));
 
     let mut client = client_verifie(&path).await;
@@ -90,7 +95,9 @@ async fn un_uid_explicitement_autorise_est_accepte() {
         allowed_uids: vec![0, euid()],
         allowed_gid: None,
     };
-    let server = IpcServer::bind(&path, policy, None).await.expect("bind");
+    let server = IpcServer::bind(&path, policy, None, ProprietaireDuPipe::ParDefaut)
+        .await
+        .expect("bind");
     tokio::spawn(serve_once(server));
 
     let mut client = client_verifie(&path).await;
@@ -113,9 +120,14 @@ async fn le_socket_n_est_pas_accessible_a_tous() {
     use std::os::unix::fs::PermissionsExt;
 
     let path = socket_path("permissions");
-    let _server = IpcServer::bind(&path, AuthPolicy::default(), None)
-        .await
-        .expect("bind");
+    let _server = IpcServer::bind(
+        &path,
+        AuthPolicy::default(),
+        None,
+        ProprietaireDuPipe::ParDefaut,
+    )
+    .await
+    .expect("bind");
 
     let mode = std::fs::metadata(&path)
         .expect("metadata")
@@ -136,9 +148,14 @@ async fn le_socket_n_est_pas_accessible_a_tous() {
 async fn le_socket_est_retire_a_l_arret() {
     let path = socket_path("nettoyage");
     {
-        let _server = IpcServer::bind(&path, AuthPolicy::default(), None)
-            .await
-            .expect("bind");
+        let _server = IpcServer::bind(
+            &path,
+            AuthPolicy::default(),
+            None,
+            ProprietaireDuPipe::ParDefaut,
+        )
+        .await
+        .expect("bind");
         assert!(path.exists());
     }
     assert!(!path.exists(), "socket residuel apres arret du serveur");
@@ -153,7 +170,9 @@ async fn une_version_de_protocole_incompatible_est_refusee() {
         allowed_uids: vec![0, euid()],
         allowed_gid: None,
     };
-    let server = IpcServer::bind(&path, policy, None).await.expect("bind");
+    let server = IpcServer::bind(&path, policy, None, ProprietaireDuPipe::ParDefaut)
+        .await
+        .expect("bind");
     tokio::spawn(async move {
         let mut server = server;
         if let Ok(mut conn) = server.accept().await {
@@ -196,7 +215,9 @@ async fn l_identite_du_pair_est_renseignee() {
         allowed_uids: vec![0, euid()],
         allowed_gid: None,
     };
-    let mut server = IpcServer::bind(&path, policy, None).await.expect("bind");
+    let mut server = IpcServer::bind(&path, policy, None, ProprietaireDuPipe::ParDefaut)
+        .await
+        .expect("bind");
 
     let connexion = tokio::spawn(async move { server.accept().await });
     let _client = client_verifie(&path).await;

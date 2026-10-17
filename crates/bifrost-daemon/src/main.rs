@@ -2670,7 +2670,14 @@ async fn run(args: Args) -> anyhow::Result<()> {
     // Le superviseur tourne: plus aucune issue de `run` ne doit passer a cote
     // de son arret. L'ouverture de l'ecoute appartient donc au service que
     // `ecouter_et_servir` arrete.
-    let policy = server::auth_policy(args.group.as_deref());
+    // Le proprietaire du pipe (Windows): console = Administrateurs,
+    // --service = par defaut. Decide ici, ou le mode de lancement est connu,
+    // et passe par PolitiqueDuCanal. Sous Unix la notion n'existe pas.
+    #[cfg(windows)]
+    let proprietaire = server::proprietaire_du_pipe(args.service);
+    #[cfg(unix)]
+    let proprietaire = bifrost_ipc::ProprietaireDuPipe::ParDefaut;
+    let policy = server::auth_policy(args.group.as_deref(), proprietaire);
     let shutdown_tx = tx.clone();
     server::ecouter_et_servir(
         &args.socket,
@@ -3137,10 +3144,24 @@ mod tests {
         const CANAL: &str = "let (tx, rx) = mpsc::channel::<Cmd>();";
         const LANCEMENT: &str = "    let handle = std::thread::Builder::new()\n        \
              .name(\"\".into())\n        .spawn(move || supervisor.run(rx))?;\n";
-        const FIN: &str = "    let policy = server::auth_policy(args.group.as_deref());\n    \
-             let shutdown_tx = tx.clone();\n    server::ecouter_et_servir(\n        \
-             &args.socket,\n        policy,\n        args.profil.clone(),\n        tx,\n        \
-             shutdown_signal(),\n        shutdown_tx,\n        handle,\n    )\n    .await";
+        const FIN: &str = concat!(
+            "    #[cfg(windows)]\n",
+            "    let proprietaire = server::proprietaire_du_pipe(args.service);\n",
+            "    #[cfg(unix)]\n",
+            "    let proprietaire = bifrost_ipc::ProprietaireDuPipe::ParDefaut;\n",
+            "    let policy = server::auth_policy(args.group.as_deref(), proprietaire);\n",
+            "    let shutdown_tx = tx.clone();\n",
+            "    server::ecouter_et_servir(\n",
+            "        &args.socket,\n",
+            "        policy,\n",
+            "        args.profil.clone(),\n",
+            "        tx,\n",
+            "        shutdown_signal(),\n",
+            "        shutdown_tx,\n",
+            "        handle,\n",
+            "    )\n",
+            "    .await",
+        );
 
         assert_eq!(code.matches(CANAL).count(), 1, "le canal du superviseur");
         assert_eq!(

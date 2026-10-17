@@ -312,7 +312,7 @@ l'arbitrage des filtres tiers au poids effectif que le moteur a rendu a la
 sous-couche de Bifrost. Un acces refuse rend UNMEASURED, jamais une liste vide.
 Avant de lire, le client exige que le pipe appartienne a LocalSystem, celui du
 service (`daemon_identity` vaut alors `windows-system-pipe-owner`); un daemon
-lance en console elevee, dont le pipe appartient aux Administrateurs, est admis
+lance en console, dont le pipe est attribue aux Administrateurs (`O:BA`), est admis
 par les commandes mais pas par la preuve, qui rend UNMEASURED avec
 `failed_input=daemon-identity` sans rien lui envoyer. Rien de la declaration ni
 du moteur n'est exporte (ni chemin, ni SID, ni LUID, ni GUID). MATCH dit que le

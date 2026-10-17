@@ -44,6 +44,6 @@ pub use auth::{AuthError, AuthPolicy, PeerIdentity, SupplementaryGroups};
 pub use groupe::{ErreurGroupe, GroupeDAcces};
 pub use protocol::{Command, Request, Response};
 pub use transport::{
-    Connection, IpcClient, IpcError, IpcServer, ServerIdentityError, ServerRequirement, ServerRule,
-    default_endpoint,
+    Connection, IpcClient, IpcError, IpcServer, ProprietaireDuPipe, ServerIdentityError,
+    ServerRequirement, ServerRule, default_endpoint,
 };

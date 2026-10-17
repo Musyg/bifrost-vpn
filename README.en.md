@@ -251,7 +251,7 @@ bifrost-cli --json prove wfp --politique-daemon --actif
 
 The command reads the daemon's declaration, enumerates WFP in a single read-only transaction, then reads the declaration again. It compares Bifrost's provider, sublayer and filters, including arbitration against readable third-party filters at the effective sublayer weight.
 
-For this proof, the named pipe must belong to LocalSystem. An elevated console daemon with an Administrators-owned pipe is accepted by ordinary commands but not by this proof. Access denied remains `UNMEASURED`, never an empty successful enumeration. Paths, SIDs, LUIDs and GUIDs are not exported in the report.
+For this proof, the named pipe must belong to LocalSystem. A console daemon, which assigns its pipe to the Administrators group (`O:BA`), is accepted by ordinary commands but not by this proof. Access denied remains `UNMEASURED`, never an empty successful enumeration. Paths, SIDs, LUIDs and GUIDs are not exported in the report.
 
 The complete contracts are in [the local-observation specification](docs/09-souverainete-verifiable.md).
 

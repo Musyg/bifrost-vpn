@@ -3,21 +3,21 @@
 //! `connect-stored` et `disconnect`.
 //!
 //! La regle des commandes n'admet qu'un pipe de LocalSystem ou des
-//! Administrateurs, et un objet cree sans proprietaire explicite recoit le
-//! proprietaire par defaut du jeton de son createur, `TokenOwner`
-//! ([MS-DTYP] 2.5.3.4.1). La recette ne suppose rien de ce proprietaire par
-//! defaut: elle le lit, puis pose les Administrateurs comme proprietaire par
-//! defaut de son jeton, ce que fait l'elevation par UAC, le relit, et
-//! seulement alors lie le serveur. Le systeme refuse la pose
-//! (`ERROR_INVALID_OWNER`) quand les Administrateurs ne sont pas eligibles
-//! comme proprietaire dans ce jeton: la recette s'abstient alors, et le dit.
+//! Administrateurs. Le daemon lance en console attribue son pipe aux
+//! Administrateurs (`O:BA`), sans dependre du proprietaire par defaut du
+//! jeton: la recette lie donc le serveur en mode console
+//! (`ProprietaireDuPipe::Administrateurs`) et verifie que le poste de commande
+//! dialogue avec lui.
 //!
-//! Un binaire a part: la pose modifie le jeton du PROCESSUS, et aucune autre
-//! recette ne tourne dans ce processus. Ni jeton de fil, ni impersonation.
+//! Le noyau n'accepte `O:BA` que si les Administrateurs sont actifs dans le
+//! jeton, ce que la recette lit par `CheckTokenMembership`
+//! (`jeton::administrateurs_actifs`). Sans eux, elle s'abstient, et le dit.
+//! Elle ne modifie plus le jeton du processus (aucune pose de proprietaire
+//! par defaut, plus de binaire a part necessaire pour cela); l'integrite et
+//! le proprietaire par defaut ne sont plus lus que pour son releve.
 //!
 //! Ce qu'elle lit s'imprime par classes, jamais par SID:
-//! `RELEVE eleve_ipc: integrite=..., proprietaire par defaut avant=...`, puis,
-//! apres la pose, `RELEVE eleve_ipc: proprietaire par defaut apres=...`.
+//! `RELEVE eleve_ipc: integrite=..., proprietaire par defaut=...`.
 
 #![cfg(windows)]
 
@@ -25,82 +25,40 @@
 mod faux_daemon;
 
 use bifrost_coquille::Commande;
-use bifrost_ipc::{AuthPolicy, IpcServer};
-use jeton::{Integrite, Proprietaire};
-use windows_sys::Win32::Foundation::ERROR_INVALID_OWNER;
+use bifrost_ipc::{AuthPolicy, IpcServer, ProprietaireDuPipe};
 
-/// L'issue de la pose des Administrateurs comme proprietaire par defaut.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Pose {
-    /// Deja proprietaire par defaut: rien n'est pose.
-    Deja,
-    /// Posee par `SetTokenInformation`.
-    Posee,
-    /// Refusee par `ERROR_INVALID_OWNER`: les Administrateurs ne sont pas
-    /// eligibles comme proprietaire dans ce jeton.
-    NonEligible,
-}
-
-/// Le dialogue avec un vrai serveur IPC, une fois les Administrateurs poses
-/// comme proprietaire par defaut du jeton et relus. Le niveau d'integrite
-/// sert de controle croise de la pose: un jeton eleve ou systeme qui la
-/// refuse, ou un jeton moyen dont les Administrateurs sont ou deviennent le
-/// proprietaire par defaut, se contredisent, et la recette rougit en
-/// imprimant les deux. Toute erreur de la pose autre que
-/// `ERROR_INVALID_OWNER` est un rouge.
+/// Le dialogue avec un vrai serveur IPC lie en mode console. Le proprietaire
+/// par defaut du jeton n'entre pas en jeu: le mode console attribue le pipe
+/// aux Administrateurs. La recette ne tourne que la ou ce groupe est actif
+/// dans le jeton, lu par `CheckTokenMembership`; ailleurs elle s'abstient.
 #[tokio::test(flavor = "multi_thread")]
 async fn eleve_la_commande_dialogue_avec_un_vrai_serveur_ipc() {
     let integrite = jeton::integrite();
-    let avant = jeton::proprietaire_par_defaut();
+    let proprietaire = jeton::proprietaire_par_defaut();
     println!(
-        "RELEVE eleve_ipc: integrite={}, proprietaire par defaut avant={}",
+        "RELEVE eleve_ipc: integrite={}, proprietaire par defaut={}",
         integrite.nom(),
-        avant.nom()
+        proprietaire.nom()
     );
 
-    let pose = if avant == Proprietaire::Administrateurs {
-        Pose::Deja
-    } else {
-        match jeton::poser_les_administrateurs() {
-            Ok(()) => Pose::Posee,
-            Err(e) if e.raw_os_error() == Some(ERROR_INVALID_OWNER as i32) => Pose::NonEligible,
-            Err(e) => panic!("pose des Administrateurs comme proprietaire par defaut: {e}"),
-        }
-    };
-    match (integrite, pose) {
-        (Integrite::Eleve | Integrite::Systeme, Pose::Deja | Pose::Posee) => {}
-        (Integrite::Moyen, Pose::NonEligible) => {
-            println!(
-                "SKIPPED eleve_la_commande_dialogue_avec_un_vrai_serveur_ipc: les \
-                 Administrateurs ne sont pas eligibles comme proprietaire dans le jeton de ce \
-                 processus (ERROR_INVALID_OWNER), et la regle des commandes n'admet qu'un pipe \
-                 de LocalSystem ou des Administrateurs"
-            );
-            return;
-        }
-        (Integrite::Eleve | Integrite::Systeme, Pose::NonEligible)
-        | (Integrite::Moyen, Pose::Deja | Pose::Posee) => panic!(
-            "contradiction: integrite={}, pose des Administrateurs comme proprietaire par \
-             defaut: {pose:?}",
-            integrite.nom()
-        ),
+    if !jeton::administrateurs_actifs() {
+        println!(
+            "SKIPPED eleve_la_commande_dialogue_avec_un_vrai_serveur_ipc: les Administrateurs ne \
+             sont pas actifs dans le jeton de ce processus, et le noyau refuse alors d'attribuer \
+             un pipe a ce groupe"
+        );
+        return;
     }
 
-    let apres = jeton::proprietaire_par_defaut();
-    println!(
-        "RELEVE eleve_ipc: proprietaire par defaut apres={}",
-        apres.nom()
-    );
-    assert_eq!(
-        apres,
-        Proprietaire::Administrateurs,
-        "le proprietaire par defaut relu apres la pose ({pose:?})"
-    );
-
     let path = format!(r"\\.\pipe\bifrost-coquille-{}-eleve", std::process::id());
-    let server = IpcServer::bind(&path, AuthPolicy::default(), None)
-        .await
-        .expect("bind du vrai serveur IPC");
+    let server = IpcServer::bind(
+        &path,
+        AuthPolicy::default(),
+        None,
+        ProprietaireDuPipe::Administrateurs,
+    )
+    .await
+    .expect("bind du vrai serveur IPC en mode console");
     let tache = tokio::spawn(faux_daemon::servir(server, Default::default()));
 
     let poste = Commande::new(path);

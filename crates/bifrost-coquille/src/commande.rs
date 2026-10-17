@@ -382,7 +382,14 @@ mod tests {
             allowed_uids: vec![0, euid],
             allowed_gid: None,
         };
-        let server = IpcServer::bind(&path, policy, None).await.expect("bind");
+        let server = IpcServer::bind(
+            &path,
+            policy,
+            None,
+            bifrost_ipc::ProprietaireDuPipe::ParDefaut,
+        )
+        .await
+        .expect("bind");
         let tache = tokio::spawn(faux_daemon::servir(server, Default::default()));
 
         let couture = Commande::admettant_l_uid(path.to_string_lossy(), euid);

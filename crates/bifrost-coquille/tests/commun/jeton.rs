@@ -3,19 +3,21 @@
 //! aucun ne sort de ce module.
 //!
 //! Inclus par `#[path = "commun/jeton.rs"]` dans `tests/eleve_ipc.rs` et
-//! `tests/groupe_d_acces.rs`: deux binaires a part, parce que la pose des
-//! Administrateurs comme proprietaire par defaut modifie le jeton du
-//! PROCESSUS.
+//! `tests/groupe_d_acces.rs`. `groupe_d_acces` pose les Administrateurs comme
+//! proprietaire par defaut, ce qui modifie le jeton du PROCESSUS, d'ou un
+//! binaire a part; `eleve_ipc`, depuis que le daemon lance en console attribue
+//! son pipe aux Administrateurs (`O:BA`), lie en mode console et ne pose plus
+//! rien.
 
 use std::ffi::c_void;
 
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
 use windows_sys::Win32::Security::{
-    CreateWellKnownSid, EqualSid, GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation,
-    IsWellKnownSid, SECURITY_MAX_SID_SIZE, SetTokenInformation, TOKEN_ACCESS_MASK,
-    TOKEN_ADJUST_DEFAULT, TOKEN_INFORMATION_CLASS, TOKEN_MANDATORY_LABEL, TOKEN_OWNER, TOKEN_QUERY,
-    TOKEN_USER, TokenIntegrityLevel, TokenOwner, TokenUser, WinBuiltinAdministratorsSid,
-    WinLocalSystemSid,
+    CheckTokenMembership, CreateWellKnownSid, EqualSid, GetSidSubAuthority,
+    GetSidSubAuthorityCount, GetTokenInformation, IsWellKnownSid, SECURITY_MAX_SID_SIZE,
+    SetTokenInformation, TOKEN_ACCESS_MASK, TOKEN_ADJUST_DEFAULT, TOKEN_INFORMATION_CLASS,
+    TOKEN_MANDATORY_LABEL, TOKEN_OWNER, TOKEN_QUERY, TOKEN_USER, TokenIntegrityLevel, TokenOwner,
+    TokenUser, WinBuiltinAdministratorsSid, WinLocalSystemSid,
 };
 use windows_sys::Win32::System::SystemServices::{
     SECURITY_MANDATORY_HIGH_RID, SECURITY_MANDATORY_MEDIUM_RID, SECURITY_MANDATORY_SYSTEM_RID,
@@ -192,8 +194,56 @@ pub fn proprietaire_par_defaut() -> Proprietaire {
     }
 }
 
+/// Les Administrateurs sont-ils actifs dans le jeton du processus
+/// (`CheckTokenMembership`)? Premisse exacte du mode console: le noyau
+/// n'attribue `O:BA` que la.
+///
+/// Incluse par `#[path]` dans plusieurs binaires de recette qui ne
+/// l'appellent pas tous, d'ou l'`allow(dead_code)`.
+#[allow(dead_code)]
+pub fn administrateurs_actifs() -> bool {
+    let mut sid = vec![0u64; (SECURITY_MAX_SID_SIZE as usize).div_ceil(8)];
+    let mut taille = SECURITY_MAX_SID_SIZE;
+    // SAFETY: le tampon fait au moins SECURITY_MAX_SID_SIZE octets, et
+    // `taille` le dit; le SID des Administrateurs ne demande aucun SID de
+    // domaine.
+    let ok = unsafe {
+        CreateWellKnownSid(
+            WinBuiltinAdministratorsSid,
+            std::ptr::null_mut(),
+            sid.as_mut_ptr().cast::<c_void>(),
+            &mut taille,
+        )
+    };
+    assert!(
+        ok != 0,
+        "CreateWellKnownSid: {}",
+        std::io::Error::last_os_error()
+    );
+    let mut membre = 0;
+    // SAFETY: jeton nul, donc celui du fil ou une copie du jeton primaire;
+    // le SID est valide et vit jusqu'a la fin de l'appel; `membre` est local.
+    let ok = unsafe {
+        CheckTokenMembership(
+            std::ptr::null_mut(),
+            sid.as_mut_ptr().cast::<c_void>(),
+            &mut membre,
+        )
+    };
+    assert!(
+        ok != 0,
+        "CheckTokenMembership: {}",
+        std::io::Error::last_os_error()
+    );
+    membre != 0
+}
+
 /// Pose les Administrateurs comme proprietaire par defaut du jeton du
 /// processus, et rend l'erreur du systeme telle quelle.
+///
+/// Utilisee par `groupe_d_acces`; `eleve_ipc`, qui lie desormais en mode
+/// console, ne l'appelle plus, d'ou l'`allow(dead_code)` pour ce binaire-la.
+#[allow(dead_code)]
 pub fn poser_les_administrateurs() -> std::io::Result<()> {
     let jeton = Jeton::ouvrir(TOKEN_QUERY | TOKEN_ADJUST_DEFAULT);
     let mut administrateurs = vec![0u64; (SECURITY_MAX_SID_SIZE as usize).div_ceil(8)];

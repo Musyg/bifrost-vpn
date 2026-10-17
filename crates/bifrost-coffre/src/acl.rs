@@ -40,15 +40,20 @@
 //! parcourir des ACE heritees et de resoudre des appartenances de groupe, avec
 //! le risque de refuser une installation correcte.
 //!
-//! # L'elevation change le proprietaire, pas la regle
+//! # L'elevation change le proprietaire par defaut, pas la regle
 //!
-//! La mesure ci-dessus a ete faite SANS elevation. Sous elevation, Windows
-//! n'attribue pas l'objet cree au compte mais au groupe Administrateurs: le
-//! proprietaire par defaut du jeton, `TokenOwner`, vaut alors `S-1-5-32-544`.
-//! La regle n'a rien a en faire, elle accepte deja ce SID. La recette
-//! `un_repertoire_a_moi_est_accepte`, elle, l'ignorait et tombait sur toute
-//! machine elevee; le detail de ce qui a ete mesure est en tete de cette
-//! recette.
+//! La mesure ci-dessus a ete faite SANS elevation. Sous elevation, le
+//! proprietaire par defaut du jeton (`TokenOwner`) n'est pas toujours le
+//! compte, mais il n'est pas toujours les Administrateurs non plus: un jeton
+//! eleve par UAC l'a sur le groupe Administrateurs, `S-1-5-32-544` (mesure du
+//! 23/08/2026, deux machines), tandis que le compte Administrateur predefini
+//! eleve (RID 500) le garde sur le compte (mesure du 15/10/2026, runner). La
+//! regle n'a rien a en faire: elle compare le proprietaire de l'objet a
+//! `TokenOwner`, et tient dans les deux etats, car un objet cree sans
+//! proprietaire explicite recoit precisement `TokenOwner`. La recette
+//! `un_repertoire_a_moi_est_accepte`, elle, supposait le compte et tombait sur
+//! toute machine ou l'elevation donne les Administrateurs; le detail de ce qui
+//! a ete mesure est en tete de cette recette.
 //!
 //! # Et pourquoi des SID, jamais des noms
 //!
@@ -353,12 +358,14 @@ mod tests {
     /// Le proprietaire d'un objet cree sans descripteur explicite vient du
     /// proprietaire par defaut du JETON, `TokenOwner`, et non de son
     /// utilisateur: [MS-DTYP] 2.5.3.4.1 pose `NewDescriptor.Owner` a
-    /// `Token.SIDs[Token.OwnerIndex]`. Sous elevation ce champ vaut le groupe
-    /// Administrateurs; sans elevation il vaut le SID du compte. La comparaison
-    /// porte donc sur ce champ-la, et elle vaut dans les deux etats sans avoir
+    /// `Token.SIDs[Token.OwnerIndex]`. Ce champ depend du jeton et non d'une
+    /// regle simple: un jeton eleve par UAC l'a sur les Administrateurs, un
+    /// compte non eleve sur le compte, et le compte Administrateur predefini
+    /// eleve (RID 500) le garde sur le compte. La comparaison porte sur ce
+    /// champ-la, quel qu'il soit, et elle vaut dans tous ces etats sans avoir
     /// a les distinguer.
     ///
-    /// Quatre mesures du 23 aout 2026, deux machines:
+    /// Cinq mesures, trois roles d'hote (les quatre premieres du 23/08/2026):
     ///
     /// - dev-windows, jeton filtre: `TokenOwner` = SID du compte, repertoire
     ///   cree = SID du compte.
@@ -371,6 +378,10 @@ mod tests {
     ///   depuis le conteneur.
     /// - essai-windows, MEME session sous jeton restreint: les deux
     ///   redeviennent le SID du compte.
+    /// - runner de la CI, compte Administrateur predefini (RID 500), processus
+    ///   eleve (mesure du 15/10/2026): `TokenOwner` = le compte, et non les
+    ///   Administrateurs. L'elevation ne donne donc pas toujours les
+    ///   Administrateurs pour proprietaire par defaut.
     ///
     /// L'egalite reste EXACTE. Accepter au choix l'un ou l'autre SID serait
     /// plus court et ne verifierait plus que le proprietaire lu est bien celui

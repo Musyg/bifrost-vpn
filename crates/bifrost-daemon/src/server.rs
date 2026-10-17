@@ -5,7 +5,7 @@ use std::sync::mpsc::Sender;
 use bifrost_core::TunnelConfig;
 use bifrost_ipc::protocol::{Command, Response};
 use bifrost_ipc::transport::{IpcError, IpcServer};
-use bifrost_ipc::{AuthPolicy, Connection};
+use bifrost_ipc::{AuthPolicy, Connection, ProprietaireDuPipe};
 #[cfg(windows)]
 use bifrost_ipc::{ErreurGroupe, GroupeDAcces};
 
@@ -86,15 +86,23 @@ where
 #[derive(Debug)]
 pub struct PolitiqueDuCanal {
     auth: AuthPolicy,
+    /// Le proprietaire a poser sur le pipe (Windows). Decide la ou le mode de
+    /// lancement du daemon est connu: console = Administrateurs,
+    /// `--service` = par defaut (voir [`proprietaire_du_pipe`]). Sous Unix il
+    /// est ignore par `IpcServer::bind`.
+    proprietaire: ProprietaireDuPipe,
     #[cfg(windows)]
     groupe: Result<Option<GroupeDAcces>, ErreurGroupe>,
 }
 
 impl From<AuthPolicy> for PolitiqueDuCanal {
-    /// Une politique sans groupe d'acces: celle des recettes.
+    /// Une politique sans groupe d'acces, au proprietaire par defaut: celle
+    /// des recettes, qui lient sous leur propre compte et ne posent jamais
+    /// `O:BA`.
     fn from(auth: AuthPolicy) -> Self {
         Self {
             auth,
+            proprietaire: ProprietaireDuPipe::ParDefaut,
             #[cfg(windows)]
             groupe: Ok(None),
         }
@@ -103,13 +111,13 @@ impl From<AuthPolicy> for PolitiqueDuCanal {
 
 impl PolitiqueDuCanal {
     /// Ouvre l'ecoute: le socket, au groupe `allowed_gid` sous Linux; le
-    /// pipe, au groupe d'acces sous Windows.
+    /// pipe, au groupe d'acces et au proprietaire retenu sous Windows.
     async fn ouvrir(self, socket: &str) -> anyhow::Result<IpcServer> {
         #[cfg(unix)]
         let groupe = self.auth.allowed_gid;
         #[cfg(windows)]
         let groupe = self.groupe?;
-        Ok(IpcServer::bind(socket, self.auth, groupe).await?)
+        Ok(IpcServer::bind(socket, self.auth, groupe, self.proprietaire).await?)
     }
 }
 
@@ -324,14 +332,31 @@ where
 
 /// Politique du canal construite depuis le nom d'un groupe systeme: le gid
 /// autorise sous Linux, le groupe d'acces du pipe sous Windows.
-pub fn auth_policy(group: Option<&str>) -> PolitiqueDuCanal {
+pub fn auth_policy(group: Option<&str>, proprietaire: ProprietaireDuPipe) -> PolitiqueDuCanal {
     PolitiqueDuCanal {
         auth: AuthPolicy {
             allowed_gid: resolve_gid(group),
             ..AuthPolicy::default()
         },
+        proprietaire,
         #[cfg(windows)]
         groupe: groupe_d_acces(group),
+    }
+}
+
+/// Le proprietaire que le daemon attribue a son pipe selon son mode de
+/// lancement (Windows). En service, le pipe reste au proprietaire par defaut
+/// du jeton (LocalSystem), le seul que la preuve admette; en console, le
+/// daemon l'attribue aux Administrateurs (`O:BA`), parce que le proprietaire
+/// par defaut d'un jeton eleve n'est pas toujours ce groupe (compte
+/// Administrateur predefini, RID 500). Garde par
+/// `le_mode_service_ne_pose_pas_o_ba_et_la_console_le_pose`.
+#[cfg(windows)]
+pub fn proprietaire_du_pipe(service: bool) -> ProprietaireDuPipe {
+    if service {
+        ProprietaireDuPipe::ParDefaut
+    } else {
+        ProprietaireDuPipe::Administrateurs
     }
 }
 
@@ -687,9 +712,14 @@ upstream = ["10.2.0.1"]
             #[cfg(windows)]
             let (socket, _tenu) = {
                 let socket = format!(r"\\.\pipe\bifrost-arret-bind-{}", std::process::id());
-                let premier = IpcServer::bind(&socket, politique_de_recette(), None)
-                    .await
-                    .expect("la premiere instance prend le nom");
+                let premier = IpcServer::bind(
+                    &socket,
+                    politique_de_recette(),
+                    None,
+                    ProprietaireDuPipe::ParDefaut,
+                )
+                .await
+                .expect("la premiere instance prend le nom");
                 (socket, premier)
             };
 
@@ -749,7 +779,7 @@ upstream = ["10.2.0.1"]
                     Duration::from_secs(5),
                     ecouter_et_servir(
                         &socket,
-                        auth_policy(Some(groupe)),
+                        auth_policy(Some(groupe), ProprietaireDuPipe::ParDefaut),
                         std::path::PathBuf::from("/inexistant"),
                         tx.clone(),
                         std::future::pending(),
@@ -773,11 +803,14 @@ upstream = ["10.2.0.1"]
                     format!("{e:#}").contains(groupe),
                     "le message doit nommer le groupe: {e:#}"
                 );
-                IpcServer::bind(&socket, AuthPolicy::default(), None)
-                    .await
-                    .unwrap_or_else(|e| {
-                        panic!("{groupe}: le pipe a ete cree malgre le refus: {e}")
-                    });
+                IpcServer::bind(
+                    &socket,
+                    AuthPolicy::default(),
+                    None,
+                    ProprietaireDuPipe::ParDefaut,
+                )
+                .await
+                .unwrap_or_else(|e| panic!("{groupe}: le pipe a ete cree malgre le refus: {e}"));
             }
         }
 
@@ -802,7 +835,7 @@ upstream = ["10.2.0.1"]
                 .collect();
             for attendu in [
                 "#[cfg(windows)]letgroupe=self.groupe?;",
-                "Ok(IpcServer::bind(socket,self.auth,groupe).await?)",
+                "Ok(IpcServer::bind(socket,self.auth,groupe,self.proprietaire).await?)",
             ] {
                 assert_eq!(
                     corps.matches(attendu).count(),
@@ -810,6 +843,29 @@ upstream = ["10.2.0.1"]
                     "`{attendu}` dans ouvrir: {corps}"
                 );
             }
+        }
+
+        /// La decision du proprietaire du pipe suit le mode de lancement: le
+        /// mode service ne pose JAMAIS `O:BA` (le pipe reste au proprietaire
+        /// par defaut, LocalSystem, le seul que la preuve admette), la console
+        /// le pose TOUJOURS. Mesure la fonction pure et son passage par
+        /// `PolitiqueDuCanal`, sans privilege.
+        #[cfg(windows)]
+        #[test]
+        fn le_mode_service_ne_pose_pas_o_ba_et_la_console_le_pose() {
+            assert_eq!(proprietaire_du_pipe(true), ProprietaireDuPipe::ParDefaut);
+            assert_eq!(
+                proprietaire_du_pipe(false),
+                ProprietaireDuPipe::Administrateurs
+            );
+            assert_eq!(
+                auth_policy(None, proprietaire_du_pipe(true)).proprietaire,
+                ProprietaireDuPipe::ParDefaut
+            );
+            assert_eq!(
+                auth_policy(None, proprietaire_du_pipe(false)).proprietaire,
+                ProprietaireDuPipe::Administrateurs
+            );
         }
 
         /// Un fichier de recette, retire a la fin.
@@ -1251,7 +1307,12 @@ upstream = ["10.2.0.1"]
                 allowed_gid: None,
             };
             let serveur = rt
-                .block_on(IpcServer::bind(&chemin, policy, None))
+                .block_on(IpcServer::bind(
+                    &chemin,
+                    policy,
+                    None,
+                    ProprietaireDuPipe::ParDefaut,
+                ))
                 .expect("bind");
             let (tx, rx) = std::sync::mpsc::channel();
 

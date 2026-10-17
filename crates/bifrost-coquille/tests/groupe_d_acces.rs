@@ -7,8 +7,8 @@
 //! cree un groupe local et deux comptes locaux jetables, le premier membre du
 //! groupe, le second non; prend leurs jetons par `LogonUserW`; et mesure face
 //! a un vrai `IpcServer` lie avec ce groupe, dont le pipe appartient aux
-//! Administrateurs (proprietaire par defaut du jeton du processus, pose comme
-//! dans `tests/eleve_ipc.rs`):
+//! Administrateurs (proprietaire par defaut du jeton du processus, pose par
+//! `jeton::poser_les_administrateurs`):
 //!
 //! - (a) le membre, non eleve, ouvre le canal, et la coquille (`Commande`) lui
 //!   fait servir `status`, `connect-stored` et `disconnect`;
@@ -68,7 +68,7 @@ use std::panic::AssertUnwindSafe;
 use bifrost_coquille::{Commande, CouleurTray, ErreurCommande, EtatVue, Vue};
 use bifrost_ipc::{
     AuthPolicy, Command, CommandeReservee, ErreurGroupe, GroupeDAcces, IpcClient, IpcServer,
-    Request, Response, ServerRequirement,
+    ProprietaireDuPipe, Request, Response, ServerRequirement,
 };
 use jeton::{Integrite, Proprietaire};
 use tokio::net::windows::named_pipe::{ClientOptions, ServerOptions};
@@ -88,12 +88,11 @@ use windows_sys::Win32::Security::Cryptography::{
     BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptGenRandom,
 };
 use windows_sys::Win32::Security::{
-    ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, CheckTokenMembership, CreateWellKnownSid,
-    DACL_SECURITY_INFORMATION, EqualSid, GetAce, ImpersonateLoggedOnUser, IsWellKnownSid,
-    LOGON32_LOGON, LOGON32_LOGON_INTERACTIVE, LOGON32_LOGON_NETWORK, LOGON32_PROVIDER_DEFAULT,
-    LogonUserW, LookupAccountNameW, PSECURITY_DESCRIPTOR, PSID, RevertToSelf,
-    SECURITY_MAX_SID_SIZE, SID_NAME_USE, TOKEN_ELEVATION, TOKEN_QUERY, TOKEN_USER, TokenElevation,
-    TokenUser, WinBuiltinAdministratorsSid, WinLocalSystemSid,
+    ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, DACL_SECURITY_INFORMATION, EqualSid, GetAce,
+    ImpersonateLoggedOnUser, IsWellKnownSid, LOGON32_LOGON, LOGON32_LOGON_INTERACTIVE,
+    LOGON32_LOGON_NETWORK, LOGON32_PROVIDER_DEFAULT, LogonUserW, LookupAccountNameW,
+    PSECURITY_DESCRIPTOR, PSID, RevertToSelf, SID_NAME_USE, TOKEN_ELEVATION, TOKEN_QUERY,
+    TOKEN_USER, TokenElevation, TokenUser, WinBuiltinAdministratorsSid, WinLocalSystemSid,
 };
 use windows_sys::Win32::System::Threading::{GetCurrentThread, OpenThreadToken};
 
@@ -448,40 +447,6 @@ fn sous_le_compte<T: Send + 'static>(
     });
     fil.join()
         .unwrap_or_else(|panique| std::panic::resume_unwind(panique))
-}
-
-/// Les Administrateurs sont-ils actifs dans le jeton de ce fil, ou du
-/// processus s'il n'emprunte aucune identite (`CheckTokenMembership`)?
-fn administrateurs_actifs() -> bool {
-    let mut sid = [0u32; (SECURITY_MAX_SID_SIZE as usize).div_ceil(4)];
-    let mut taille = (sid.len() * 4) as u32;
-    // SAFETY: le tampon fait au moins SECURITY_MAX_SID_SIZE octets, aligne
-    // comme un SID, et sa taille est passee; aucun domaine n'est requis.
-    let cree = unsafe {
-        CreateWellKnownSid(
-            WinBuiltinAdministratorsSid,
-            std::ptr::null_mut(),
-            sid.as_mut_ptr() as PSID,
-            &mut taille,
-        )
-    };
-    assert!(
-        cree != 0,
-        "CreateWellKnownSid: {}",
-        std::io::Error::last_os_error()
-    );
-    let mut membre = 0;
-    // SAFETY: jeton nul, donc celui du fil ou une copie du jeton du
-    // processus; le SID est valide et vivant; `membre` est local.
-    let lu = unsafe {
-        CheckTokenMembership(std::ptr::null_mut(), sid.as_mut_ptr() as PSID, &mut membre)
-    };
-    assert!(
-        lu != 0,
-        "CheckTokenMembership: {}",
-        std::io::Error::last_os_error()
-    );
-    membre != 0
 }
 
 /// Le SID d'un compte ou d'un groupe LOCAL, resolu par la recette elle-meme
@@ -847,6 +812,7 @@ fn le_groupe_d_acces_admet_ses_membres_et_eux_seuls() {
             &chemin_dacl,
             AuthPolicy::default(),
             Some(groupe.clone()),
+            ProprietaireDuPipe::ParDefaut,
         ))
         .expect("(e) bind du serveur dont la DACL se lit");
     let aces = dacl_du_pipe(&chemin_dacl);
@@ -893,6 +859,7 @@ fn le_groupe_d_acces_admet_ses_membres_et_eux_seuls() {
             &chemin,
             AuthPolicy::default(),
             Some(groupe),
+            ProprietaireDuPipe::ParDefaut,
         ))
         .expect("bind du vrai serveur IPC avec le groupe d'acces");
     let recues = faux_daemon::Recues::default();
@@ -981,7 +948,7 @@ fn le_groupe_d_acces_admet_ses_membres_et_eux_seuls() {
     // garde tout le canal. Le faux daemon, qui ne sert que les trois
     // commandes, repond << commande inattendue >> a chacune: la preuve
     // qu'elle lui est parvenue.
-    let actifs = administrateurs_actifs();
+    let actifs = jeton::administrateurs_actifs();
     println!("RELEVE groupe_d_acces: processus de la recette, administrateurs actifs={actifs}");
     assert!(
         actifs,

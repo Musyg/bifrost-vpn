@@ -92,7 +92,8 @@ pub fn default_endpoint() -> String {
 /// droits que le daemon exige de lui-meme pour demarrer (`ensure_privileged`):
 /// ce qu'un compte non privilegie ne peut jamais avoir. Sous Linux les deux se
 /// confondent (root); sous Windows la seconde admet aussi un pipe possede par
-/// les Administrateurs, celui que cree un daemon lance en console elevee.
+/// les Administrateurs, celui que le daemon lance en console attribue a ce
+/// groupe (`O:BA`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServerRequirement {
     /// Un serveur privilegie, pour une PREUVE. Linux: l'uid EFFECTIF du
@@ -115,6 +116,31 @@ pub enum ServerRequirement {
     /// faux daemon sous leur propre compte; une preuve ne s'en sert jamais.
     #[cfg(unix)]
     Uid(u32),
+}
+
+/// Ce que le serveur POSE comme proprietaire du pipe, a distinguer de
+/// [`PipeOwner`], que le client LIT sur le pipe obtenu.
+///
+/// Le daemon lance en console attribue le pipe aux Administrateurs; en service
+/// il laisse le proprietaire par defaut du jeton (LocalSystem). Seul Windows
+/// agit sur cette valeur: [`descripteur_du_pipe`] en tire le prefixe `O:` du
+/// descripteur. Le type est COMMUN aux deux plateformes pour que la decision,
+/// prise la ou le mode de lancement du daemon est connu (`PolitiqueDuCanal`),
+/// traverse la signature unique de [`IpcServer::bind`] sans `cfg` au point
+/// d'appel; sous Unix l'identite du serveur est l'uid effectif
+/// (`SO_PEERCRED`), la notion de proprietaire du pipe n'existe pas, et `bind`
+/// ignore ce parametre.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProprietaireDuPipe {
+    /// Le proprietaire par defaut du jeton du createur (`TokenOwner`): le
+    /// daemon installe en service (LocalSystem), et toute recette qui lie un
+    /// serveur sous son propre compte.
+    ParDefaut,
+    /// Les Administrateurs (prefixe `O:BA`): le daemon lance en console, dont
+    /// le jeton eleve a les Administrateurs actifs, mais dont le proprietaire
+    /// par defaut n'est pas toujours ce groupe (compte Administrateur
+    /// predefini, RID 500).
+    Administrateurs,
 }
 
 /// La regle selon laquelle l'identite du serveur a ete verifiee.
@@ -405,10 +431,17 @@ mod imp {
         /// Sinon il existe un instant ou un compte que la politique refuse peut
         /// s'y connecter. Rien ici ne touche a l'umask du processus, qui vaut
         /// pour tous ses fils: voir [`ecouter`].
+        ///
+        /// `_proprietaire` ([`ProprietaireDuPipe`]) n'a d'effet que sous
+        /// Windows: ici l'identite du serveur est son uid effectif, lu par
+        /// `SO_PEERCRED`, et aucun proprietaire ne se pose sur le socket. Le
+        /// parametre existe pour que l'appelant ait la meme signature sur les
+        /// deux plateformes.
         pub async fn bind(
             path: impl AsRef<Path>,
             policy: AuthPolicy,
             group: Option<u32>,
+            _proprietaire: ProprietaireDuPipe,
         ) -> Result<Self> {
             Self::lier(path.as_ref(), policy, group, |_, _| {})
         }
@@ -856,9 +889,14 @@ mod imp {
         #[tokio::test]
         async fn un_serveur_du_compte_courant_n_est_admis_que_s_il_est_root() {
             let path = chemin("courant");
-            let _serveur = IpcServer::bind(&path, AuthPolicy::default(), None)
-                .await
-                .expect("bind");
+            let _serveur = IpcServer::bind(
+                &path,
+                AuthPolicy::default(),
+                None,
+                ProprietaireDuPipe::ParDefaut,
+            )
+            .await
+            .expect("bind");
             for attendu in [ServerRequirement::Privileged, ServerRequirement::Elevated] {
                 let issue = IpcClient::connect_verified(&path, attendu)
                     .await
@@ -912,7 +950,10 @@ mod imp {
                     allowed_uids: vec![0, euid],
                     allowed_gid: None,
                 };
-                let mut serveur = IpcServer::bind(&path, politique, None).await.expect("bind");
+                let mut serveur =
+                    IpcServer::bind(&path, politique, None, ProprietaireDuPipe::ParDefaut)
+                        .await
+                        .expect("bind");
                 let nom_commande = commande.name();
                 let cote_serveur = async {
                     let mut connexion = serveur.accept().await?;
@@ -1024,10 +1065,28 @@ mod imp {
     /// pour lui, au [`MASQUE_DU_GROUPE`]. Le SID y entre sous la forme
     /// canonique que le systeme a rendue, la seule qu'un [`GroupeDAcces`]
     /// porte: aucune chaine tapee n'atteint ce texte.
-    pub(super) fn descripteur_du_pipe(groupe: Option<&GroupeDAcces>) -> String {
+    ///
+    /// `proprietaire` ([`ProprietaireDuPipe`]) pose le prefixe `O:` EN TETE du
+    /// descripteur: `Administrateurs` rend `O:BA` devant `PIPE_SDDL` (puis
+    /// l'ACE du groupe s'il y en a un), `ParDefaut` ne pose aucun `O:` et
+    /// laisse le pipe au proprietaire par defaut du jeton. `BA` est le SID des
+    /// Administrateurs; le noyau ne l'accepte comme proprietaire que si ce
+    /// groupe est actif dans le jeton du createur, garde par
+    /// `un_compte_sans_administrateurs_actifs_ne_fabrique_aucun_pipe_admis`.
+    pub(super) fn descripteur_du_pipe(
+        groupe: Option<&GroupeDAcces>,
+        proprietaire: ProprietaireDuPipe,
+    ) -> String {
+        let prefixe = match proprietaire {
+            ProprietaireDuPipe::ParDefaut => "",
+            ProprietaireDuPipe::Administrateurs => "O:BA",
+        };
         match groupe {
-            None => PIPE_SDDL.to_owned(),
-            Some(g) => format!("{PIPE_SDDL}(A;;{MASQUE_DU_GROUPE:#x};;;{})", g.sid()),
+            None => format!("{prefixe}{PIPE_SDDL}"),
+            Some(g) => format!(
+                "{prefixe}{PIPE_SDDL}(A;;{MASQUE_DU_GROUPE:#x};;;{})",
+                g.sid()
+            ),
         }
     }
 
@@ -1113,11 +1172,15 @@ mod imp {
         /// [`descripteur_du_pipe`]: SYSTEM et les Administrateurs, plus le
         /// groupe d'acces s'il y en a un. `groupe` ne se construit que par
         /// [`GroupeDAcces::resoudre`], qui n'admet qu'un groupe cree
-        /// localement par un administrateur.
+        /// localement par un administrateur. `proprietaire`
+        /// ([`ProprietaireDuPipe`]) pose le proprietaire du pipe: le daemon
+        /// lance en console demande `Administrateurs` (`O:BA`), le daemon en
+        /// service et les recettes demandent `ParDefaut`.
         pub async fn bind(
             path: impl AsRef<Path>,
             policy: AuthPolicy,
             groupe: Option<GroupeDAcces>,
+            proprietaire: ProprietaireDuPipe,
         ) -> Result<Self> {
             if let Some(g) = &groupe {
                 tracing::info!(groupe = g.sid(), "groupe d'acces du canal");
@@ -1125,7 +1188,7 @@ mod imp {
             Self::bind_avec_descripteur(
                 path.as_ref(),
                 policy,
-                &descripteur_du_pipe(groupe.as_ref()),
+                &descripteur_du_pipe(groupe.as_ref(), proprietaire),
             )
         }
 
@@ -1389,9 +1452,13 @@ mod imp {
     pub enum PipeOwner {
         /// LocalSystem, `S-1-5-18`: le daemon installe en service.
         LocalSystem,
-        /// Les Administrateurs, `S-1-5-32-544`: proprietaire par defaut des
-        /// objets crees par un jeton eleve, donc d'un daemon lance en console
-        /// elevee.
+        /// Les Administrateurs, `S-1-5-32-544`: le proprietaire que le daemon
+        /// lance en console attribue a son pipe (`O:BA`). Ce n'est pas le
+        /// proprietaire par defaut d'un jeton eleve en general: un jeton eleve
+        /// par UAC l'a pour proprietaire par defaut (mesure du 23/08/2026, deux
+        /// machines), mais le compte Administrateur predefini eleve (RID 500) a
+        /// le compte pour proprietaire par defaut (mesure du 15/10/2026,
+        /// runner); d'ou le `O:BA` explicite du mode console.
         Administrators,
         /// Tout autre compte ou groupe.
         Other,
@@ -1602,12 +1669,14 @@ mod imp {
     #[cfg(test)]
     mod tests_identite_serveur {
         use super::*;
+        use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
         use windows_sys::Win32::Security::Authorization::SetSecurityInfo;
         use windows_sys::Win32::Security::{
-            CheckTokenMembership, CreateWellKnownSid, SECURITY_MAX_SID_SIZE, WELL_KNOWN_SID_TYPE,
-            WinAuthenticatedUserSid, WinBuiltinUsersSid, WinLocalServiceSid, WinNetworkServiceSid,
-            WinWorldSid,
+            CheckTokenMembership, CreateWellKnownSid, GetTokenInformation, SECURITY_MAX_SID_SIZE,
+            TOKEN_OWNER, TOKEN_QUERY, TokenOwner, WELL_KNOWN_SID_TYPE, WinAuthenticatedUserSid,
+            WinBuiltinUsersSid, WinLocalServiceSid, WinNetworkServiceSid, WinWorldSid,
         };
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
         /// `ERROR_INVALID_OWNER`: le proprietaire demande n'est ni
         /// l'utilisateur du jeton, ni un de ses groupes actifs marques
@@ -1778,18 +1847,27 @@ mod imp {
             }
         }
 
-        /// Le pipe du VRAI serveur, avec `PIPE_SDDL`, servi par ce processus.
-        /// Un client sans Administrateurs actifs ne l'ouvre meme pas (la DACL
-        /// ne nomme que SYSTEM et les Administrateurs); un client eleve
-        /// l'ouvre et trouve pour proprietaire les Administrateurs: refuse
-        /// pour une preuve, admis pour une commande.
+        /// Le pipe du VRAI serveur, avec `PIPE_SDDL` et le proprietaire par
+        /// defaut (le mode du daemon en service). Un client sans Administrateurs
+        /// actifs ne l'ouvre meme pas (la DACL ne nomme que SYSTEM et les
+        /// Administrateurs); un client eleve l'ouvre et trouve pour proprietaire
+        /// la classe du `TokenOwner` du createur (les Administrateurs sous un
+        /// jeton UAC, le compte sous l'Administrateur predefini), lue ici et
+        /// confrontee a la decision par `attendu_du_client`. Le mode console,
+        /// qui pose `O:BA`, est mesure par
+        /// `le_mode_console_attribue_le_pipe_aux_administrateurs`.
         #[tokio::test]
         async fn le_pipe_du_daemon_n_est_admis_que_selon_son_proprietaire() {
             for attendu in [ServerRequirement::Privileged, ServerRequirement::Elevated] {
                 let nom = nom(&format!("daemon-{attendu:?}"));
-                let serveur = IpcServer::bind(&nom, AuthPolicy::default(), None)
-                    .await
-                    .expect("bind");
+                let serveur = IpcServer::bind(
+                    &nom,
+                    AuthPolicy::default(),
+                    None,
+                    ProprietaireDuPipe::ParDefaut,
+                )
+                .await
+                .expect("bind");
                 let proprietaire = pipe_owner(serveur.next.as_raw_handle()).expect("proprietaire");
                 let issue = IpcClient::connect_verified(&nom, attendu)
                     .await
@@ -1896,6 +1974,174 @@ mod imp {
             }
         }
 
+        /// Le proprietaire par defaut du jeton de ce processus (`TokenOwner`,
+        /// [MS-DTYP] 2.5.3.4.1), classe comme un proprietaire de pipe. C'est le
+        /// proprietaire qu'un objet cree sans `O:` recoit: le lire au jeton et
+        /// le relire sur un pipe `ParDefaut` donne deux sources pour une meme
+        /// valeur. Aucun SID n'en sort, seulement la classe.
+        fn proprietaire_par_defaut_du_jeton() -> PipeOwner {
+            let mut jeton: HANDLE = std::ptr::null_mut();
+            // SAFETY: GetCurrentProcess rend une pseudo-poignee a ne pas
+            // fermer; `jeton` recoit, a la reussite, une poignee fermee plus
+            // bas.
+            let ok = unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut jeton) };
+            assert!(
+                ok != 0,
+                "OpenProcessToken: {}",
+                std::io::Error::last_os_error()
+            );
+            let mut taille = 0u32;
+            // SAFETY: un tampon nul de taille zero ne demande que la taille
+            // requise, ecrite dans `taille`.
+            unsafe { GetTokenInformation(jeton, TokenOwner, std::ptr::null_mut(), 0, &mut taille) };
+            assert!(
+                taille > 0,
+                "GetTokenInformation(TokenOwner), taille: {}",
+                std::io::Error::last_os_error()
+            );
+            let mut tampon = vec![0u64; (taille as usize).div_ceil(8)];
+            // SAFETY: `tampon` fait au moins `taille` octets, la taille rendue
+            // par l'appel precedent.
+            let ok = unsafe {
+                GetTokenInformation(
+                    jeton,
+                    TokenOwner,
+                    tampon.as_mut_ptr().cast(),
+                    taille,
+                    &mut taille,
+                )
+            };
+            assert!(
+                ok != 0,
+                "GetTokenInformation(TokenOwner): {}",
+                std::io::Error::last_os_error()
+            );
+            // SAFETY: `tampon`, aligne sur 8 octets, commence par un
+            // TOKEN_OWNER dont le SID pointe dedans; lu avant la fermeture.
+            let sid = unsafe { (*tampon.as_ptr().cast::<TOKEN_OWNER>()).Owner };
+            let classe = classify_owner(sid);
+            // SAFETY: la poignee a ete ouverte par OpenProcessToken, fermee ici
+            // une seule fois.
+            unsafe { CloseHandle(jeton) };
+            classe
+        }
+
+        /// Le proprietaire du pipe d'un serveur de recette, lu par une poignee
+        /// CLIENT (c'est ainsi que `connect_verified` le lit). Un pipe neuf par
+        /// appel: une instance ne sert qu'un client.
+        async fn proprietaire_vu_du_client(label: &str, prop: ProprietaireDuPipe) -> PipeOwner {
+            let nom = nom(label);
+            let _serveur = IpcServer::bind(&nom, AuthPolicy::default(), None, prop)
+                .await
+                .unwrap_or_else(|e| panic!("{label}: bind: {e}"));
+            let pipe = ouvrir_le_pipe(&nom, ATTENTE_PIPE_OCCUPE)
+                .await
+                .unwrap_or_else(|e| panic!("{label}: ouverture du client: {e}"));
+            pipe_owner(pipe.as_raw_handle())
+                .unwrap_or_else(|e| panic!("{label}: proprietaire: {e:?}"))
+        }
+
+        /// La correction, la ou elle se voit: sur un jeton aux Administrateurs
+        /// ACTIFS (le runner de la CI). En mode console, le daemon attribue son
+        /// pipe aux Administrateurs; en mode par defaut, il le laisse au
+        /// proprietaire par defaut du jeton, que le compte Administrateur
+        /// predefini (RID 500) ne rend pas aux Administrateurs. La mesure:
+        ///
+        /// - (a) mode console: une poignee client lit `Administrators`, une
+        ///   commande (`Elevated`) l'admet (`WindowsAdministratorsPipeOwner`),
+        ///   une preuve (`Privileged`) le refuse;
+        /// - (b) mode par defaut: une poignee client lit la classe du
+        ///   `TokenOwner` du processus, et la commande rend ce que
+        ///   `attendu_du_client` dit de cette classe;
+        /// - (c) un RELEVE par classes, jamais un SID, meme dans un echec.
+        ///
+        /// Sans Administrateurs actifs (dev-windows, jeton filtre), elle
+        /// s'abstient en le disant: `O:BA` serait refuse et la correction ne se
+        /// mesure pas ici. La forme du descripteur, elle,
+        /// `descripteur_du_pipe_pose_o_ba_en_tete_pour_les_administrateurs` la
+        /// mesure sous tout compte.
+        #[tokio::test]
+        async fn le_mode_console_attribue_le_pipe_aux_administrateurs() {
+            if !administrateurs_actifs() {
+                println!(
+                    "SKIPPED le_mode_console_attribue_le_pipe_aux_administrateurs: les \
+                     Administrateurs ne sont pas actifs dans le jeton de ce processus, et le \
+                     noyau refuse alors d'attribuer un pipe a ce groupe"
+                );
+                return;
+            }
+
+            // (a) Mode console.
+            let console =
+                proprietaire_vu_du_client("console", ProprietaireDuPipe::Administrateurs).await;
+            assert_eq!(console, PipeOwner::Administrators, "pipe console");
+            let commande = nom("console-commande");
+            let _s1 = IpcServer::bind(
+                &commande,
+                AuthPolicy::default(),
+                None,
+                ProprietaireDuPipe::Administrateurs,
+            )
+            .await
+            .expect("bind console-commande");
+            assert!(
+                matches!(
+                    IpcClient::connect_verified(&commande, ServerRequirement::Elevated).await,
+                    Ok((_, ServerRule::WindowsAdministratorsPipeOwner))
+                ),
+                "une commande doit admettre le pipe console"
+            );
+            let preuve = nom("console-preuve");
+            let _s2 = IpcServer::bind(
+                &preuve,
+                AuthPolicy::default(),
+                None,
+                ProprietaireDuPipe::Administrateurs,
+            )
+            .await
+            .expect("bind console-preuve");
+            assert!(
+                matches!(
+                    IpcClient::connect_verified(&preuve, ServerRequirement::Privileged).await,
+                    Err(IpcError::ServerIdentity(ServerIdentityError::Refused))
+                ),
+                "une preuve doit refuser le pipe console"
+            );
+
+            // (b) Mode par defaut.
+            let defaut = proprietaire_vu_du_client("defaut", ProprietaireDuPipe::ParDefaut).await;
+            let commande_defaut = nom("defaut-commande");
+            let _s3 = IpcServer::bind(
+                &commande_defaut,
+                AuthPolicy::default(),
+                None,
+                ProprietaireDuPipe::ParDefaut,
+            )
+            .await
+            .expect("bind defaut-commande");
+            let issue = IpcClient::connect_verified(&commande_defaut, ServerRequirement::Elevated)
+                .await
+                .map(|(_, regle)| regle);
+            assert_eq!(
+                issue.ok(),
+                attendu_du_client(defaut, ServerRequirement::Elevated),
+                "la commande sur le pipe par defaut suit la classe de son proprietaire"
+            );
+
+            // (c) Le releve, par classes, jamais un SID. Le proprietaire par
+            // defaut lu AU JETON et celui du pipe sans O: sont une meme valeur,
+            // deux sources.
+            let au_jeton = proprietaire_par_defaut_du_jeton();
+            assert_eq!(
+                au_jeton, defaut,
+                "le proprietaire par defaut du jeton et celui du pipe sans O: different"
+            );
+            println!(
+                "RELEVE le_mode_console_attribue_le_pipe_aux_administrateurs: proprietaire par \
+                 defaut={au_jeton:?}, pipe sans O:={defaut:?}, pipe console={console:?}"
+            );
+        }
+
         /// Ce qui protege le pipe du daemon PENDANT qu'il tourne. Son
         /// proprietaire est LocalSystem, et une instance de plus, creee par un
         /// tiers, recevrait des clients qui liraient ce proprietaire-la. Or
@@ -1907,9 +2153,14 @@ mod imp {
         #[tokio::test]
         async fn sans_administrateurs_actifs_aucune_instance_ne_s_ajoute_au_pipe_du_daemon() {
             let nom = nom("instance");
-            let _daemon = IpcServer::bind(&nom, AuthPolicy::default(), None)
-                .await
-                .expect("bind");
+            let _daemon = IpcServer::bind(
+                &nom,
+                AuthPolicy::default(),
+                None,
+                ProprietaireDuPipe::ParDefaut,
+            )
+            .await
+            .expect("bind");
             let issue = create_pipe(&nom, "D:P(A;;GA;;;WD)", false).map(|_| ());
             if administrateurs_actifs() {
                 assert!(issue.is_ok(), "{issue:?}");
@@ -2213,14 +2464,26 @@ mod imp {
                     std::process::id()
                 )
             };
-            let serveur = IpcServer::bind(nom("libre"), AuthPolicy::default(), None)
-                .await
-                .expect("bind");
+            let serveur = IpcServer::bind(
+                nom("libre"),
+                AuthPolicy::default(),
+                None,
+                ProprietaireDuPipe::ParDefaut,
+            )
+            .await
+            .expect("bind");
             assert_eq!(serveur.sddl, PIPE_SDDL);
 
             let tenu = nom("tenu");
             let _tiers = create_pipe(&tenu, "D:P(A;;GA;;;WD)", true).expect("pipe du tiers");
-            match IpcServer::bind(&tenu, AuthPolicy::default(), None).await {
+            match IpcServer::bind(
+                &tenu,
+                AuthPolicy::default(),
+                None,
+                ProprietaireDuPipe::ParDefaut,
+            )
+            .await
+            {
                 Err(IpcError::Io(e)) => {
                     assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied, "{e}")
                 }
@@ -2427,11 +2690,27 @@ mod imp {
             assert_eq!(ACCES_DU_CLIENT & !MASQUE_DU_GROUPE, 0);
         }
 
-        /// Sans groupe, le descripteur est exactement celui de SYSTEM et des
-        /// Administrateurs; avec un groupe, le meme suivi d'UNE ACE, ecrite
-        /// en clair, qui nomme le SID canonique du groupe. Miroir: le groupe
-        /// est le compte des recettes; s'abstient, en le nommant, si ce
-        /// compte n'est pas un compte cree.
+        /// Le prefixe de proprietaire, fonction pure et sans premisse: se
+        /// mesure sous tout compte, le runner compris. `ParDefaut` ne pose
+        /// aucun `O:`; `Administrateurs` pose `O:BA` EN TETE, devant `D:P`,
+        /// sans rien changer d'autre au descripteur.
+        #[test]
+        fn descripteur_du_pipe_pose_o_ba_en_tete_pour_les_administrateurs() {
+            assert_eq!(
+                descripteur_du_pipe(None, ProprietaireDuPipe::ParDefaut),
+                "D:P(A;;GA;;;SY)(A;;GA;;;BA)"
+            );
+            assert_eq!(
+                descripteur_du_pipe(None, ProprietaireDuPipe::Administrateurs),
+                "O:BAD:P(A;;GA;;;SY)(A;;GA;;;BA)"
+            );
+        }
+
+        /// Avec un groupe, le descripteur de SYSTEM et des Administrateurs,
+        /// suivi d'UNE ACE ecrite en clair qui nomme le SID canonique du
+        /// groupe; et le `O:BA` du mode console se pose EN TETE sans faire
+        /// perdre cette ACE. Miroir: le groupe est le compte des recettes;
+        /// s'abstient, en le nommant, si ce compte n'est pas un compte cree.
         #[test]
         fn le_descripteur_ajoute_une_seule_ace_pour_le_groupe() {
             let Some(groupe) =
@@ -2439,11 +2718,17 @@ mod imp {
             else {
                 return;
             };
-            assert_eq!(descripteur_du_pipe(None), "D:P(A;;GA;;;SY)(A;;GA;;;BA)");
             assert_eq!(
-                descripteur_du_pipe(Some(&groupe)),
+                descripteur_du_pipe(Some(&groupe), ProprietaireDuPipe::ParDefaut),
                 format!(
                     "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x120083;;;{})",
+                    groupe.sid()
+                )
+            );
+            assert_eq!(
+                descripteur_du_pipe(Some(&groupe), ProprietaireDuPipe::Administrateurs),
+                format!(
+                    "O:BAD:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x120083;;;{})",
                     groupe.sid()
                 )
             );
@@ -2456,9 +2741,14 @@ mod imp {
         /// la CI compris.
         #[tokio::test]
         async fn le_pipe_lie_sans_groupe_porte_system_et_les_administrateurs_a_tous_les_droits() {
-            let sans = IpcServer::bind(nom("sans"), AuthPolicy::default(), None)
-                .await
-                .expect("bind sans groupe");
+            let sans = IpcServer::bind(
+                nom("sans"),
+                AuthPolicy::default(),
+                None,
+                ProprietaireDuPipe::ParDefaut,
+            )
+            .await
+            .expect("bind sans groupe");
             assert_eq!(sans.sddl, "D:P(A;;GA;;;SY)(A;;GA;;;BA)");
             let aces = dacl(sans.next.as_raw_handle());
             assert_eq!(aces.len(), 2, "sans groupe: SYSTEM et Administrateurs");
@@ -2482,10 +2772,18 @@ mod imp {
             else {
                 return;
             };
-            let avec = IpcServer::bind(nom("avec"), AuthPolicy::default(), Some(groupe.clone()))
-                .await
-                .expect("bind avec groupe");
-            assert_eq!(avec.sddl, descripteur_du_pipe(Some(&groupe)));
+            let avec = IpcServer::bind(
+                nom("avec"),
+                AuthPolicy::default(),
+                Some(groupe.clone()),
+                ProprietaireDuPipe::ParDefaut,
+            )
+            .await
+            .expect("bind avec groupe");
+            assert_eq!(
+                avec.sddl,
+                descripteur_du_pipe(Some(&groupe), ProprietaireDuPipe::ParDefaut)
+            );
             let aces = dacl(avec.next.as_raw_handle());
             assert_eq!(aces.len(), 3, "avec groupe: une ACE de plus, une seule");
             assert!(est(&aces[0].sid, WinLocalSystemSid));
@@ -2530,15 +2828,20 @@ mod imp {
             for variante in ["bind", "non-proprietaire"] {
                 let nom = nom(variante);
                 let serveur = match variante {
-                    "bind" => IpcServer::bind(&nom, AuthPolicy::default(), Some(groupe.clone()))
-                        .await
-                        .expect("bind avec groupe"),
+                    "bind" => IpcServer::bind(
+                        &nom,
+                        AuthPolicy::default(),
+                        Some(groupe.clone()),
+                        ProprietaireDuPipe::ParDefaut,
+                    )
+                    .await
+                    .expect("bind avec groupe"),
                     _ => IpcServer::bind_avec_descripteur(
                         Path::new(&nom),
                         AuthPolicy::default(),
                         &format!(
                             "{}{PROPRIETAIRE_NEUTRALISE}",
-                            descripteur_du_pipe(Some(&groupe))
+                            descripteur_du_pipe(Some(&groupe), ProprietaireDuPipe::ParDefaut)
                         ),
                     )
                     .expect("pipe sans droits implicites du proprietaire"),
@@ -2623,7 +2926,7 @@ mod imp {
             };
             let sddl = format!(
                 "{}{PROPRIETAIRE_NEUTRALISE}",
-                descripteur_du_pipe(Some(&groupe))
+                descripteur_du_pipe(Some(&groupe), ProprietaireDuPipe::ParDefaut)
             );
             let nom_individuel = nom("individuel");
             let _serveur = create_pipe(&nom_individuel, &sddl, true).expect("pipe");
@@ -3005,7 +3308,9 @@ mod tests_clients_concurrents {
             allowed_uids: vec![0, euid()],
             allowed_gid: None,
         };
-        let serveur = IpcServer::bind(&chemin, policy, None).await.expect("bind");
+        let serveur = IpcServer::bind(&chemin, policy, None, ProprietaireDuPipe::ParDefaut)
+            .await
+            .expect("bind");
         (serveur, chemin.to_string_lossy().into_owned())
     }
 
@@ -3360,7 +3665,9 @@ mod tests_acceptation {
         std::fs::set_permissions(&dossier, std::fs::Permissions::from_mode(0o755))
             .expect("repertoire de la recette en 0755");
         let chemin = dossier.join("d.sock");
-        let serveur = IpcServer::bind(&chemin, policy, None).await.expect("bind");
+        let serveur = IpcServer::bind(&chemin, policy, None, ProprietaireDuPipe::ParDefaut)
+            .await
+            .expect("bind");
         (serveur, chemin.to_string_lossy().into_owned())
     }
 

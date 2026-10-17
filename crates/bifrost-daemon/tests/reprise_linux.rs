@@ -96,9 +96,14 @@ async fn le_hook_de_veille_fait_arriver_la_reprise_au_superviseur() {
         allowed_uids: vec![0, euid()],
         allowed_gid: None,
     };
-    let ipc = IpcServer::bind(&chemin, policy, None)
-        .await
-        .expect("le serveur d'essai doit se lier");
+    let ipc = IpcServer::bind(
+        &chemin,
+        policy,
+        None,
+        bifrost_ipc::ProprietaireDuPipe::ParDefaut,
+    )
+    .await
+    .expect("le serveur d'essai doit se lier");
     // Le VRAI serveur du daemon, avec son `dispatch`. Un serveur d'essai qui
     // se contenterait de lire la trame prouverait que le client parle, pas que
     // le daemon transmet.

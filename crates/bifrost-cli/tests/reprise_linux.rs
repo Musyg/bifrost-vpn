@@ -136,9 +136,14 @@ async fn passer(nom: &str, phase: &str, operation: &str, canal: Canal) -> Passag
                 allowed_uids: vec![0, euid()],
                 allowed_gid: None,
             };
-            let serveur = IpcServer::bind(&chemin, policy, None)
-                .await
-                .expect("le serveur d'essai doit se lier");
+            let serveur = IpcServer::bind(
+                &chemin,
+                policy,
+                None,
+                bifrost_ipc::ProprietaireDuPipe::ParDefaut,
+            )
+            .await
+            .expect("le serveur d'essai doit se lier");
             Some(tokio::spawn(recevoir_une_fois(serveur, tx)))
         }
         Canal::Mort => {

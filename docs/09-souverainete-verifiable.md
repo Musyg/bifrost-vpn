@@ -302,8 +302,8 @@ processus garde les identifiants de root. Un pipe de LocalSystem dont la DACL
 laisse d'autres comptes creer des instances peut etre servi par un tiers; celle
 du daemon ne l'accorde qu'a SYSTEM et aux Administrateurs, donc a un processus
 eleve (un compte non eleve y est refuse, mesure; le cas eleve est infere de la
-DACL). Un daemon Windows lance en console eleve cree un pipe possede par les
-Administrateurs et n'est pas admis par la preuve.
+DACL). Un daemon Windows lance en console attribue son pipe aux Administrateurs
+(`O:BA`) et n'est pas admis par la preuve.
 
 Les commandes verifient aussi le serveur, livre. `connect` (avec ou sans
 `--config`), `disconnect`, `status`, `check`, `inspection-tls --annoncer`, la
@@ -313,8 +313,8 @@ de client qui s'en dispense (`IpcClient::connect_verified` est son seul
 constructeur). Leur regle exige les droits que le daemon exige de lui-meme pour
 demarrer: Linux, uid effectif 0 (`root-peer-credentials`); Windows, un pipe
 possede par LocalSystem (`windows-system-pipe-owner`) ou par les Administrateurs
-(`windows-administrators-pipe-owner`), ce qui admet le daemon lance en console
-elevee. Un compte non privilegie ne peut servir ni l'une ni l'autre (mesure). La
+(`windows-administrators-pipe-owner`), ce qui admet le daemon lance en console,
+qui attribue son pipe a ce groupe (`O:BA`). Un compte non privilegie ne peut servir ni l'une ni l'autre (mesure). La
 preuve garde la sienne, LocalSystem seul sous Windows: elle exporte un constat
 sur ce que le daemon declare. Refus: un message qui nomme le socket et la regle,
 jamais un uid, un pid ou un SID, rien d'envoye, code de sortie 4, aucune option
