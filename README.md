@@ -117,7 +117,7 @@ Le client fournit aussi une sortie de secours locale, sans passer par un daemon 
 bifrost-cli emergency-disarm --je-sais-ce-que-je-fais
 ```
 
-Elle exige les privileges du systeme et le drapeau explicite, ouvre le trafic en clair et ne remplace pas `disconnect`: un daemon encore vivant pourrait sinon croire son kill switch toujours arme.
+Elle exige les privileges du systeme et le drapeau explicite, ouvre le trafic en clair et ne remplace pas `disconnect`: un daemon encore vivant pourrait sinon croire son kill switch toujours arme. Avant de desarmer, elle dit ce qui tient le canal du daemon, sans rien y ecrire: le daemon lui-meme, un autre processus, un serveur qui ne prend plus de connexion (peut-etre le daemon fige), ou un canal que ce compte ne peut pas ouvrir. Elle avertit, elle ne refuse jamais.
 
 ### Avertissement
 

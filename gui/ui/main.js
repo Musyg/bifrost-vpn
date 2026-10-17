@@ -23,7 +23,7 @@ const NOTES = {
   "daemon-injoignable":
     "Le service Bifrost est injoignable: il ne tourne pas, ou l'echange a ete coupe.",
   "compte-non-admis":
-    "Le canal du service Bifrost n'admet pas ce compte: il n'est pas membre du groupe d'acces du service. Un administrateur l'y ajoute; l'appartenance vaut a la prochaine ouverture de session.",
+    "Le canal n'admet pas ce compte. Si c'est le service Bifrost qui le tient, ce compte n'est pas membre de son groupe d'acces: un administrateur l'y ajoute, et l'appartenance vaut a la prochaine ouverture de session. Sous Windows, un autre processus peut aussi tenir ce nom de canal: rien ici ne permet de trancher.",
   "daemon-sans-reponse":
     "Le canal du service est occupe et n'a pas repondu dans le delai. Rien ne dit que le service soit arrete.",
   "serveur-non-admis":

@@ -62,5 +62,16 @@ netlink-sys = "0.8.8"
 # de developpement n'est pas une raison de relacher la regle.
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "aws_lc_rs", "pem"] }
 
+# La recette Windows d'un canal que ce compte ne peut pas ouvrir pose elle-meme
+# le descripteur de son pipe (DACL vide). Meme version que bifrost-ipc, deja
+# dans le verrou. Le binaire et la bibliotheque gardent `forbid(unsafe_code)`:
+# ce code n'existe que dans le binaire de recettes `serveur_du_socket`.
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+] }
+
 [lints]
 workspace = true

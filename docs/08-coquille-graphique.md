@@ -134,6 +134,18 @@ rend dans un etat a lui, `compte non admis par le canal`, avec une note qui
 nomme le groupe d'acces et un tray gris: jamais `daemon injoignable`,
 jamais vert.
 
+Ce refus n'est pas toujours celui du daemon. Sous Linux, le repertoire du
+socket par defaut appartient a root: c'est le daemon qui fixe les droits du
+socket, et le texte de l'etat dit `ce compte n'a pas acces au daemon`. Sous
+Windows, le nom du pipe est libre quand le service est arrete, et un autre
+processus peut le tenir avec une DACL qui refuse ce compte: l'ouverture
+echoue alors avant toute verification d'identite, et sans poignee ni le
+proprietaire ni le processus serveur ne se lisent. Le texte de l'etat dit
+donc les deux cas (`le daemon ne l'admet pas, ou un autre processus tient ce
+nom`), assez court pour l'info-bulle du tray, et la note de la page aussi.
+`bifrost-cli` nomme ce refus de la meme facon pour toutes ses commandes, et
+`emergency-disarm` en avertit sans refuser.
+
 Lancement reel du 16/10/2026 sur dev-windows, revision `10ef89b`, sans
 elevation et sans daemon: la fenetre dit `daemon injoignable` et, pour le
 kill switch, `inconnu (daemon injoignable)`, avec la note et une pastille
@@ -154,7 +166,7 @@ etabli que le daemon declare. Aucune erreur ne le fait.
 | `echec` | le daemon: etat d'erreur, avec sa raison | `echec: <raison>` | rouge |
 | `deconnecte` | le daemon: aucun tunnel | `deconnecte` | gris |
 | `daemon-injoignable` | personne ne tient le canal, ou l'echange a ete coupe | `daemon injoignable`, kill switch `inconnu`, une note | gris |
-| `compte-non-admis` | le systeme refuse a ce compte d'ouvrir le canal (`ERROR_ACCESS_DENIED`, `EACCES`): hors du groupe d'acces sous Windows, hors du groupe du socket sous Linux | `compte non admis par le canal`, kill switch `inconnu`, une note qui nomme le groupe d'acces | gris |
+| `compte-non-admis` | le systeme refuse a ce compte d'ouvrir le canal (`ERROR_ACCESS_DENIED`, `EACCES`): sous Windows hors du groupe d'acces, ou un autre processus tient le nom du pipe; sous Linux hors du groupe du socket | `compte non admis par le canal` et sa cause, selon la plateforme (`ce compte n'a pas acces au daemon` sous Linux, `le daemon ne l'admet pas, ou un autre processus tient ce nom` sous Windows), kill switch `inconnu`, une note qui nomme le groupe d'acces | gris |
 | `daemon-sans-reponse` | un serveur tient le canal et n'a pris aucune connexion de plus dans le delai | `daemon sans reponse dans le delai`, une note: rien ne dit qu'il soit arrete | gris |
 | `serveur-non-admis` | un serveur tient le canal sans l'identite du daemon | sa cause, et `rien ne lui a ete envoye` | gris |
 | `refuse` | le daemon a refuse l'appelant, ou rendu une autre erreur | `acces refuse par le daemon`, ou `erreur du daemon: <message>` | gris |
@@ -243,7 +255,8 @@ cette page`), jamais comme un autre.
   entrees tirees d'une seule fonction de la vue, appliquees a chaque vue).
 - les recettes de `gui/` (`cargo test --manifest-path gui/Cargo.toml`):
   chaque erreur et chaque etat peints tels que la vue les derive, aucune
-  erreur en vert, au tray comme dans l'info-bulle; et, etat par etat, les
+  erreur en vert, au tray comme dans l'info-bulle, et chaque info-bulle
+  d'erreur dans les 128 unites UTF-16 du tray Windows; et, etat par etat, les
   entrees `Connecter` et `Deconnecter` du tray actives la seulement ou le
   bouton l'est.
 - la CI: le job `interface-linux` formate, compile, passe clippy et lance ces

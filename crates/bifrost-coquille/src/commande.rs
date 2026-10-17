@@ -39,7 +39,9 @@ const EXIGENCE: ServerRequirement = ServerRequirement::Elevated;
 /// la coquille tourne et que le service n'est pas la); le canal existe et le
 /// systeme refuse a ce compte de l'ouvrir
 /// ([`ErreurCommande::CompteNonAdmis`]: sous Windows un compte hors du groupe
-/// d'acces du pipe, sous Linux un compte hors du groupe du socket); un
+/// d'acces du pipe, ou un pipe de ce nom tenu par un autre processus dont la
+/// DACL refuse ce compte, sans rien pour les distinguer; sous Linux un compte
+/// hors du groupe du socket); un
 /// serveur tient le canal et n'a pris aucune connexion de plus dans le delai
 /// du client
 /// ([`ErreurCommande::DaemonSansReponse`]: rien ne dit qu'il soit arrete); un
@@ -86,10 +88,15 @@ fn classer(message: String) -> ErreurCommande {
 /// L'identite du serveur passe avant tout: c'est le seul cas ou un serveur a
 /// ete joint et ecarte. Puis le refus d'ouverture pour droits insuffisants
 /// (`ERROR_ACCESS_DENIED` sous Windows, `EACCES` sous Linux, tous deux
-/// `PermissionDenied`): le canal existe, et c'est ce compte qu'il n'admet pas.
-/// Puis l'occupation, ou un serveur tient le canal sans prendre de connexion
-/// de plus. Le reste (canal absent, erreur du systeme) dit qu'aucun daemon
-/// n'a pu etre joint.
+/// `PermissionDenied`): le canal existe, et refuse ce compte. Sous Linux le
+/// repertoire du socket par defaut appartient a root: c'est le daemon qui
+/// n'admet pas ce compte. Sous Windows le nom du pipe est libre quand le
+/// service est arrete, et un autre processus peut le tenir avec une DACL qui
+/// refuse ce compte: l'ouverture echoue avant toute verification d'identite,
+/// et sans poignee ni le proprietaire ni le serveur ne se lisent. La Vue dit
+/// alors les deux cas. Puis l'occupation, ou un serveur tient le canal sans
+/// prendre de connexion de plus. Le reste (canal absent, erreur du systeme)
+/// dit qu'aucun daemon n'a pu etre joint.
 fn classer_ouverture(e: IpcError) -> ErreurCommande {
     match e {
         IpcError::ServerIdentity(cause) => ErreurCommande::ServeurNonAdmis(cause),

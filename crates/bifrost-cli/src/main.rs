@@ -856,17 +856,8 @@ async fn desarmer_en_urgence(confirme: bool, socket: &str) -> anyhow::Result<i32
     // cela doit s'ecrire a l'ecran avant, pas se decouvrir apres. La sonde
     // n'ecrit rien; elle verifie tout de meme qui repond, pour ne pas prendre
     // un processus quelconque pour le daemon.
-    match serveur::presence(socket).await {
-        serveur::Presence::Daemon => eprintln!(
-            "attention: un daemon repond encore sur {socket}. La voie ordinaire est\n\
-             'bifrost-cli disconnect'; apres un desarmement d'urgence il continuera\n\
-             d'annoncer un kill switch arme qui ne l'est plus."
-        ),
-        serveur::Presence::Autre => eprintln!(
-            "attention: le serveur de {socket} n'a pas l'identite attendue du daemon:\n\
-             ce n'est pas lui qui tient ce canal. Rien ne lui a ete envoye."
-        ),
-        serveur::Presence::Personne => {}
+    if let Some(avertissement) = avertissement_d_urgence(serveur::presence(socket).await, socket) {
+        eprintln!("{avertissement}");
     }
 
     let candidats = ou_chercher_le_daemon();
@@ -907,6 +898,34 @@ async fn desarmer_en_urgence(confirme: bool, socket: &str) -> anyhow::Result<i32
             Ok(code)
         }
         None => bail!("{} a ete tue par un signal", daemon.display()),
+    }
+}
+
+/// Ce qu'`emergency-disarm` dit avant de desarmer, selon ce que la sonde a
+/// trouve sur le canal: un avertissement par issue, aucun quand rien ne tient
+/// le canal. Jamais un refus, et ni uid, ni pid, ni SID: le canal seul.
+fn avertissement_d_urgence(presence: serveur::Presence, socket: &str) -> Option<String> {
+    match presence {
+        serveur::Presence::Daemon => Some(format!(
+            "attention: un daemon repond encore sur {socket}. La voie ordinaire est\n\
+             'bifrost-cli disconnect'; apres un desarmement d'urgence il continuera\n\
+             d'annoncer un kill switch arme qui ne l'est plus."
+        )),
+        serveur::Presence::Autre => Some(format!(
+            "attention: le serveur de {socket} n'a pas l'identite attendue du daemon:\n\
+             ce n'est pas lui qui tient ce canal. Rien ne lui a ete envoye."
+        )),
+        serveur::Presence::Occupe => Some(format!(
+            "attention: un serveur tient {socket} sans prendre de connexion de plus.\n\
+             C'est peut-etre le daemon fige: apres un desarmement d'urgence il\n\
+             continuera d'annoncer un kill switch arme qui ne l'est plus."
+        )),
+        serveur::Presence::Inaccessible => Some(format!(
+            "attention: ce compte ne peut pas ouvrir {socket}. Un daemon y tourne\n\
+             peut-etre, et rien ici ne permet de le dire. Le desarmement demande de\n\
+             toute facon les droits d'administrateur."
+        )),
+        serveur::Presence::Personne => None,
     }
 }
 
@@ -1113,5 +1132,70 @@ async fn run(args: Args) -> anyhow::Result<i32> {
         | Response::DeclarationDns(_) => {
             bail!("reponse inattendue du daemon")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serveur::Presence;
+
+    /// Chaque issue de la sonde, une fois. Le `match` est exhaustif: une issue
+    /// ajoutee a `Presence` ne compile plus ici tant qu'elle n'est pas dans la
+    /// liste, donc tant que son avertissement n'a pas ete juge.
+    fn chaque_issue() -> Vec<Presence> {
+        let issues = vec![
+            Presence::Daemon,
+            Presence::Autre,
+            Presence::Occupe,
+            Presence::Inaccessible,
+            Presence::Personne,
+        ];
+        for p in &issues {
+            match p {
+                Presence::Daemon
+                | Presence::Autre
+                | Presence::Occupe
+                | Presence::Inaccessible
+                | Presence::Personne => {}
+            }
+        }
+        issues
+    }
+
+    /// `emergency-disarm` avertit pour toute issue ou quelque chose tient le
+    /// canal, et se tait seulement quand rien ne le tient. Chaque
+    /// avertissement est le sien, nomme le canal, et ne nomme ni uid, ni pid,
+    /// ni SID. Le canal occupe dit le daemon peut-etre fige; le canal que ce
+    /// compte ne peut pas ouvrir dit qu'un daemon y tourne peut-etre, et que
+    /// le desarmement demande de toute facon les droits d'administrateur.
+    #[test]
+    fn emergency_disarm_avertit_pour_chaque_issue_sauf_un_canal_vide() {
+        let mut vus: Vec<String> = Vec::new();
+        for p in chaque_issue() {
+            let dit = avertissement_d_urgence(p, "CANAL");
+            if p == Presence::Personne {
+                assert_eq!(dit, None, "{p:?}");
+                continue;
+            }
+            let dit = dit.unwrap_or_else(|| panic!("{p:?}: aucun avertissement"));
+            assert!(dit.starts_with("attention: "), "{p:?}: {dit}");
+            assert!(dit.contains("CANAL"), "{p:?}: {dit}");
+            assert!(dit.is_ascii(), "{p:?}: {dit}");
+            for interdit in ["uid", "pid", "S-1-", "gid"] {
+                assert!(!dit.contains(interdit), "{p:?}, {interdit}: {dit}");
+            }
+            assert!(!vus.contains(&dit), "{p:?}: avertissement deja dit: {dit}");
+            vus.push(dit);
+        }
+        let occupe = avertissement_d_urgence(Presence::Occupe, "CANAL").unwrap_or_default();
+        assert!(
+            occupe.contains("sans prendre de connexion de plus"),
+            "{occupe}"
+        );
+        assert!(occupe.contains("daemon fige"), "{occupe}");
+        let ferme = avertissement_d_urgence(Presence::Inaccessible, "CANAL").unwrap_or_default();
+        assert!(ferme.contains("ce compte ne peut pas ouvrir"), "{ferme}");
+        assert!(ferme.contains("droits d'administrateur"), "{ferme}");
     }
 }

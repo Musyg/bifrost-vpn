@@ -30,6 +30,8 @@ pub enum EtatVue {
     DaemonInjoignable,
     /// Le canal existe, et le systeme refuse a ce compte de l'ouvrir: hors du
     /// groupe d'acces du pipe sous Windows, du groupe du socket sous Linux.
+    /// Sous Windows, le nom du pipe peut aussi etre tenu par un autre
+    /// processus dont la DACL refuse ce compte: rien ne distingue les deux.
     CompteNonAdmis,
     /// Un serveur tient le canal et n'a pris aucune connexion de plus dans le
     /// delai: rien ne dit que le daemon soit arrete.
@@ -87,6 +89,21 @@ pub struct Vue {
     /// Le texte de l'entree inactive << Etat >> du menu du tray.
     pub texte_menu_etat: String,
 }
+
+/// Ce que la Vue dit d'un compte que le systeme refuse a l'ouverture du canal.
+/// Sous Linux, le repertoire du socket par defaut appartient a root, et c'est
+/// le daemon qui fixe les droits du socket: le refus est le sien.
+#[cfg(unix)]
+const TEXTE_COMPTE_NON_ADMIS: &str =
+    "compte non admis par le canal: ce compte n'a pas acces au daemon";
+/// Sous Windows, le nom du pipe est libre quand le service est arrete: un
+/// autre processus peut le tenir avec une DACL qui refuse ce compte.
+/// L'ouverture echoue alors avant toute verification d'identite, et sans
+/// poignee ni le proprietaire ni le serveur ne se lisent: le texte dit les deux
+/// cas, assez court pour l'info-bulle du tray.
+#[cfg(windows)]
+const TEXTE_COMPTE_NON_ADMIS: &str =
+    "compte non admis par le canal: le daemon ne l'admet pas, ou un autre processus tient ce nom";
 
 /// Ce que la Vue dit d'un serveur du canal non admis, selon la cause.
 fn texte_non_admis(cause: ServerIdentityError) -> &'static str {
@@ -175,7 +192,7 @@ impl Vue {
             ),
             ErreurCommande::CompteNonAdmis(_) => (
                 EtatVue::CompteNonAdmis,
-                "compte non admis par le canal: ce compte n'a pas acces au daemon".to_owned(),
+                TEXTE_COMPTE_NON_ADMIS.to_owned(),
                 "compte non admis par le canal",
             ),
             ErreurCommande::DaemonSansReponse(_) => (
@@ -396,6 +413,30 @@ mod tests {
                 assert!(!texte.contains("injoignable"), "{texte}");
             }
         }
+    }
+
+    /// Le compte que le canal refuse dit le texte de sa plateforme, ecrit ici
+    /// en entier. Linux: le refus est celui du daemon, dont le socket vit dans
+    /// un repertoire de root. Windows: le refus vient du daemon ou d'un autre
+    /// processus qui tient le nom du pipe, et le texte dit les deux. Dans les
+    /// deux cas l'etat, la raison courte du kill switch et l'entree du menu
+    /// suivent, et rien ne se lit comme injoignable.
+    #[test]
+    fn le_compte_non_admis_dit_le_texte_de_sa_plateforme() {
+        #[cfg(unix)]
+        let attendu = "compte non admis par le canal: ce compte n'a pas acces au daemon";
+        #[cfg(windows)]
+        let attendu = "compte non admis par le canal: le daemon ne l'admet pas, ou un autre \
+                       processus tient ce nom";
+        let v = Vue::depuis_erreur(&ErreurCommande::CompteNonAdmis("refuse".into()));
+        assert_eq!(v.etat, EtatVue::CompteNonAdmis);
+        assert_eq!(v.texte_etat, attendu);
+        assert_eq!(v.texte_menu_etat, format!("Etat: {attendu}"));
+        assert_eq!(
+            v.texte_kill_switch,
+            "inconnu (compte non admis par le canal)"
+        );
+        assert!(!v.texte_etat.contains("injoignable"), "{}", v.texte_etat);
     }
 
     /// Les noms que la coquille emet vers sa page, un par etat: la page les

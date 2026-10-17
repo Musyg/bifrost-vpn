@@ -17,6 +17,11 @@
 //! voit ce qu'on lui envoie. Sous un jeton eleve (Windows), le proprietaire du
 //! pipe depend d'une strategie locale: seul l'invariant est exige, refus sans
 //! un octet ou admission avec la requete.
+//!
+//! Un canal que le systeme refuse d'ouvrir a ce compte n'est pas un canal
+//! vide: `emergency-disarm` en avertit, et le chemin commun le nomme sans
+//! l'attribuer au seul daemon sous Windows, ou un autre processus peut tenir
+//! le nom du pipe.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -431,6 +436,221 @@ async fn la_sonde_d_emergency_disarm_n_ecrit_rien_et_ne_prend_pas_un_autre_pour_
         "le desarmement n'a pas ete tente: {}",
         s.erreur
     );
+}
+
+/// Un canal qui existe, et que le systeme refuse d'ouvrir a ce compte.
+/// Linux: un socket d'ecoute de la recette dont le fichier n'a plus aucun
+/// droit (mode 0): `connect(2)` rend `EACCES` a tout compte sauf root.
+/// Windows: un pipe de la recette a la DACL vide (`D:P`), qui n'accorde rien
+/// a personne, eleve ou non. Son createur, qui en est le proprietaire, ne
+/// l'ouvre pas non plus: mesure du 17/10/2026 sur dev-windows, jeton non
+/// eleve, un client y est refuse (`ERROR_ACCESS_DENIED`) en lecture et
+/// ecriture, et de meme aux seuls `READ_CONTROL` ou `WRITE_DAC` que la
+/// propriete laisse sur l'objet.
+struct Ferme {
+    socket: String,
+    #[cfg(unix)]
+    tenu: tokio::net::UnixListener,
+    #[cfg(unix)]
+    dossier: PathBuf,
+    #[cfg(windows)]
+    tenu: tokio::net::windows::named_pipe::NamedPipeServer,
+}
+
+impl Ferme {
+    #[cfg(unix)]
+    fn demarrer(nom: &str) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        let dossier = std::env::temp_dir().join(etiquette_unique(nom));
+        std::fs::create_dir_all(&dossier).expect("repertoire de la recette");
+        let chemin = dossier.join("d.sock");
+        let tenu = tokio::net::UnixListener::bind(&chemin).expect("ecoute de la recette");
+        std::fs::set_permissions(&chemin, std::fs::Permissions::from_mode(0o000))
+            .expect("droits du socket retires");
+        Self {
+            socket: chemin.to_string_lossy().into_owned(),
+            tenu,
+            dossier,
+        }
+    }
+
+    #[cfg(windows)]
+    fn demarrer(nom: &str) -> Self {
+        let socket = format!(r"\\.\pipe\{}", etiquette_unique(nom));
+        let tenu = windows::premiere_instance(&socket, "D:P").expect("pipe a la DACL vide");
+        Self { socket, tenu }
+    }
+
+    /// Aucun client n'a joint le canal: aucun octet n'a pu partir.
+    async fn personne_ne_l_a_joint(&self) {
+        let attente = Duration::from_millis(200);
+        #[cfg(unix)]
+        let joint = tokio::time::timeout(attente, self.tenu.accept())
+            .await
+            .is_ok();
+        #[cfg(windows)]
+        let joint = tokio::time::timeout(attente, self.tenu.connect())
+            .await
+            .is_ok();
+        assert!(
+            !joint,
+            "un client a joint un canal que ce compte ne peut pas ouvrir"
+        );
+    }
+}
+
+#[cfg(unix)]
+impl Drop for Ferme {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dossier);
+    }
+}
+
+/// Un canal que le systeme refuse d'ouvrir a ce compte se dit tel, par le
+/// binaire construit, et jamais comme un canal vide. `emergency-disarm`
+/// avertit qu'un daemon y tourne peut-etre, et nul autre avertissement, puis
+/// va au bout (son daemon est le leurre de la recette precedente). `status`
+/// rend le refus d'ouverture dans le texte de sa plateforme, en code 1 et non
+/// le 4 d'un serveur refuse, sans le conseil d'un daemon arrete. Personne n'a
+/// joint le canal. Windows: l'ouverture elle-meme est mesuree, refusee en
+/// lecture et ecriture au compte qui possede le pipe. Root passe outre les
+/// droits d'un fichier: sous root, le refus ne se construit pas.
+#[tokio::test(flavor = "multi_thread")]
+async fn un_canal_que_ce_compte_ne_peut_pas_ouvrir_se_dit_tel() {
+    #[cfg(unix)]
+    if attendu() == Attendu::Admis {
+        println!(
+            "SKIPPED un_canal_que_ce_compte_ne_peut_pas_ouvrir_se_dit_tel: root passe outre \
+             les droits du socket, le refus d'ouverture ne se construit pas sous ce compte"
+        );
+        return;
+    }
+    let atelier = Atelier::nouveau("ferme");
+    let suffixe = std::env::consts::EXE_SUFFIX;
+    let copie = atelier.0.join(format!("bifrost-cli{suffixe}"));
+    std::fs::copy(cli(), &copie).expect("copie du client");
+    let leurre = atelier.0.join(format!("bifrost-daemon{suffixe}"));
+    std::fs::copy(std::env::current_exe().expect("ce binaire"), &leurre).expect("leurre");
+    let canal = Ferme::demarrer("ferme");
+
+    let urgence = vec![
+        "emergency-disarm".to_owned(),
+        "--je-sais-ce-que-je-fais".to_owned(),
+    ];
+    let urgence = lancer(&copie, &canal.socket, &urgence).await;
+    let status = lancer(&cli(), &canal.socket, &["status".to_owned()]).await;
+    println!(
+        "mesure canal ferme: emergency-disarm code {:?}, stderr {:?}; status code {:?}, \
+         stderr {:?}",
+        urgence.code, urgence.erreur, status.code, status.erreur
+    );
+
+    assert!(
+        urgence.erreur.contains("ce compte ne peut pas ouvrir"),
+        "aucun avertissement pour un canal ferme a ce compte: {}",
+        urgence.erreur
+    );
+    for autre in [
+        "repond encore",
+        "n'a pas l'identite attendue",
+        "sans prendre de connexion de plus",
+    ] {
+        assert!(
+            !urgence.erreur.contains(autre),
+            "{autre}: {}",
+            urgence.erreur
+        );
+    }
+    assert!(
+        urgence.erreur.contains("a echoue (code"),
+        "le desarmement n'a pas ete tente: {}",
+        urgence.erreur
+    );
+
+    #[cfg(unix)]
+    let texte = "ouverture de {} refusee a ce compte: le socket du daemon n'admet que root et \
+                 les membres du groupe bifrost.";
+    #[cfg(windows)]
+    let texte = "ouverture de {} refusee a ce compte: soit le daemon ne l'admet pas (ni \
+                 administrateur eleve, ni membre de son groupe d'acces), soit un autre \
+                 processus tient ce nom. Rien ici ne permet de trancher.";
+    let texte = texte.replace("{}", &canal.socket);
+    assert_eq!(status.code, Some(1), "{}", status.erreur);
+    assert!(status.sortie.is_empty(), "stdout: {}", status.sortie);
+    assert!(status.erreur.contains(&texte), "{}", status.erreur);
+    for autre in ["Est-il demarre", "sans reponse dans le delai", "REFUS"] {
+        assert!(!status.erreur.contains(autre), "{autre}: {}", status.erreur);
+    }
+
+    canal.personne_ne_l_a_joint().await;
+
+    // L'ouverture par defaut de tokio, en lecture et ecriture, refusee au
+    // compte qui a cree le pipe et en est le proprietaire.
+    #[cfg(windows)]
+    {
+        let lecture_ecriture =
+            tokio::net::windows::named_pipe::ClientOptions::new().open(&canal.socket);
+        let refus = lecture_ecriture
+            .expect_err("le proprietaire ouvre en lecture et ecriture un pipe a la DACL vide");
+        println!("mesure canal ferme: lecture et ecriture par le proprietaire: {refus}");
+        assert_eq!(
+            refus.kind(),
+            std::io::ErrorKind::PermissionDenied,
+            "{refus}"
+        );
+    }
+}
+
+#[cfg(windows)]
+mod windows {
+    use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    };
+    use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+
+    /// La premiere instance du pipe `nom`, sous le descripteur `sddl`.
+    pub fn premiere_instance(nom: &str, sddl: &str) -> std::io::Result<NamedPipeServer> {
+        let large: Vec<u16> = sddl.encode_utf16().chain(Some(0)).collect();
+        let mut descripteur: *mut std::ffi::c_void = std::ptr::null_mut();
+        // SAFETY: `large` est une chaine UTF-16 terminee par un zero, et
+        // `descripteur` recoit un descripteur alloue par le systeme, libere
+        // par LocalFree avant de sortir de la fonction.
+        let ok = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                large.as_ptr(),
+                SDDL_REVISION_1,
+                &mut descripteur,
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut attributs = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: descripteur,
+            bInheritHandle: 0,
+        };
+        let mut options = ServerOptions::new();
+        options
+            .first_pipe_instance(true)
+            .reject_remote_clients(true);
+        // SAFETY: `attributs` reste vivant pendant tout l'appel, et son
+        // lpSecurityDescriptor pointe sur un descripteur valide.
+        let issue = unsafe {
+            options.create_with_security_attributes_raw(
+                nom,
+                (&mut attributs as *mut SECURITY_ATTRIBUTES).cast(),
+            )
+        };
+        // SAFETY: `descripteur` a ete alloue par
+        // ConvertStringSecurityDescriptorToSecurityDescriptorW et n'est plus
+        // lu apres la creation de l'instance.
+        unsafe { LocalFree(descripteur) };
+        issue
+    }
 }
 
 /// Les preuves par declaration, par le binaire construit: la preuve de la

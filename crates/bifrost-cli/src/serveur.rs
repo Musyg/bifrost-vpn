@@ -99,20 +99,47 @@ pub(crate) async fn joindre(socket: &str) -> Result<IpcClient, Echec> {
     }
 }
 
+/// Le systeme a refuse a ce compte d'ouvrir le canal: `EACCES` sous Linux,
+/// `ERROR_ACCESS_DENIED` sous Windows, tous deux `PermissionDenied`. Rendu
+/// par l'ouverture elle-meme, avant qu'aucun serveur ait ete joint: qui tient
+/// le canal ne se lit pas.
+fn ouverture_refusee(e: &IpcError) -> bool {
+    matches!(e, IpcError::Io(io) if io.kind() == std::io::ErrorKind::PermissionDenied)
+}
+
+/// Ce que le chemin commun dit d'un canal que le systeme refuse d'ouvrir a ce
+/// compte. Sous Linux le repertoire du socket par defaut appartient a root, et
+/// c'est le daemon qui fixe les droits du socket: le refus est le sien.
+#[cfg(unix)]
+const OUVERTURE_REFUSEE: &str = "le socket du daemon n'admet que root et les membres du \
+                                 groupe bifrost.";
+/// Sous Windows le nom du pipe est libre quand le service est arrete: un autre
+/// processus peut le tenir avec une DACL qui refuse ce compte. L'ouverture
+/// echoue alors avant toute verification d'identite, et sans poignee ni le
+/// proprietaire ni le serveur ne se lisent: les deux cas se disent.
+#[cfg(windows)]
+const OUVERTURE_REFUSEE: &str = "soit le daemon ne l'admet pas (ni administrateur eleve, ni \
+                                 membre de son groupe d'acces), soit un autre processus tient \
+                                 ce nom. Rien ici ne permet de trancher.";
+
 /// [`joindre`], pour le chemin commun: un refus reste un [`ServeurRefuse`],
-/// que `main` reconnait et rend en [`CODE_SERVEUR_REFUSE`].
+/// que `main` reconnait et rend en [`CODE_SERVEUR_REFUSE`]. Un canal qui ne
+/// s'ouvre pas se dit dans l'ordre de [`presence`]: refuse a ce compte,
+/// occupe, puis le reste.
 pub(crate) async fn ouvrir(socket: &str) -> anyhow::Result<IpcClient> {
     match joindre(socket).await {
         Ok(client) => Ok(client),
         Err(Echec::Refuse(refus)) => Err(refus.into()),
+        Err(Echec::Canal(e)) if ouverture_refusee(&e) => Err(anyhow::Error::new(e).context(
+            format!("ouverture de {socket} refusee a ce compte: {OUVERTURE_REFUSEE}"),
+        )),
         // Un serveur tient le canal: rien ne dit qu'il soit arrete.
         Err(Echec::Canal(e)) if e.is_server_busy() => Err(anyhow::Error::new(e).context(format!(
             "daemon sans reponse dans le delai sur {socket}: le canal existe, mais \
              n'a pris aucune connexion de plus. Reessayer dans un instant."
         ))),
         Err(Echec::Canal(e)) => Err(anyhow::Error::new(e).context(format!(
-            "connexion au daemon sur {socket}. Est-il demarre, et avez-vous le droit \
-             de le piloter ?"
+            "connexion au daemon sur {socket}. Est-il demarre ?"
         ))),
     }
 }
@@ -129,7 +156,13 @@ pub(crate) enum Presence {
     Daemon,
     /// Un serveur, mais pas celui-la.
     Autre,
-    /// Personne, ou personne que ce compte puisse joindre.
+    /// Un serveur tient le canal sans prendre de connexion de plus: peut-etre
+    /// le daemon fige, que la commande de secours sert justement.
+    Occupe,
+    /// Le systeme refuse a ce compte d'ouvrir le canal: qui le tient ne se lit
+    /// pas, et un daemon peut tres bien y tourner.
+    Inaccessible,
+    /// Rien n'ecoute, ou rien a ce nom.
     Personne,
 }
 
@@ -137,8 +170,19 @@ pub(crate) enum Presence {
 pub(crate) async fn presence(socket: &str) -> Presence {
     match joindre(socket).await {
         Ok(_) => Presence::Daemon,
-        Err(Echec::Refuse(_)) => Presence::Autre,
-        Err(Echec::Canal(_)) => Presence::Personne,
+        Err(echec) => presence_d_un_echec(&echec),
+    }
+}
+
+/// Ce que dit du canal une ouverture qui a echoue, dans l'ordre de la
+/// coquille: un serveur joint et ecarte, puis le refus d'ouverture fait a ce
+/// compte, puis l'occupation, puis le reste.
+fn presence_d_un_echec(echec: &Echec) -> Presence {
+    match echec {
+        Echec::Refuse(_) => Presence::Autre,
+        Echec::Canal(e) if ouverture_refusee(e) => Presence::Inaccessible,
+        Echec::Canal(e) if e.is_server_busy() => Presence::Occupe,
+        Echec::Canal(_) => Presence::Personne,
     }
 }
 
@@ -485,12 +529,16 @@ mod tests {
     /// Le chemin commun des commandes: un canal qui existe et ne prend
     /// aucune connexion de plus se dit "daemon sans reponse dans le delai",
     /// sans le conseil qui suppose un daemon arrete; un canal absent garde ce
-    /// conseil. Windows: apres l'attente d'une instance libre (2 s). Linux:
-    /// `connect(2)` sur une file d'attente pleine rend `EAGAIN`.
+    /// conseil, et ne demande plus si l'on a le droit de piloter le daemon (le
+    /// refus d'ouverture a sa propre branche). La sonde d'`emergency-disarm`
+    /// dit le premier `Occupe`, le second `Personne`. Windows: apres l'attente
+    /// d'une instance libre (2 s). Linux: `connect(2)` sur une file d'attente
+    /// pleine rend `EAGAIN`.
     #[tokio::test(flavor = "multi_thread")]
     async fn un_canal_occupe_n_est_pas_dit_arrete() {
         let canal = occupe("occupe");
         let pris = ouvrir(&canal.socket).await.err().map(|e| format!("{e:#}"));
+        let vu_pris = presence(&canal.socket).await;
         drop(canal);
         #[cfg(unix)]
         let absent = std::env::temp_dir()
@@ -500,14 +548,94 @@ mod tests {
             .into_owned();
         #[cfg(windows)]
         let absent = format!(r"\\.\pipe\{}", etiquette_unique("absent"));
+        let vu_absent = presence(&absent).await;
         let absent = ouvrir(&absent).await.err().map(|e| format!("{e:#}"));
-        println!("mesure canal occupe: {pris:?}; canal absent: {absent:?}");
+        println!(
+            "mesure canal occupe: {pris:?}, sonde {vu_pris:?}; canal absent: {absent:?}, \
+             sonde {vu_absent:?}"
+        );
         let pris = pris.expect("un canal occupe ne s'ouvre pas");
         assert!(pris.contains("daemon sans reponse dans le delai"), "{pris}");
         assert!(!pris.contains("Est-il demarre"), "{pris}");
         let absent = absent.expect("un canal absent ne s'ouvre pas");
-        assert!(absent.contains("Est-il demarre"), "{absent}");
+        assert!(absent.contains("Est-il demarre ?"), "{absent}");
         assert!(!absent.contains("sans reponse dans le delai"), "{absent}");
+        assert!(!absent.contains("avez-vous le droit"), "{absent}");
+        for texte in [&pris, &absent] {
+            assert!(!texte.contains("refusee a ce compte"), "{texte}");
+        }
+        assert_eq!(vu_pris, Presence::Occupe);
+        assert_eq!(vu_absent, Presence::Personne);
+    }
+
+    /// L'erreur que le systeme rend a l'ouverture d'un canal que ses droits
+    /// ferment a ce compte: `EACCES` au `connect(2)` sous Linux,
+    /// `ERROR_ACCESS_DENIED` a l'ouverture sous Windows.
+    #[cfg(unix)]
+    const ACCES_REFUSE: i32 = 13;
+    #[cfg(windows)]
+    const ACCES_REFUSE: i32 = 5;
+
+    /// L'erreur que le systeme rend au client d'un canal qui existe et ne
+    /// prend aucune connexion de plus: `EAGAIN` au `connect(2)` sous Linux,
+    /// `ERROR_PIPE_BUSY` a l'ouverture sous Windows.
+    #[cfg(unix)]
+    const CANAL_OCCUPE: i32 = 11;
+    #[cfg(windows)]
+    const CANAL_OCCUPE: i32 = 231;
+
+    /// Chaque echec d'ouverture dans sa presence, et dans aucune autre: un
+    /// serveur joint et ecarte, quelle que soit la cause, est `Autre`; le
+    /// refus d'ouverture fait a ce compte, sous la forme ou il arrive (le code
+    /// de la plateforme, et le genre seul), est `Inaccessible`; le canal
+    /// occupe est `Occupe`; le reste seul est `Personne`. Sans compte ni
+    /// privilege: la table vaut sous tout jeton, root compris.
+    #[test]
+    fn chaque_echec_d_ouverture_a_sa_presence() {
+        for cause in [
+            ServerIdentityError::Refused,
+            ServerIdentityError::Unreadable,
+        ] {
+            let echec = Echec::Refuse(ServeurRefuse {
+                socket: "CANAL".into(),
+                cause,
+            });
+            assert_eq!(presence_d_un_echec(&echec), Presence::Autre, "{cause:?}");
+        }
+
+        for refus in [
+            std::io::Error::from_raw_os_error(ACCES_REFUSE),
+            std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        ] {
+            assert_eq!(
+                refus.kind(),
+                std::io::ErrorKind::PermissionDenied,
+                "l'erreur de la recette doit etre un refus d'ouverture: {refus}"
+            );
+            let echec = Echec::Canal(IpcError::Io(refus));
+            assert_eq!(
+                presence_d_un_echec(&echec),
+                Presence::Inaccessible,
+                "{echec:?}"
+            );
+        }
+
+        let occupe = IpcError::Io(std::io::Error::from_raw_os_error(CANAL_OCCUPE));
+        assert!(
+            occupe.is_server_busy(),
+            "l'erreur de la recette doit etre celle d'un canal occupe: {occupe}"
+        );
+        assert_eq!(presence_d_un_echec(&Echec::Canal(occupe)), Presence::Occupe);
+
+        for reste in [
+            IpcError::Io(std::io::Error::from(std::io::ErrorKind::NotFound)),
+            IpcError::Io(std::io::Error::from(std::io::ErrorKind::ConnectionRefused)),
+            IpcError::Closed,
+        ] {
+            assert!(!reste.is_server_busy(), "{reste}");
+            let echec = Echec::Canal(reste);
+            assert_eq!(presence_d_un_echec(&echec), Presence::Personne, "{echec:?}");
+        }
     }
 
     /// Le message nomme le socket et la regle, rien d'autre: ni uid, ni pid,

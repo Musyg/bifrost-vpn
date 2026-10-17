@@ -126,7 +126,7 @@ The CLI also has an explicit local recovery command when the daemon is dead or u
 bifrost-cli emergency-disarm --je-sais-ce-que-je-fais
 ```
 
-It bypasses the daemon and opens cleartext traffic. It is an emergency operation, not a substitute for `disconnect`; a still-running daemon could otherwise believe its protection remains armed. The command requires the corresponding system privileges and the explicit acknowledgement flag.
+It bypasses the daemon and opens cleartext traffic. It is an emergency operation, not a substitute for `disconnect`; a still-running daemon could otherwise believe its protection remains armed. The command requires the corresponding system privileges and the explicit acknowledgement flag. Before disarming, it reports what holds the daemon channel, without writing to it: the daemon itself, another process, a server that accepts no further connection (possibly a frozen daemon), or a channel this account cannot open. It warns; it never refuses.
 
 ### Network warning
 

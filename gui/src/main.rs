@@ -324,6 +324,20 @@ mod tests {
         }
     }
 
+    /// L'info-bulle du tray de chaque erreur de la liste tient dans le champ
+    /// du tray Windows (`szTip` de `NOTIFYICONDATAW`): 128 unites UTF-16, zero
+    /// final compris. Au-dela, `tray-icon` copie les 128 premieres et le texte
+    /// perd sa fin. Le plus long est celui du compte que le canal refuse, sous
+    /// Windows, qui dit les deux origines possibles du refus.
+    #[test]
+    fn chaque_info_bulle_d_erreur_tient_dans_le_tray() {
+        for e in une_erreur_de_chaque_sorte() {
+            let bulle = info_bulle(&vue_de(Err(e.clone())));
+            let unites = bulle.encode_utf16().count();
+            assert!(unites < 128, "{e:?}: {unites} unites: `{bulle}`");
+        }
+    }
+
     /// Chaque erreur est peinte telle que `bifrost-coquille` la derive, a
     /// l'identique: la coquille ne decide rien.
     #[test]

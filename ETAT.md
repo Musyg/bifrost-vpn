@@ -59,8 +59,8 @@ verifie quelque chose: `annoncees` moins `abstentions` moins `rouges`.
 
 | Hote | Annoncees | Abstentions | Rouges | Reelles |
 |---|---|---|---|---|
-| dev-windows | 1810 | 23 | 0 | 1787 |
-| essai-linux | 1899 | 26 | 0 | 1873 |
+| dev-windows | 1814 | 23 | 0 | 1791 |
+| essai-linux | 1903 | 26 | 0 | 1877 |
 
 Les deux lignes ont ete prises par `scripts/recettes-strict.sh`, chacune sur son
 hote: le portage a ajoute 14 recettes des deux cotes, D1b.3b 11 sur dev-windows et 22
