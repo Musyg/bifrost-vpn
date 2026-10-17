@@ -12,17 +12,24 @@ name = "bifrost-gui"
 path = "src/main.rs"
 
 [build-dependencies]
-# Jamais la 3.0.0-alpha: la serie 2 stable.
-tauri-build = "2"
+# Jamais la 3.0.0-alpha: la serie 2 stable. Plancher 2.7: tauri-build 2.7.3 tire
+# tauri-utils 2.10.2 cote construction, donc urlpattern 0.6 sans les crates unic;
+# sans ce plancher le verrou pourrait redescendre a 2.6.x (tauri-utils 2.9.3,
+# urlpattern 0.3.0).
+tauri-build = "2.7"
 # Source unique de l'icone: engendre le PNG de fenetre (generate_context!) et le
 # .ico de ressource Windows. Ecrit PNG et ICO a la main, donc aucun crate ni
 # licence ajoutes (png/flate2 n'entrent pas).
 bifrost-icone = { path = "../crates/bifrost-icone" }
 
 [dependencies]
-# tray-icon, et jamais la 3.0.0-alpha. `tauri = "2"` resout 2.11.x (rust-version
-# 1.77.2, sous notre 1.98). withGlobalTauri est pose dans tauri.conf.json.
-tauri = { version = "2", features = ["tray-icon"] }
+# tray-icon, et jamais la 3.0.0-alpha. Plancher 2.12: `tauri = "2.12"` resout
+# tauri 2.12.4 (rust-version 1.90, sous notre 1.98). Sans plancher, `tauri = "2"`
+# garde 2.11.x: un verrou commite ne monte pas seul, et une montee etroite de
+# tauri y reste tant que toute la famille (tauri-utils, wry, tao...) ne bouge
+# pas. 2.12.4 tire tauri-utils 2.10.2, donc urlpattern 0.6 sans les cinq crates
+# unic. withGlobalTauri est pose dans tauri.conf.json.
+tauri = { version = "2.12", features = ["tray-icon"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 # time pour l'attente de la boucle de fond; le reste du reseau est dans l'IPC.

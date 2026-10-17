@@ -37,50 +37,41 @@ unused-ignored-advisory = "deny"
 # Une liste a part de celle de la racine, parce que chaque liste ne vaut que
 # pour son verrou. L'avis de la racine, RUSTSEC-2024-0436 (`paste`), n'est
 # pas ici: `paste` n'est pas dans ce verrou, et `unused-ignored-advisory`
-# ferait rougir son entree. Les sept avis ci-dessous n'existent, eux, que dans
+# ferait rougir son entree. Les deux avis ci-dessous n'existent, eux, que dans
 # ce verrou. `gui/.cargo/audit.toml` porte les memes identifiants pour
 # cargo-audit; `crates/bifrost-evasion/tests/avis_ignores.rs` tient les deux
 # fichiers d'accord et exige une raison datee sur chaque entree.
 #
-# Les faits ci-dessous ont ete releves le 2026-10-16: `cargo tree -i <crate>`
+# Les faits ci-dessous ont ete releves le 2026-10-17: `cargo tree -i <crate>`
 # sur `gui/Cargo.toml` pour les deux cibles (x86_64-unknown-linux-gnu et
 # x86_64-pc-windows-msvc), `cargo metadata` (genre des cibles de chaque crate
 # et de ceux qui le tirent), la base RustSec, l'index de crates.io et un grep
 # de notre code.
+#
+# Les cinq crates unic-* 0.9.0 (RUSTSEC-2025-0075, -0080, -0081, -0098, -0100)
+# ont quitte ce verrou avec la montee a Tauri 2.12.4: tauri-utils 2.10.2 tire
+# urlpattern 0.6, qui ne depend plus de `unic`. `cargo tree -i` ne trouve plus
+# aucun des cinq, ni urlpattern 0.3.0, sur l'une ou l'autre cible.
 #
 # RUSTSEC-2024-0370, proc-macro-error 1.0.4, non maintenu, aucune version
 # corrigee. Tire par glib-macros 0.18.5 et gtk3-macros 0.18.2, deux
 # proc-macros de gtk-rs 0.18: il s'execute a la construction et n'entre pas
 # dans le binaire livre. Absent de l'arbre Windows.
 #
-# RUSTSEC-2025-0081 unic-char-property, RUSTSEC-2025-0075 unic-char-range,
-# RUSTSEC-2025-0080 unic-common, RUSTSEC-2025-0100 unic-ucd-ident,
-# RUSTSEC-2025-0098 unic-ucd-version, tous en 0.9.0, non maintenus (l'amont
-# est archive), aucune version corrigee. Tires par urlpattern 0.3.0, sous
-# tauri-utils 2.9.3, dependance normale de tauri 2.11.5: ces cinq crates sont
-# dans le binaire livre, sur les deux plateformes. Ce sont des tables de
-# proprietes Unicode statiques, sans reseau ni entree/sortie. tauri-utils
-# 2.10.2 tire urlpattern 0.6, qui ne depend plus de `unic`: ces cinq entrees
-# tomberont avec la montee de Tauri qui l'amene.
-#
 # RUSTSEC-2024-0429, glib 0.18.5, UNSOUND: `VariantStrIter::impl_get` passe
 # une reference immuable a une fonction C qui l'ecrit; compile avec
 # optimisations, l'ecriture est perdue et `next`, `nth`, `last`, `next_back`
 # et `nth_back` dereferencent un pointeur nul. Corrige en glib 0.20.0, que la
-# pile Linux de Tauri ne prend pas: tauri 2.12.4, la derniere version 2.x
-# publiee, exige toujours gtk ^0.18 (gtk-rs 0.18, donc glib 0.18). Notre code
-# n'appelle pas `VariantStrIter` (`grep -rn VariantStrIter gui/src gui/build.rs
-# gui/ui crates/`: zero occurrence). glib est absent de l'arbre Windows, et la
-# coquille est un processus non privilegie: elle refuse de demarrer elevee.
-# Retirer cette entree fait rougir le job des dependances.
+# pile Linux de Tauri ne prend pas: tauri 2.12.4, le verrou actuel de la
+# coquille, exige toujours gtk ^0.18 (gtk-rs 0.18, donc glib 0.18).
+# Nos sources n'appellent pas `VariantStrIter` (`grep -rn VariantStrIter
+# gui/src gui/build.rs crates/*/src`: zero; le seul hit de l'arbre est la raison
+# de cette recette dans `audit_planifie.rs`). glib est absent de l'arbre
+# Windows, et la coquille est un processus non privilegie: elle refuse de
+# demarrer elevee. Retirer cette entree fait rougir le job des dependances.
 ignore = [
-    { id = "RUSTSEC-2024-0370", reason = "2026-10-16: proc-macro-error 1.0.4 non maintenu, aucune version corrigee; tire seulement par deux proc-macros de gtk-rs 0.18 (glib-macros, gtk3-macros), donc execute a la construction et absent du binaire livre; Linux seulement" },
-    { id = "RUSTSEC-2025-0081", reason = "2026-10-16: unic-char-property 0.9.0 non maintenu, aucune version corrigee; tables Unicode statiques tirees par urlpattern 0.3.0 sous tauri-utils 2.9.3, dans le binaire livre sur les deux plateformes" },
-    { id = "RUSTSEC-2025-0075", reason = "2026-10-16: unic-char-range 0.9.0 non maintenu, aucune version corrigee; tables Unicode statiques tirees par urlpattern 0.3.0 sous tauri-utils 2.9.3, dans le binaire livre sur les deux plateformes" },
-    { id = "RUSTSEC-2025-0080", reason = "2026-10-16: unic-common 0.9.0 non maintenu, aucune version corrigee; tables Unicode statiques tirees par urlpattern 0.3.0 sous tauri-utils 2.9.3, dans le binaire livre sur les deux plateformes" },
-    { id = "RUSTSEC-2025-0100", reason = "2026-10-16: unic-ucd-ident 0.9.0 non maintenu, aucune version corrigee; tables Unicode statiques tirees par urlpattern 0.3.0 sous tauri-utils 2.9.3, dans le binaire livre sur les deux plateformes" },
-    { id = "RUSTSEC-2025-0098", reason = "2026-10-16: unic-ucd-version 0.9.0 non maintenu, aucune version corrigee; tables Unicode statiques tirees par urlpattern 0.3.0 sous tauri-utils 2.9.3, dans le binaire livre sur les deux plateformes" },
-    { id = "RUSTSEC-2024-0429", reason = "2026-10-16: glib 0.18.5 unsound (VariantStrIter, corrige en 0.20.0); tauri 2.x epingle toujours gtk-rs 0.18 (tauri 2.12.4 exige gtk ^0.18); aucune occurrence de VariantStrIter dans notre code; Linux seulement; processus non privilegie" },
+    { id = "RUSTSEC-2024-0370", reason = "2026-10-17: proc-macro-error 1.0.4 non maintenu, aucune version corrigee; tire seulement par deux proc-macros de gtk-rs 0.18 (glib-macros, gtk3-macros), donc execute a la construction et absent du binaire livre; Linux seulement" },
+    { id = "RUSTSEC-2024-0429", reason = "2026-10-17: glib 0.18.5 unsound (VariantStrIter, corrige en 0.20.0); tauri 2.12.4 epingle toujours gtk-rs 0.18 (exige gtk ^0.18); aucun appel a VariantStrIter dans nos sources; Linux seulement; processus non privilegie" },
 ]
 
 [licenses]

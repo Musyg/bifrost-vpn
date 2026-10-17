@@ -61,19 +61,21 @@
 //! 3. Le job `dependances` porte ses juges, et ils tournent sur `schedule`:
 //!    `cargo audit` a la racine et dans `gui/` (`working-directory: gui`),
 //!    `cargo deny check` a la racine, dans `fuzz/` (`working-directory:
-//!    fuzz`) et dans `gui/`, `cargo vet` puis le `git diff` de
-//!    `supply-chain/`. Chacun a la lettre (`cargo audit -D warnings`,
-//!    `cargo deny check`, `cargo vet --locked`,
+//!    fuzz`) et dans `gui/`, `cargo vet` a la racine et dans `gui/`, chacun
+//!    suivi du `git diff` de `supply-chain/`. Chacun a la lettre
+//!    (`cargo audit -D warnings`, `cargo deny check`, `cargo vet --locked`,
 //!    `git diff --exit-code -- supply-chain/`) et a sa place: `cargo audit`
 //!    a la racine et dans `gui/`, `cargo deny check` a la racine, dans
-//!    `fuzz/` et dans `gui/`, les autres a la racine (`working-directory` lu
-//!    sous forme canonique: `./fuzz`, `fuzz/` et `./fuzz/` valent `fuzz`,
-//!    `./` la racine). `gui/` est la coquille, espace de travail separe avec
-//!    son propre verrou: sans ses deux juges, un avis contre la pile de la
-//!    WebView ne rougirait aucun run planifie. `cargo vet --locked` et le
-//!    `git diff` sont seuls dans leur etape, et dans cet ordre: vet reecrit
-//!    `supply-chain/` a sa forme canonique, le diff fait echouer l'etape des
-//!    qu'un octet change; place avant vet, il ne verrait pas la reecriture.
+//!    `fuzz/` et dans `gui/`, `cargo vet` a la racine et dans `gui/`
+//!    (`working-directory` lu sous forme canonique: `./fuzz`, `fuzz/` et
+//!    `./fuzz/` valent `fuzz`, `./` la racine). `gui/` est la coquille, espace
+//!    de travail separe avec son propre verrou et sa propre `supply-chain/`:
+//!    sans ses trois juges, un avis ou une dependance non couverte contre la
+//!    pile de la WebView ne rougirait aucun run planifie. `cargo vet --locked`
+//!    et le `git diff` sont seuls dans leur etape, et dans cet ordre, a la
+//!    racine comme dans `gui/`: vet reecrit `supply-chain/` a sa forme
+//!    canonique, le diff fait echouer l'etape des qu'un octet change; place
+//!    avant vet, il ne verrait pas la reecriture.
 //!    Un argument de plus (`--ignore`, `--file`, `--manifest-path`, une liste
 //!    de controles) changerait ce qui est juge; une graphie equivalente
 //!    (`--deny warnings` pour `-D warnings`) rougit aussi, choix assume.
@@ -306,36 +308,21 @@ const REPERTOIRE_GUI: &str = "gui";
 /// 9): les cinq reglages de la racine, puis la liste des avis que la coquille
 /// ignore, entree par entree, raison comprise. Changer la liste, c'est changer
 /// cette constante dans le meme commit.
-const ADVISORIES_DE_LA_COQUILLE: [&str; 14] = [
+const ADVISORIES_DE_LA_COQUILLE: [&str; 9] = [
     "db-urls = [\"https://github.com/rustsec/advisory-db\"]",
     "yanked = \"deny\"",
     "unmaintained = \"all\"",
     "unsound = \"all\"",
     "unused-ignored-advisory = \"deny\"",
     "ignore = [",
-    "    { id = \"RUSTSEC-2024-0370\", reason = \"2026-10-16: proc-macro-error 1.0.4 non \
+    "    { id = \"RUSTSEC-2024-0370\", reason = \"2026-10-17: proc-macro-error 1.0.4 non \
      maintenu, aucune version corrigee; tire seulement par deux proc-macros de gtk-rs 0.18 \
      (glib-macros, gtk3-macros), donc execute a la construction et absent du binaire livre; \
      Linux seulement\" },",
-    "    { id = \"RUSTSEC-2025-0081\", reason = \"2026-10-16: unic-char-property 0.9.0 non \
-     maintenu, aucune version corrigee; tables Unicode statiques tirees par urlpattern 0.3.0 \
-     sous tauri-utils 2.9.3, dans le binaire livre sur les deux plateformes\" },",
-    "    { id = \"RUSTSEC-2025-0075\", reason = \"2026-10-16: unic-char-range 0.9.0 non \
-     maintenu, aucune version corrigee; tables Unicode statiques tirees par urlpattern 0.3.0 \
-     sous tauri-utils 2.9.3, dans le binaire livre sur les deux plateformes\" },",
-    "    { id = \"RUSTSEC-2025-0080\", reason = \"2026-10-16: unic-common 0.9.0 non maintenu, \
-     aucune version corrigee; tables Unicode statiques tirees par urlpattern 0.3.0 sous \
-     tauri-utils 2.9.3, dans le binaire livre sur les deux plateformes\" },",
-    "    { id = \"RUSTSEC-2025-0100\", reason = \"2026-10-16: unic-ucd-ident 0.9.0 non \
-     maintenu, aucune version corrigee; tables Unicode statiques tirees par urlpattern 0.3.0 \
-     sous tauri-utils 2.9.3, dans le binaire livre sur les deux plateformes\" },",
-    "    { id = \"RUSTSEC-2025-0098\", reason = \"2026-10-16: unic-ucd-version 0.9.0 non \
-     maintenu, aucune version corrigee; tables Unicode statiques tirees par urlpattern 0.3.0 \
-     sous tauri-utils 2.9.3, dans le binaire livre sur les deux plateformes\" },",
-    "    { id = \"RUSTSEC-2024-0429\", reason = \"2026-10-16: glib 0.18.5 unsound \
-     (VariantStrIter, corrige en 0.20.0); tauri 2.x epingle toujours gtk-rs 0.18 (tauri \
-     2.12.4 exige gtk ^0.18); aucune occurrence de VariantStrIter dans notre code; Linux \
-     seulement; processus non privilegie\" },",
+    "    { id = \"RUSTSEC-2024-0429\", reason = \"2026-10-17: glib 0.18.5 unsound \
+     (VariantStrIter, corrige en 0.20.0); tauri 2.12.4 epingle toujours gtk-rs 0.18 (exige \
+     gtk ^0.18); aucun appel a VariantStrIter dans nos sources; Linux seulement; processus \
+     non privilegie\" },",
     "]",
 ];
 
@@ -2257,8 +2244,8 @@ fn juger(texte: &str, configs: &Configs) -> Result<Rapport, String> {
             ));
         }
         let (mut audit, mut deny_racine, mut deny_fuzz, mut vet) = (false, false, false, false);
-        let (mut audit_gui, mut deny_gui) = (false, false);
-        let mut vet_puis_diff = false;
+        let (mut audit_gui, mut deny_gui, mut vet_gui) = (false, false, false);
+        let (mut vet_puis_diff, mut vet_gui_puis_diff) = (false, false);
         for e in &job.etapes {
             let Some(corps) = &e.run else { continue };
             let si = e.si.as_deref().unwrap_or("success()");
@@ -2266,6 +2253,7 @@ fn juger(texte: &str, configs: &Configs) -> Result<Rapport, String> {
                 .map_err(|x| format!("etape `{}` (ligne {}), `if: {si}`: {x}", e.nom, e.ligne))?;
             let repertoire = e.repertoire.as_deref().unwrap_or(".");
             let racine = repertoire == ".";
+            let gui = repertoire == REPERTOIRE_GUI;
             let mut juges = Vec::new();
             let mut etrangeres = Vec::new();
             // L'ordre des commandes de l'etape, et la place de `cargo vet` et
@@ -2284,7 +2272,7 @@ fn juger(texte: &str, configs: &Configs) -> Result<Rapport, String> {
                             e.nom, e.ligne
                         ));
                     }
-                    juges.push((texte, racine));
+                    juges.push((texte, racine || gui));
                     continue;
                 }
                 let Some((sous, autres)) = commande_cargo(&mots) else {
@@ -2293,8 +2281,7 @@ fn juger(texte: &str, configs: &Configs) -> Result<Rapport, String> {
                 };
                 // Ou chaque juge a sa place: `cargo audit` a la racine et dans
                 // `gui/`, `cargo deny check` a la racine, dans `fuzz/` et dans
-                // `gui/`, les autres a la racine seulement.
-                let gui = repertoire == REPERTOIRE_GUI;
+                // `gui/`, `cargo vet` a la racine et dans `gui/`.
                 let juge = match sous {
                     "audit" => {
                         audit |= tourne && racine;
@@ -2309,8 +2296,9 @@ fn juger(texte: &str, configs: &Configs) -> Result<Rapport, String> {
                     }
                     "vet" => {
                         vet |= tourne && racine;
+                        vet_gui |= tourne && gui;
                         i_vet = i_vet.or(Some(ordre.len() - 1));
-                        Some(racine)
+                        Some(racine || gui)
                     }
                     _ => None,
                 };
@@ -2364,6 +2352,7 @@ fn juger(texte: &str, configs: &Configs) -> Result<Rapport, String> {
                     Some(_) => {}
                 }
                 vet_puis_diff |= tourne && racine && ordre == PAIRE_VET;
+                vet_gui_puis_diff |= tourne && gui && ordre == PAIRE_VET;
             }
             for (j, a_sa_place) in &juges {
                 if !a_sa_place {
@@ -2444,6 +2433,15 @@ fn juger(texte: &str, configs: &Configs) -> Result<Rapport, String> {
                 vet_puis_diff,
                 "`cargo vet --locked` puis `git diff --exit-code -- supply-chain/`, seuls et dans \
                  cet ordre dans une meme etape a la racine,",
+            ),
+            (
+                vet_gui,
+                "`cargo vet` dans `gui/` (`working-directory: gui`)",
+            ),
+            (
+                vet_gui_puis_diff,
+                "`cargo vet --locked` puis `git diff --exit-code -- supply-chain/`, seuls et dans \
+                 cet ordre dans une meme etape dans `gui/`,",
             ),
         ] {
             if !present {
@@ -2656,6 +2654,11 @@ jobs:
         run: |
           cargo vet --locked
           git diff --exit-code -- supply-chain/
+      - name: Vet de la coquille
+        working-directory: gui
+        run: |
+          cargo vet --locked
+          git diff --exit-code -- supply-chain/
       - name: SBOM
         if: github.event_name != 'schedule'
         run: cargo cyclonedx
@@ -2733,6 +2736,7 @@ fn le_temoin_est_lu_et_juge_sain() {
             "Avis de la coquille",
             "Licences de la coquille",
             "Vet",
+            "Vet de la coquille",
             "SBOM"
         ]
     );
@@ -3154,10 +3158,16 @@ fn chaque_mutation_du_temoin_rougit() {
             "`cargo deny` y est saute sur `schedule`",
         ),
         (
-            "cargo vet dans gui",
-            "        run: |\n          cargo vet --locked\n",
-            "        working-directory: gui\n        run: |\n          cargo vet --locked\n",
-            "`cargo vet --locked` lance dans `gui`",
+            "vet de la coquille retire",
+            "      - name: Vet de la coquille\n        working-directory: gui\n        run: |\n          cargo vet --locked\n          git diff --exit-code -- supply-chain/\n",
+            "",
+            "`cargo vet` dans `gui/` (`working-directory: gui`) ne tourne pas",
+        ),
+        (
+            "vet de la coquille sans son repertoire",
+            "      - name: Vet de la coquille\n        working-directory: gui\n        run: |\n          cargo vet --locked\n",
+            "      - name: Vet de la coquille\n        run: |\n          cargo vet --locked\n",
+            "`cargo vet` dans `gui/` (`working-directory: gui`) ne tourne pas",
         ),
         // Les jobs de la coquille, et tout job nouveau, sur `schedule`.
         (

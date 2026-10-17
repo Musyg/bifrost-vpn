@@ -115,7 +115,7 @@ les index d'Ubuntu ne gardent que la version de sortie et la derniere mise a jou
 push, une PR ou un lancement manuel, ne les a vus qu'au run suivant. `ci.yml` porte depuis un
 declencheur `schedule` quotidien (04:37 UTC, hors du debut d'heure, ou GitHub annonce des retards
 et des jobs abandonnes) qui ne lance que le job `dependances`: `cargo audit` a la racine et dans
-`gui/`, `cargo deny check` a la racine, dans `fuzz/` et dans `gui/`, et `cargo vet`; les etapes
+`gui/`, `cargo deny check` a la racine, dans `fuzz/` et dans `gui/`, et `cargo vet` a la racine et dans `gui/`; les etapes
 du SBOM y sont sautees. La base d'avis est
 telechargee a chaque run: runner neuf, aucun cache, et un telechargement qui echoue fait echouer
 l'etape au lieu de laisser juger une base ancienne. La recette
@@ -128,7 +128,7 @@ suivante, indicateur de bloc autre que `run: |`, ancre, alias... Une forme legit
 workflow n'emploie pas encore rougit aussi: l'employer demande d'etendre la grammaire, ses
 recettes et sa mesure dans le meme commit. Elle exige ensuite le declencheur, ce routage (evalue
 pour chaque evenement, `needs:` compris), les juges du job a la lettre et a leur place sur
-`schedule` (`cargo vet --locked` puis le `git diff` de `supply-chain/`, seuls et dans cet ordre),
+`schedule` (`cargo vet --locked` puis le `git diff` de `supply-chain/`, seuls et dans cet ordre, a la racine comme dans `gui/`),
 l'absence de tout drapeau qui fige la base (`--no-fetch`, `--stale`, `--offline`, `--frozen`), un
 echec de juge qui fait echouer le run (ni `continue-on-error`, ni operateur ou commande
 etrangere dans son etape, ni `shell:`, ni `defaults:`), un job `dependances` qui ne porte que
@@ -191,6 +191,25 @@ Ce que cela ne dit pas:
   change de version sans un commit de `supply-chain/`;
 - le harnais `fuzz/`, espace de travail separe, n'est pas couvert: 266 dependances tierces dans son
   verrou, dont 2 absentes du verrou racine (`arbitrary`, `libfuzzer-sys`).
+
+**cargo vet sur la coquille** (17/10/2026). `gui/` a son propre verrou, que l'etape racine ne lit
+pas; `cargo vet init` lance depuis `gui/` lui donne sa `supply-chain/`, de la meme forme que la
+racine: aucun ensemble d'audits publies importe (un import recopierait dans ce depot public le nom
+et l'adresse de courriel de chaque auditeur), donc aucune section `[imports]`, un `imports.lock`
+reduit a son en-tete et un `audits.toml` VIDE. Les 422 dependances tierces du verrou de la coquille,
+toutes plateformes et fonctionnalites confondues, sont exemptees chacune a sa version exacte, toutes
+au critere `safe-to-deploy` (118 partagees avec la racine a la meme version, 304 propres a la
+coquille); les cinq paquets de premiere partie de l'espace de travail `gui/` (`bifrost-coquille`,
+`bifrost-core`, `bifrost-gui`, `bifrost-icone`, `bifrost-ipc`) sont declares
+`audit-as-crates-io = false`, aucun n'existant sur crates.io. La CI le verifie dans le job
+`dependances`, depuis `gui/`: `cargo vet --locked`, puis `git diff --exit-code` sur `supply-chain/`,
+apres l'etape de la racine et de la meme forme; elle echoue sur une dependance nouvelle, une autre
+version d'une dependance exemptee, une exemption retiree, un `imports.lock` absent ou vide et un
+fichier hors de la forme canonique. `audit_planifie.rs` exige cette etape a sa place, et
+`sources_ascii.rs` lit les trois fichiers de `gui/supply-chain/` sous la garde ASCII. Ce que cela ne
+dit pas: une exemption n'est pas un audit; les 422 dependances ne sont couvertes que par la decision
+de les accepter telles quelles, prise a la montee de Tauri a 2.12.4 qui a fixe ce verrou, puis a
+chaque changement de version a venir.
 
 **2.3 Fuzzing** - Priorite : parseur de profils > parseur IPC > metadonnees de mise a jour > deserialisation. Outils : cargo-fuzz (libFuzzer) + `arbitrary` en premier choix ; AFL++/honggfuzz en complement (tous trois supportes par OSS-Fuzz/ClusterFuzz).
 

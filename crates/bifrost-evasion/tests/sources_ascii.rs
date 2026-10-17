@@ -31,7 +31,8 @@
 //! configuration (`config.toml`), le verrou de ses imports (`imports.lock`)
 //! et les audits du depot (`audits.toml`), et tous ceux de `gui/`, la
 //! coquille: sources Rust, page (HTML, JavaScript, CSS), configuration de
-//! Tauri, capacites, verrou et politiques d'avis. De `gui/`, la recette ne
+//! Tauri, capacites, verrou, politiques d'avis et sa propre `supply-chain/`
+//! (cargo vet, verrou separe). De `gui/`, la recette ne
 //! descend ni `gui/target/` ni `gui/gen/`: la construction les engendre et
 //! git les ignore. Les documents `.md` ne sont PAS gardes ici: c'est une
 //! decision de la tranche qui a ecrit cette recette, `docs/` portant du
@@ -41,8 +42,9 @@
 //! a chaque octet des cinq. Un lot doit avoir ete lu pour que la recette
 //! passe: une racine absente ou vide la fait rougir au lieu de la laisser
 //! verte sans rien avoir regarde. Pour `supply-chain/` et pour `gui/`, ce
-//! controle est nominatif: les trois fichiers de cargo vet, et chaque fichier
-//! source de la coquille, doivent etre dans leur lot.
+//! controle est nominatif: les trois fichiers de cargo vet de la racine, et
+//! chaque fichier source de la coquille (ses trois fichiers de cargo vet dans
+//! `gui/supply-chain/` compris), doivent etre dans leur lot.
 //!
 //! Le parcours se fait sur le disque, sans git: sur essai-linux le depot est
 //! copie par `tar` et n'a pas de `.git`. Une recette qui appellerait
@@ -195,8 +197,10 @@ const FICHIERS_DE_CARGO_VET: [&str; 3] = [
 ];
 
 /// Les fichiers sources de la coquille, chemin relatif a la racine. Le lot de
-/// `gui/` doit les porter tous.
-const FICHIERS_DE_LA_COQUILLE: [&str; 12] = [
+/// `gui/` doit les porter tous. Les trois derniers sont la `supply-chain/` de
+/// cargo vet propre a `gui/` (verrou separe): meme controle nominatif que
+/// `FICHIERS_DE_CARGO_VET` a la racine.
+const FICHIERS_DE_LA_COQUILLE: [&str; 15] = [
     "gui/.cargo/audit.toml",
     "gui/Cargo.lock",
     "gui/Cargo.toml",
@@ -205,6 +209,9 @@ const FICHIERS_DE_LA_COQUILLE: [&str; 12] = [
     "gui/deny.toml",
     "gui/src/icone.rs",
     "gui/src/main.rs",
+    "gui/supply-chain/audits.toml",
+    "gui/supply-chain/config.toml",
+    "gui/supply-chain/imports.lock",
     "gui/tauri.conf.json",
     "gui/ui/index.html",
     "gui/ui/main.js",

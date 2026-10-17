@@ -665,6 +665,21 @@ jobs:
           cargo vet --locked
           git diff --exit-code -- supply-chain/
 
+      # La coquille (`gui/`) a son propre verrou et sa propre `supply-chain/`,
+      # que l'etape racine ne lit pas. Meme forme, DEPUIS `gui/`: chaque
+      # dependance tierce de son verrou est couverte par une exemption a version
+      # exacte (aucun audit importe; `gui/supply-chain/audits.toml` est vide,
+      # `gui/supply-chain/imports.lock` reduit a son en-tete). `git diff`
+      # ensuite: un octet reecrit par vet dans `gui/supply-chain/` fait echouer
+      # l'etape. Les trois fichiers sont aussi sous la garde ASCII du depot
+      # (`sources_ascii.rs`), et la forme de cette etape est figee par
+      # `audit_planifie.rs`.
+      - name: Audits de la chaine d'approvisionnement de la coquille (cargo vet)
+        working-directory: gui
+        run: |
+          cargo vet --locked
+          git diff --exit-code -- supply-chain/
+
       # Le CRA impose un SBOM lisible par machine dans la documentation
       # technique (Annexe I partie II), et le document 07 le veut a chaque
       # build. C'est le premier pas: il est PRODUIT et depose. L'attacher aux

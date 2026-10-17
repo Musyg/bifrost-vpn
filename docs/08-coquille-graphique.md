@@ -243,8 +243,8 @@ cette page`), jamais comme un autre.
   un lancement manuel avec la case `windows`. Une PR qui touche `gui/`,
   `crates/bifrost-coquille`, `crates/bifrost-icone`, `crates/bifrost-ipc` ou
   `packaging/msi` attend un run manuel `windows` vert sur sa revision avant sa
-  fusion. Le job `dependances` lance `cargo audit` et `cargo deny check`
-  depuis `gui/`, y compris sur le run planifie quotidien.
+  fusion. Le job `dependances` lance `cargo audit`, `cargo deny check` et
+  `cargo vet` depuis `gui/`, y compris sur le run planifie quotidien.
 
 ## Ce qui n'est pas fait
 
@@ -268,4 +268,3 @@ cette page`), jamais comme un autre.
   est construite et ses recettes y tournent, dans le job `interface-linux`.
 - Le refus de demarrer elevee est garde par recette dans les deux sens; il
   n'a pas ete observe sur un lancement reel eleve.
-- `cargo vet` ne couvre pas le verrou de `gui/`.
