@@ -30,7 +30,7 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 use bifrost_ipc::protocol::{PROTOCOL_VERSION, Request};
-use bifrost_ipc::{AuthPolicy, IpcError, IpcServer};
+use bifrost_ipc::{AuthPolicy, IpcError, IpcServer, ProprietaireDuPipe};
 use libfuzzer_sys::fuzz_target;
 
 /// Ce qui tient d'un bloc dans le tampon d'un socket Unix avant l'acceptation.
@@ -63,7 +63,12 @@ fn banc() -> &'static Banc {
         };
         let chemin = dossier.join("daemon.sock");
         let serveur = runtime
-            .block_on(IpcServer::bind(&chemin, politique, None))
+            .block_on(IpcServer::bind(
+                &chemin,
+                politique,
+                None,
+                ProprietaireDuPipe::ParDefaut,
+            ))
             .expect("le serveur du banc doit ecouter");
         Banc {
             runtime,
