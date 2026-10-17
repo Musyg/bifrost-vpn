@@ -170,7 +170,7 @@ sudo userdel bifrost-coeur && sudo userdel bifrost-resolveur && sudo groupdel bi
 
 Meme parti pris que sous Linux, et la meme phrase : le script depose les binaires, durcit le repertoire de donnees, enregistre le service, puis **s'arrete la**. Il ne demarre rien.
 
-Il cree aussi, s'il n'existe pas, le groupe local `Bifrost`, vide, et l'inscrit dans la ligne du service (`--group`, par son SID) : c'est le **groupe d'acces** du canal. Ses membres ouvrent le pipe du daemon sans elevation et y ont trois commandes, par la CLI comme par la coquille graphique : l'etat, `connect-stored` (le profil que le daemon detient, enregistre par un administrateur) et `disconnect`. Toute autre commande reste a SYSTEM et aux jetons dont les Administrateurs sont actifs (une console elevee) : le daemon identifie l'appelant de chaque requete sur le jeton que le pipe lui presente, et un appelant qu'il ne sait pas identifier n'a que les trois commandes. Sous Linux, un membre du groupe `bifrost` garde tout le canal. Les membres n'y creent pas d'instance, donc ne peuvent pas tenir le canal a la place du daemon, et le client exige toujours un pipe possede par LocalSystem ou par les Administrateurs. C'est l'administrateur qui y ajoute des comptes (`Add-LocalGroupMember -Group Bifrost -Member <compte>`) ; l'appartenance vaut a la prochaine ouverture de session du compte. Le daemon n'admet qu'un groupe local cree par un administrateur, jamais un compte ni un groupe predefini : un groupe introuvable ou non admissible l'arrete au demarrage, et `--install-service` refuse de l'inscrire. Le detail des droits est dans le [document 08](docs/08-coquille-graphique.md).
+Il cree aussi, s'il n'existe pas, le groupe local `Bifrost`, vide, et l'inscrit dans la ligne du service (`--group`, par son SID) : c'est le **groupe d'acces** du canal. Ses membres ouvrent le pipe du daemon sans elevation et y ont trois commandes, par la CLI comme par la coquille graphique : l'etat, `connect-stored` (le profil que le daemon detient, enregistre par un administrateur) et `disconnect`. Toute autre commande reste a SYSTEM et aux jetons dont les Administrateurs sont actifs (une console elevee) : le daemon identifie l'appelant de chaque requete sur le jeton que le pipe lui presente, et un appelant qu'il ne sait pas identifier n'a que les trois commandes. Sous Linux, un membre du groupe `bifrost` n'a que ces trois commandes; root, admis par son uid, garde tout le canal. Les membres n'y creent pas d'instance, donc ne peuvent pas tenir le canal a la place du daemon, et le client exige toujours un pipe possede par LocalSystem ou par les Administrateurs. C'est l'administrateur qui y ajoute des comptes (`Add-LocalGroupMember -Group Bifrost -Member <compte>`) ; l'appartenance vaut a la prochaine ouverture de session du compte. Le daemon n'admet qu'un groupe local cree par un administrateur, jamais un compte ni un groupe predefini : un groupe introuvable ou non admissible l'arrete au demarrage, et `--install-service` refuse de l'inscrire. Le detail des droits est dans le [document 08](docs/08-coquille-graphique.md).
 
 Une divergence avec systemd, qu'il vaut mieux lire que decouvrir : le service Windows est enregistre en demarrage **automatique**, donc il partira de lui-meme au prochain redemarrage. Sous Linux, `install-linux.sh` n'active pas l'unite. Le reglage vit dans la specification du service Windows, pas dans l'installateur.
 
@@ -455,6 +455,12 @@ portees LLMNR et mDNS. Elle signale:
 
 Deux lectures differentes, un bus absent ou qui refuse, une signature D-Bus
 non lue, des delegues DNS, ou un resolved d'un autre namespace rendent
+UNMEASURED/2.
+
+`prove dns --politique-daemon --actif` prend pour attendu le plan DNS que le
+daemon declare avoir pose, lu sur son socket avant et apres la collecte.
+Cette declaration est reservee a root: un membre du groupe `bifrost`, qui a
+`status`, recoit un refus qui nomme la commande, et le rapport rend
 UNMEASURED/2.
 
 `.local` par mDNS est une limite nommee: il rend MATCH alors que des requetes

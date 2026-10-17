@@ -20,6 +20,15 @@
 # noms: P (le poste: bus prive, resolved prive, le daemon, la preuve) et S (le
 # serveur WireGuard). Une paire veth creee DANS P.
 #
+# Comptes, sous la regle des trois commandes: un appelant que le socket du
+# daemon admet par le seul groupe (`--group`) n'a que status, connect-stored et
+# disconnect; la declaration DNS est reservee a root, admis par son uid. Les
+# preuves face au vrai daemon tournent donc sous root sans aucune capacite
+# (setpriv sans capacite heritable ni bornee): admis par son uid, il a tout le
+# canal et le daemon lui sert la declaration. La collecte ne lit que ce que tout
+# compte lit (fichiers 0644, /proc/net, rtnetlink, bus prive ouvert a tous):
+# aucune de ses lectures n'exige une capacite.
+#
 # Ce que le banc mesure:
 # - daemon 1, lance apres le resolved prive: son gestionnaire en service est
 #   systemd-resolved. Aucun plan declare avant connect et apres disconnect, dit
@@ -27,6 +36,10 @@
 #   categorie d'ecart de ce backend, provoquee sous le daemon, donne cet ecart
 #   et lui seul, et le daemon declare, a l'octet pres, la meme chose avant et
 #   apres chaque cas;
+# - un membre du seul groupe du daemon, face au daemon 1 qui a pose son plan:
+#   la declaration lui est refusee (`le daemon a refuse la demande`), le
+#   journal du daemon nomme la commande refusee, rien du systeme n'est lu, et
+#   status lui reste ouvert;
 # - daemon 2, lance dans un namespace de montage ou le stub de resolved
 #   n'existe pas: son gestionnaire est resolv.conf. MATCH sans puis avec
 #   resolveur embarque, resolv-conf-content et hosts-sources;
@@ -35,7 +48,8 @@
 # - un serveur non root sur un --socket choisi: refus d'identite, sans une
 #   requete recue; une declaration hors schema servie par root: refus de la
 #   declaration; le rejeu exact sous root: MATCH (temoin, et limite de la
-#   regle d'identite);
+#   regle d'identite); ces faux serveurs n'appliquent aucune regle du daemon,
+#   et la preuve qui les joint tourne sous le compte 65534 (voir faux_daemon);
 # - le rapport ne porte ni adresse, ni interface, ni compte, ni chemin, ni rien
 #   de la declaration.
 #
@@ -67,14 +81,20 @@ AMONT=192.0.2.53
 AMONT6=2001:db8::53
 LOCAL=127.0.0.1
 REPONSE=192.0.2.99
-# Comptes: la preuve tourne sous `nobody`; le resolveur embarque factice, que
-# le daemon lance, sous un compte numerique que le rapport ne doit jamais dire.
-U_PREUVE=65534
+# Comptes: U_MEMBRE, uid et gid 65534, membre du seul groupe du daemon (le
+# groupe passe a `--group` est celui du gid 65534); le resolveur embarque
+# factice, que le daemon lance, sous un compte numerique que le rapport ne doit
+# jamais dire. Les preuves face au vrai daemon tournent sous root sans aucune
+# capacite (`prouver`).
+U_MEMBRE=65534
 U_RESOLVEUR=4243
 RESOLVED=/usr/lib/systemd/systemd-resolved
 CHEMIN_PATH=/usr/sbin:/usr/bin:/sbin:/bin
 AUCUN="aucun plan DNS pose par ce daemon: rien a comparer"
 MODIFIEE="declaration du daemon modifiee pendant la collecte"
+# La ligne que le journal du daemon ecrit chaque fois qu'il refuse la
+# declaration DNS a un appelant admis par le seul groupe.
+REFUS_DNS='commande reservee a root, refusee command="declaration-dns"'
 
 # --- commun ------------------------------------------------------------------
 
@@ -280,16 +300,38 @@ muet() {
   fi
 }
 
-# `prouver <nom> <socket> [prefixe...]`: la preuve par declaration, sans
-# privilege et sans environnement, dans le namespace courant (ou sous le
-# prefixe donne).
-prouver() {
-  local nom=$1 socket=$2
-  shift 2
+# `prouver_sous <compte> <nom> <socket> [prefixe...]`: la preuve par
+# declaration, sans environnement, dans le namespace courant (ou sous le
+# prefixe donne), sous l'un des deux comptes de la preuve:
+# - `racine`: root sans aucune capacite. Admis par son uid, il a tout le canal
+#   du daemon. Les heritables et les bornes vides retirent les capacites que
+#   l'exec rendrait a l'uid 0: aucune lecture de la collecte ne s'appuie sur
+#   un privilege.
+# - `membre`: U_MEMBRE, admis par le seul groupe du daemon, qui n'a sur le
+#   canal que status, connect-stored et disconnect.
+prouver_sous() {
+  local compte=$1 nom=$2 socket=$3
+  local -a ids
+  shift 3
+  case "$compte" in
+    racine) ids=(--reuid=0 --regid=0 --clear-groups --inh-caps=-all --bounding-set=-all) ;;
+    membre) ids=(--reuid="$U_MEMBRE" --regid="$U_MEMBRE" --clear-groups) ;;
+    *)
+      echo "compte de preuve inconnu: $compte" >&2
+      return 1
+      ;;
+  esac
   CODE=0
-  "$@" env -i PATH="$CHEMIN_PATH" setpriv --reuid="$U_PREUVE" --regid="$U_PREUVE" --clear-groups \
+  "$@" env -i PATH="$CHEMIN_PATH" setpriv "${ids[@]}" \
     "$CLI" --json --socket "$socket" prove dns --politique-daemon --actif > "$BAC/$nom.json" || CODE=$?
   muet "$nom"
+}
+
+# `prouver <nom> <socket> [prefixe...]`: la preuve face au vrai daemon, sous
+# root sans aucune capacite: admis par son uid, il recoit la declaration, et
+# aucune capacite n'entre dans la mesure.
+prouver() {
+  prouver_sous racine "$@"
 }
 
 # `declaration <socket> <fichier>`.
@@ -474,6 +516,14 @@ resolveur_de() {
 # `faux_daemon <nom> <reponse> [prefixe...]`: un faux daemon sous le prefixe
 # (vide: root; setpriv: un compte ordinaire), sur un --socket choisi; la preuve
 # le joint, puis il est tue par son PID. REQUETES: ce qu'il a recu.
+#
+# La preuve qui joint un faux daemon tourne sous U_MEMBRE. Un faux daemon
+# n'applique aucune regle du vrai: il sert sa reponse a quiconque la demande.
+# Ces cas jugent le client: l'identite du serveur, exigee avant le premier
+# octet, ne depend que de l'uid du serveur, jamais du compte de la preuve, et
+# l'analyse de la reponse est la meme pour tout compte. Face au serveur non
+# root, la preuve et le serveur ont le meme compte: le client ne fait pas
+# confiance a un serveur parce qu'il tourne sous son propre compte.
 faux_daemon() {
   local nom=$1 reponse=$2 pid
   shift 2
@@ -486,7 +536,7 @@ faux_daemon() {
     sleep 0.1
   done
   [ -e "$BAC/faux/pret" ]
-  prouver "$nom" "$FAUX"
+  prouver_sous membre "$nom" "$FAUX"
   kill "$pid"
   wait "$pid" 2> /dev/null || true
   REQUETES=0
@@ -576,6 +626,37 @@ interieur() {
     and .observed_counts.llmnr_links == 0 and .observed_counts.resolv_conf_mode == "stub"
     and .observed_counts.local_resolver_listeners == null' "$BAC/d1-pose-a.json" > /dev/null
 
+  echo "== membre du seul groupe du daemon: declaration refusee, etat ouvert =="
+  # Admis par le seul groupe du daemon, U_MEMBRE n'a sur le canal que status,
+  # connect-stored et disconnect. La declaration lui est refusee alors que le
+  # plan est pose, avant toute lecture du systeme, et le journal du daemon nomme
+  # la commande refusee: jamais une correspondance pour lui. L'etat lui reste
+  # ouvert: la regle lui retire la declaration, pas le canal.
+  local refus_avant
+  refus_avant=$(grep -cF "$REFUS_DNS" "$BAC/d1.log" || true)
+  prouver_sous membre d1-membre "$s1"
+  if [ "$CODE" != 2 ] || ! jq -e '.verdict == "UNMEASURED" and .reason == "le daemon a refuse la demande"
+    and .failed_input == "daemon-declaration" and .expected_source == "daemon-declared-active-dns-plan"
+    and (.live_system | not) and (.collection_verified | not) and .backend == null and .source == null
+    and .expected_counts == null and .observed_counts == null and .differences == []' \
+    "$BAC/d1-membre.json" > /dev/null; then
+    echo "d1-membre: attendu UNMEASURED (le daemon a refuse la demande), rendu code $CODE" >&2
+    cat "$BAC/d1-membre.json" >&2
+    exit 1
+  fi
+  if [ "$(grep -cF "$REFUS_DNS" "$BAC/d1.log")" != "$((refus_avant + 1))" ]; then
+    echo "d1-membre: le journal du daemon ne nomme pas une fois la declaration refusee" >&2
+    exit 1
+  fi
+  env -i PATH="$CHEMIN_PATH" setpriv --reuid="$U_MEMBRE" --regid="$U_MEMBRE" --clear-groups \
+    "$CLI" --json --socket "$s1" status | jq -e '.state.state == "connected" and .kill_switch_engaged' > /dev/null
+  declaration "$s1" "$BAC/d1-membre-declaration.json"
+  if ! cmp -s "$BAC/d1-a.json" "$BAC/d1-membre-declaration.json"; then
+    echo "d1-membre: le daemon a change sa declaration pendant le cas" >&2
+    exit 1
+  fi
+  passe "d1-membre -> UNMEASURED (le daemon a refuse la demande), refus nomme au journal du daemon, systeme jamais lu, status obtenu"
+
   echo "== qui sert la declaration: identite du serveur, schema de la reponse =="
   cp "$BAC/d1-a.json" "$BAC/faux/exacte.json"
   jq -c '.schema_version = 2' "$BAC/d1-a.json" > "$BAC/faux/version.json"
@@ -585,7 +666,7 @@ interieur() {
   attendre faux-exacte 0 MATCH '[]'
   [ "$REQUETES" = 2 ] || { echo "faux-exacte: $REQUETES requetes, attendu 2" >&2; exit 1; }
   passe "faux-exacte -> le rejeu exact sous root est admis, N1 et N2 lus (limite de la regle d'identite)"
-  faux_daemon faux-non-root "$BAC/faux/exacte.json" setpriv --reuid="$U_PREUVE" --regid="$U_PREUVE" --clear-groups
+  faux_daemon faux-non-root "$BAC/faux/exacte.json" setpriv --reuid="$U_MEMBRE" --regid="$U_MEMBRE" --clear-groups
   if [ "$CODE" != 2 ] || [ "$REQUETES" != 0 ] || ! jq -e '.verdict == "UNMEASURED"
     and .reason == "serveur de la declaration non privilegie" and .failed_input == "daemon-identity"
     and .daemon_identity == null and (.live_system | not) and .backend == null' "$BAC/faux-non-root.json" > /dev/null; then
@@ -813,7 +894,7 @@ ecrire_outils() {
     "$DAEMON" "$LOCAL" "$REPONSE" > "$FAUX_DNSCRYPT"
   chmod 755 "$FAUX_DNSCRYPT"
   mkdir -m 755 "$BAC/faux"
-  chown "$U_PREUVE:$GROUPE" "$BAC/faux"
+  chown "$U_MEMBRE:$GROUPE" "$BAC/faux"
   FAUX="$BAC/faux/d.sock"
 }
 
@@ -935,8 +1016,8 @@ exterieur() {
   install -m 755 "$bin/bifrost-daemon" "$DAEMON"
   install -m 755 "$bin/bifrost-cli" "$CLI"
   cp "$0" "$BAC/banc.sh"
-  GROUPE=$(getent group "$U_PREUVE" | cut -d: -f1)
-  [ -n "$GROUPE" ] || { echo "aucun groupe $U_PREUVE sur cette machine" >&2; exit 2; }
+  GROUPE=$(getent group "$U_MEMBRE" | cut -d: -f1)
+  [ -n "$GROUPE" ] || { echo "aucun groupe $U_MEMBRE sur cette machine" >&2; exit 2; }
   ecrire_outils
   if [ -d /sys/module/wireguard ]; then
     temoin "module wireguard deja charge au lancement du banc"

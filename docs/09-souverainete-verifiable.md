@@ -1011,7 +1011,12 @@ La declaration est lue par le lecteur commun de `prove nft`, `prove wfp` et
 `prove routes` (identite du serveur exigee avant le premier octet, N1,
 collecte encadree, N2; deux declarations differentes rendent UNMEASURED),
 avec la limite de ce lecteur ecrite en D1b: sous Linux le serveur est un
-processus root, rien n'etablit que c'est le daemon. Elle est analysee
+processus root, rien n'etablit que c'est le daemon. Comme celles du
+pare-feu et du routage, la declaration DNS est reservee aux appelants qui
+ont tout le canal, sous Linux root, admis par son uid: un membre du groupe
+`--group`, qui n'y a que `status`, `connect-stored` et `disconnect`, recoit
+un refus qui nomme la commande, et la preuve rend UNMEASURED (`le daemon a
+refuse la demande`) sans lire le systeme. La declaration lue est analysee
 strictement (cles exactes au niveau superieur et dans le plan, doublons,
 entiers, version, coherence de l'etat, du numero et du plan, adresses sous
 leur forme canonique), puis jugee avec les regles de l'intention v1
@@ -1044,21 +1049,28 @@ un daemon root qui monte un vrai tunnel WireGuard et arme son kill switch,
 comme `e2e-linux.sh`): le cadre du banc ci-dessus (systemd-resolved 255 reel,
 bus D-Bus prive, namespace de montage prive, namespaces reseau jetables, ni
 le resolveur ni le bus de l'hote), et le daemon reel lance a cote, /etc et
-/var/lib superposes. Un premier daemon, dont le gestionnaire en service est
-systemd-resolved, et un second, lance la ou le stub de resolved n'existe pas,
-dont le gestionnaire est resolv.conf: chacun correspond, sans puis avec
-resolveur embarque, et ne declare aucun plan avant la connexion ni apres la
-deconnexion, ce que la preuve dit sans comparer. Les dix categories d'ecart
-sont provoquees sous le daemon, chacune donne son seul ecart, et la
-declaration est la meme, a l'octet pres, avant et apres chaque cas. Des
-connexions et deconnexions en boucle pendant les preuves rendent UNMEASURED
-quand la declaration change pendant la collecte, jamais une correspondance ni
-un ecart sur un plan change. Un serveur non root est refuse sans recevoir de
-requete; une declaration hors schema servie par root (autre version, autre
-graphie d'une adresse) est refusee; le rejeu exact d'une declaration sous
-root est admis, ce qui est la limite de la regle d'identite. Le rapport ne
-porte ni adresse, ni interface, ni compte; l'hote est inchange apres chaque
-passage.
+/var/lib superposes. Les preuves face au daemon tournent sous root sans
+aucune capacite, ni heritable ni bornee: admis par son uid, il recoit la
+declaration, et la collecte ne lit que ce que tout compte lit. Un premier
+daemon, dont le gestionnaire en service est systemd-resolved, et un second,
+lance la ou le stub de resolved n'existe pas, dont le gestionnaire est
+resolv.conf: chacun correspond, sans puis avec resolveur embarque, et ne
+declare aucun plan avant la connexion ni apres la deconnexion, ce que la
+preuve dit sans comparer. Les dix categories d'ecart sont provoquees sous le
+daemon, chacune donne son seul ecart, et la declaration est la meme, a
+l'octet pres, avant et apres chaque cas. Un membre du seul groupe du daemon,
+plan pose, recoit le refus de la declaration (`le daemon a refuse la
+demande`), que le journal du daemon nomme, sans que rien du systeme soit lu,
+et l'etat lui reste ouvert. Des connexions et deconnexions en boucle pendant
+les preuves rendent UNMEASURED quand la declaration change pendant la
+collecte, jamais une correspondance ni un ecart sur un plan change. Face a
+de faux serveurs, qui n'appliquent aucune regle du daemon, la preuve tourne
+sous un compte ordinaire: un serveur non root, du meme compte qu'elle, est
+refuse sans recevoir de requete; une declaration hors schema servie par root
+(autre version, autre graphie d'une adresse) est refusee; le rejeu exact
+d'une declaration sous root est admis, ce qui est la limite de la regle
+d'identite. Le rapport ne porte ni adresse, ni interface, ni compte; l'hote
+est inchange apres chaque passage.
 
 D1c reste incomplet. Ne sont pas livres: les resolveurs effectifs sous
 Windows et la provenance.
