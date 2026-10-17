@@ -229,7 +229,9 @@ redeclaree.
 La requete IPC `declaration-pare-feu` est une lecture sans parametre, classee
 non mutante. Elle est reservee aux appelants qui ont tout le canal: sous Linux,
 root, admis par son uid (SO_PEERCRED, socket 0660); sous Windows, SYSTEM et un
-jeton aux Administrateurs actifs. Un membre du groupe d'acces (`--group` sous
+jeton aux Administrateurs actifs (la requete d'un appelant SYSTEM atteint le
+serveur au niveau complet: mesure par recette le 17/10/2026 sur essai-windows,
+sous une tache planifiee ponctuelle sous SYSTEM). Un membre du groupe d'acces (`--group` sous
 Linux, le groupe d'acces du service sous Windows) n'y a que `status`,
 `connect-stored` et `disconnect`: la declaration lui est refusee par une
 reponse qui nomme la commande, et la preuve rend UNMEASURED (`le daemon a
@@ -307,8 +309,11 @@ root correspond). Un socket d'ecoute cree par root puis confie a un autre
 processus garde les identifiants de root. Un pipe de LocalSystem dont la DACL
 laisse d'autres comptes creer des instances peut etre servi par un tiers; celle
 du daemon ne l'accorde qu'a SYSTEM et aux Administrateurs, donc a un processus
-eleve (un compte non eleve y est refuse, mesure; le cas eleve est infere de la
-DACL). Un daemon Windows lance en console attribue son pipe aux Administrateurs
+eleve (un compte non eleve y est refuse, mesure; le cas eleve est mesure le
+17/10/2026 sur essai-windows: un jeton aux Administrateurs actifs qui n'est pas
+SYSTEM ouvre ce pipe en `GENERIC_READ | GENERIC_WRITE` et y cree une instance
+de plus, par l'ACE des Administrateurs, meme les droits implicites du
+proprietaire neutralises). Un daemon Windows lance en console attribue son pipe aux Administrateurs
 (`O:BA`) et n'est pas admis par la preuve.
 
 Les commandes verifient aussi le serveur, livre. `connect` (avec ou sans
@@ -397,7 +402,12 @@ lance en console elevee, kill switch pose, 25 filtres; `status` est admis par
 la regle des commandes, la preuve rend UNMEASURED `daemon-identity` et le
 daemon ne journalise aucune requete de sa part. Non mesure en banc apres la
 fusion: la preuve face au service reel sous LocalSystem, dont le MATCH n'est
-etabli que par recette.
+etabli que par recette. Le proprietaire du pipe sous SYSTEM, lui, est mesure
+le 17/10/2026 sur essai-windows, par une tache planifiee ponctuelle sous
+SYSTEM (session 0) et le binaire des recettes: le pipe lie avec le descripteur
+du daemon et le proprietaire par defaut appartient a LocalSystem, proprietaire
+par defaut du jeton de SYSTEM, et la regle de la preuve l'admet
+(`windows-system-pipe-owner`).
 
 Objets nft nommes, livre. Constat avant, mesure le 30/09/2026 sur le client de
 `eb325b3`, nft 1.0.9, noyau 7.0, en namespace jetable a cote du ruleset que

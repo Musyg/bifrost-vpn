@@ -61,7 +61,8 @@ Du cote du daemon: il admet sous Linux root et les membres du groupe
 `bifrost`; sous Windows SYSTEM, les Administrateurs et, si le service en
 nomme un, les membres de son groupe d'acces. Sur les deux plateformes, un
 membre du groupe n'y a que trois commandes (partie suivante); root, SYSTEM
-et un jeton aux Administrateurs actifs gardent tout le canal. La coquille d'un compte admis
+et un jeton aux Administrateurs actifs gardent tout le canal (pour SYSTEM,
+mesure sur essai-windows, partie suivante). La coquille d'un compte admis
 lui envoie l'etat, `connect-stored` et `disconnect`, et rien d'autre: pour
 ces trois gestes, elle fait ce que fait la CLI du meme compte. Sous Linux,
 ce point est lu dans le code, pas mesure par un lancement reel.
@@ -101,7 +102,13 @@ groupe local, le groupe d'acces que le daemon recoit par `--group <nom>`.
   par la CLI: l'etat, `connect-stored` (le profil que le daemon detient,
   enregistre par un administrateur) et `disconnect`. SYSTEM et un jeton aux
   Administrateurs actifs (une console elevee, le service lui-meme) gardent
-  tout le canal. Le daemon identifie l'appelant de chaque requete sur le
+  tout le canal. Pour SYSTEM, c'est mesure le 17/10/2026 sur essai-windows,
+  par une tache planifiee ponctuelle sous SYSTEM (session 0) et le binaire
+  des recettes: le pipe lie comme en service appartient a LocalSystem, le
+  client l'admet sous la regle des preuves comme sous celle des commandes,
+  et les dix commandes du protocole atteignent le serveur, l'appelant
+  identifie SYSTEM, Administrateurs actifs, au niveau complet. Le daemon
+  identifie l'appelant de chaque requete sur le
   jeton que le pipe lui presente: il emprunte l'identite du client
   (`ImpersonateNamedPipeClient`), ouvre le jeton du fil, rend au fil son
   propre jeton (`RevertToSelf`, sur tous les chemins), puis demande au

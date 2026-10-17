@@ -77,6 +77,14 @@ SKIPPED le_descripteur_ajoute_une_seule_ace_pour_le_groupe: le compte des recett
 SKIPPED le_pipe_lie_porte_l_ace_du_groupe_et_rien_de_plus: le compte des recettes est un compte predefini de la machine, pas un compte cree par un administrateur: la recette miroir ne le mesure pas
 SKIPPED les_quatre_issues_de_la_sonde_tiennent_face_a_un_vrai_coeur: BIFROST_COEURS ne designe aucun repertoire: cette recette veut un vrai sing-box, que le depot ne distribue pas
 SKIPPED miroir_le_compte_du_groupe_echange_sans_pouvoir_ajouter_d_instance: le compte des recettes est un compte predefini de la machine, pas un compte cree par un administrateur: la recette miroir ne le mesure pas
+# La recette SYSTEM (bifrost-ipc, transport.rs) ne mesure que sous un jeton
+# dont l'utilisateur est LocalSystem, et le compte du runner ne l'est pas.
+# AVEU: elle est mesuree hors de la CI, sur essai-windows, par une tache
+# planifiee ponctuelle sous SYSTEM (releve du 2026-10-17). Ne pas retirer
+# cette ligne sur la foi d'un run: elle part le jour ou un job de la CI
+# tournera sous SYSTEM. Sa soeur, la recette de l'ACE des Administrateurs du
+# pipe, mesure sur le runner (Administrateurs actifs) et n'a pas de ligne ici.
+SKIPPED sous_system_le_pipe_du_service_sert_le_client_au_niveau_complet: l'utilisateur du jeton des recettes n'est pas LocalSystem: le pipe du daemon en service et un appelant SYSTEM ne se mesurent pas sous ce jeton
 SKIPPED un_chemin_etroit_est_vu_comme_tel: BIFROST_CHEMIN_ETROIT absent, aucune interface a MTU reduit a viser
 SKIPPED un_rid_predefini_de_la_machine_est_refuse: le compte des recettes est un compte predefini de la machine, pas un compte cree par un administrateur: la recette miroir ne le mesure pas
 SKIPPED une_forme_equivalente_est_jugee_et_rendue_sous_sa_forme_canonique: le compte des recettes est un compte predefini de la machine, pas un compte cree par un administrateur: la recette miroir ne le mesure pas

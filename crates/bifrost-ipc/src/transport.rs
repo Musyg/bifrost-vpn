@@ -1963,6 +1963,21 @@ mod imp {
             membre != 0
         }
 
+        /// L'utilisateur du jeton de ce processus est-il LocalSystem?
+        ///
+        /// Lu dans le jeton (`TokenUser`, par `groupe::sid_du_compte_courant`)
+        /// et compare par le systeme (`IsWellKnownSid`, `WinLocalSystemSid`),
+        /// jamais devine par un nom de compte, traduit selon la langue, ni par
+        /// une variable d'environnement. Un jeton illisible est un rouge, pas
+        /// une abstention.
+        pub(super) fn utilisateur_du_jeton_est_system() -> bool {
+            let sid = crate::groupe::sid_du_compte_courant()
+                .unwrap_or_else(|e| panic!("utilisateur du jeton de ce processus: {e}"));
+            // SAFETY: SID valide rendu par le systeme et copie dans `sid`,
+            // vivant pendant l'appel, qui le lit seulement.
+            unsafe { IsWellKnownSid(sid.as_ptr() as PSID, WinLocalSystemSid) != 0 }
+        }
+
         /// Trois classes de proprietaire, et la decision de chaque exigence.
         /// Les comptes voisins sont nommes: les deux comptes de service (le
         /// resolveur chiffre tourne sous LocalService) et les groupes larges.
@@ -2211,7 +2226,7 @@ mod imp {
         /// proprietaire qu'un objet cree sans `O:` recoit: le lire au jeton et
         /// le relire sur un pipe `ParDefaut` donne deux sources pour une meme
         /// valeur. Aucun SID n'en sort, seulement la classe.
-        fn proprietaire_par_defaut_du_jeton() -> PipeOwner {
+        pub(super) fn proprietaire_par_defaut_du_jeton() -> PipeOwner {
             let mut jeton: HANDLE = std::ptr::null_mut();
             // SAFETY: GetCurrentProcess rend une pseudo-poignee a ne pas
             // fermer; `jeton` recoit, a la reussite, une poignee fermee plus
@@ -2261,7 +2276,10 @@ mod imp {
         /// Le proprietaire du pipe d'un serveur de recette, lu par une poignee
         /// CLIENT (c'est ainsi que `connect_verified` le lit). Un pipe neuf par
         /// appel: une instance ne sert qu'un client.
-        async fn proprietaire_vu_du_client(label: &str, prop: ProprietaireDuPipe) -> PipeOwner {
+        pub(super) async fn proprietaire_vu_du_client(
+            label: &str,
+            prop: ProprietaireDuPipe,
+        ) -> PipeOwner {
             let nom = nom(label);
             let _serveur = IpcServer::bind(&nom, AuthPolicy::default(), None, prop)
                 .await
@@ -2775,10 +2793,15 @@ mod imp {
     /// (`GroupeDAcces::compte_pour_le_miroir`); deux d'entre elles, qui
     /// mesurent l'ouverture du pipe par l'ACE du groupe seule, s'abstiennent
     /// aussi quand les Administrateurs sont actifs dans le jeton, leur ACE
-    /// ouvrant tout. Toute autre issue reste un rouge.
+    /// ouvrant tout. Ce que cette ACE ouvre se mesure a part, sous ce jeton
+    /// justement: `l_ace_des_administrateurs_ouvre_tout_le_pipe_du_daemon`.
+    /// Toute autre issue reste un rouge.
     #[cfg(test)]
     mod tests_groupe_d_acces {
-        use super::tests_identite_serveur::administrateurs_actifs;
+        use super::tests_identite_serveur::{
+            administrateurs_actifs, proprietaire_par_defaut_du_jeton,
+            utilisateur_du_jeton_est_system,
+        };
         use super::*;
         use crate::groupe::RAISON_ADMINISTRATEURS_ACTIFS;
         use crate::protocol::Command;
@@ -2786,6 +2809,7 @@ mod imp {
         use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, GENERIC_ALL};
         use windows_sys::Win32::Security::{
             ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, DACL_SECURITY_INFORMATION, EqualSid, GetAce,
+            WinCreatorOwnerRightsSid,
         };
         use windows_sys::Win32::Storage::FileSystem::{FILE_ALL_ACCESS, FILE_CREATE_PIPE_INSTANCE};
 
@@ -2818,7 +2842,9 @@ mod imp {
         /// l'ACE du groupe seule: leur descripteur porte aussi `(A;;GA;;;BA)`,
         /// et un jeton aux Administrateurs actifs ouvre tout par elle. Seconde
         /// premisse, jugee apres la premiere, abstention nommee si elle
-        /// manque; sur le runner de la CI, c'est la premiere qui parle.
+        /// manque; sur le runner de la CI, c'est la premiere qui parle. Sous
+        /// ce jeton-la, `l_ace_des_administrateurs_ouvre_tout_le_pipe_du_daemon`
+        /// mesure ce que les miroirs n'isolent pas.
         fn groupe_du_compte_sous_un_jeton_ordinaire(recette: &str) -> Option<GroupeDAcces> {
             let groupe = groupe_du_compte(recette)?;
             if administrateurs_actifs() {
@@ -3181,6 +3207,178 @@ mod imp {
                 }
             }
         }
+
+        /// Le nom de la recette de l'ACE des Administrateurs, tel que son
+        /// abstention l'imprime.
+        pub(super) const RECETTE_ACE_DES_ADMINISTRATEURS: &str =
+            "l_ace_des_administrateurs_ouvre_tout_le_pipe_du_daemon";
+
+        /// La raison de son abstention. Nouvelle, et l'inverse de
+        /// `RAISON_ADMINISTRATEURS_ACTIFS`: les deux miroirs s'abstiennent
+        /// quand ce groupe est actif, cette recette quand il ne l'est pas.
+        /// Sans chiffre ni chemin, pour la forme stable des listes
+        /// d'abstentions.
+        pub(super) const RAISON_ADMINISTRATEURS_INACTIFS: &str = "les Administrateurs ne sont \
+            pas actifs dans le jeton des recettes: l'ACE des Administrateurs du pipe du daemon \
+            ne s'applique pas a ce jeton et ne s'y mesure pas";
+
+        /// Le compte que nomme une ACE lue, par le systeme (`IsWellKnownSid`):
+        /// jamais un SID dans un releve.
+        fn compte_de_l_ace(sid: &[u8]) -> &'static str {
+            if est(sid, WinLocalSystemSid) {
+                "SYSTEM"
+            } else if est(sid, WinBuiltinAdministratorsSid) {
+                "Administrateurs"
+            } else if est(sid, WinCreatorOwnerRightsSid) {
+                "OWNER RIGHTS"
+            } else {
+                "autre"
+            }
+        }
+
+        /// Une issue d'acces, pour le releve.
+        fn issue_d_acces<E: std::fmt::Debug>(issue: &std::result::Result<(), E>) -> String {
+            match issue {
+                Ok(()) => "accorde".to_owned(),
+                Err(e) => format!("refuse ({e:?})"),
+            }
+        }
+
+        /// L'ACE `(A;;GA;;;BA)` du pipe du daemon ouvre TOUT a un jeton aux
+        /// Administrateurs actifs: l'ouverture en `GENERIC_READ |
+        /// GENERIC_WRITE`, que le masque du groupe d'acces n'accorde pas, et
+        /// une instance de plus (`FILE_CREATE_PIPE_INSTANCE`), par laquelle ce
+        /// jeton servirait lui-meme les clients suivants sous le proprietaire
+        /// du daemon. C'est la mesure que les deux miroirs du groupe ont
+        /// perdue en s'abstenant sous ce jeton, rendue a une recette a elle.
+        ///
+        /// Le pipe est lie par `bind`, au descripteur du daemon sans groupe et
+        /// au proprietaire par defaut, en deux variantes. Que l'acces vienne
+        /// d'une ACE et non du proprietaire, deux faits le disent: le
+        /// proprietaire d'un pipe `D:P` ne recoit implicitement que
+        /// `READ_CONTROL | WRITE_DAC`, ni lecture, ni ecriture, ni instance;
+        /// et la variante `proprietaire-neutralise` remplace meme ces droits
+        /// implicites par une ACE `OWNER RIGHTS` sans portee
+        /// (`PROPRIETAIRE_NEUTRALISE`). Le proprietaire est relu sur le pipe et
+        /// au jeton, la DACL relue sur le pipe: SYSTEM et les Administrateurs
+        /// a 0x1f01ff, plus l'ACE `OWNER RIGHTS` dans la variante, rien
+        /// d'autre. Hors SYSTEM, l'ACE de SYSTEM ne s'applique pas au jeton,
+        /// et l'acces passe par celle des Administrateurs. Sous SYSTEM, les
+        /// deux s'appliquent et se recouvrent: la mesure ne les separe pas, et
+        /// le releve le dit.
+        ///
+        /// Premisse exacte: `administrateurs_actifs()`; sinon abstention
+        /// nommee, `RAISON_ADMINISTRATEURS_INACTIFS`. Mesure sur le runner de
+        /// la CI (compte predefini eleve) et sur essai-windows; les acces sont
+        /// juges avant la forme du descripteur, pour qu'un acces refuse se
+        /// lise comme tel.
+        #[tokio::test]
+        async fn l_ace_des_administrateurs_ouvre_tout_le_pipe_du_daemon() {
+            if !administrateurs_actifs() {
+                println!(
+                    "SKIPPED {RECETTE_ACE_DES_ADMINISTRATEURS}: {RAISON_ADMINISTRATEURS_INACTIFS}"
+                );
+                return;
+            }
+            let systeme = utilisateur_du_jeton_est_system();
+            let au_jeton = proprietaire_par_defaut_du_jeton();
+            let mut mesures = Vec::new();
+            for variante in ["bind", "proprietaire-neutralise"] {
+                let nom = nom(&format!("ace-ba-{variante}"));
+                let serveur = match variante {
+                    "bind" => IpcServer::bind(
+                        &nom,
+                        AuthPolicy::default(),
+                        None,
+                        ProprietaireDuPipe::ParDefaut,
+                    )
+                    .await
+                    .expect("bind sans groupe"),
+                    _ => IpcServer::bind_avec_descripteur(
+                        Path::new(&nom),
+                        AuthPolicy::default(),
+                        &format!(
+                            "{}{PROPRIETAIRE_NEUTRALISE}",
+                            descripteur_du_pipe(None, ProprietaireDuPipe::ParDefaut)
+                        ),
+                    )
+                    .expect("pipe du daemon sans droits implicites du proprietaire"),
+                };
+                let proprietaire =
+                    pipe_owner(serveur.next.as_raw_handle()).expect("proprietaire du pipe");
+                let aces: Vec<(&'static str, u32)> = dacl(serveur.next.as_raw_handle())
+                    .iter()
+                    .map(|ace| (compte_de_l_ace(&ace.sid), ace.masque))
+                    .collect();
+                // Les droits generiques, demandes en clair; le client du depot
+                // ne les demande pas (`ACCES_DU_CLIENT`).
+                let generique = ClientOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&nom)
+                    .map(|_| ())
+                    .map_err(|e| e.raw_os_error());
+                // Une instance de plus, sous un descripteur grand ouvert.
+                let instance = create_pipe(&nom, "D:P(A;;GA;;;WD)", false)
+                    .map(|_| ())
+                    .map_err(|e| e.to_string());
+                mesures.push((variante, proprietaire, aces, generique, instance));
+            }
+
+            let applicables = if systeme {
+                "SYSTEM et Administrateurs, qui se recouvrent sous SYSTEM"
+            } else {
+                "Administrateurs seulement, SYSTEM n'etant pas l'utilisateur du jeton"
+            };
+            let detail: Vec<String> = mesures
+                .iter()
+                .map(|(variante, proprietaire, aces, generique, instance)| {
+                    let aces: Vec<String> = aces
+                        .iter()
+                        .map(|(compte, masque)| format!("{compte} {masque:#x}"))
+                        .collect();
+                    format!(
+                        "{variante}: proprietaire lu={proprietaire:?}, ACE lues=[{}], \
+                         GENERIC_READ|GENERIC_WRITE {}, instance de plus {}",
+                        aces.join(", "),
+                        issue_d_acces(generique),
+                        issue_d_acces(instance)
+                    )
+                })
+                .collect();
+            println!(
+                "RELEVE {RECETTE_ACE_DES_ADMINISTRATEURS}: utilisateur du jeton \
+                 LocalSystem={systeme}, proprietaire par defaut du jeton={au_jeton:?}; {}; ACE \
+                 du descripteur applicables a ce jeton: {applicables}",
+                detail.join("; ")
+            );
+
+            for (variante, _, _, generique, instance) in &mesures {
+                assert_eq!(
+                    *generique,
+                    Ok(()),
+                    "{variante}: GENERIC_READ|GENERIC_WRITE refuse a un jeton aux \
+                     Administrateurs actifs"
+                );
+                assert_eq!(
+                    *instance,
+                    Ok(()),
+                    "{variante}: instance de plus refusee a un jeton aux Administrateurs actifs"
+                );
+            }
+            for (variante, proprietaire, aces, _, _) in &mesures {
+                let mut attendues: Vec<(&str, u32)> =
+                    vec![("SYSTEM", 0x001F_01FF), ("Administrateurs", 0x001F_01FF)];
+                if *variante == "proprietaire-neutralise" {
+                    attendues.push(("OWNER RIGHTS", 0x8));
+                }
+                assert_eq!(*aces, attendues, "{variante}: DACL relue sur le pipe");
+                assert_eq!(
+                    *proprietaire, au_jeton,
+                    "{variante}: le proprietaire du pipe sans O: n'est pas celui du jeton"
+                );
+            }
+        }
     }
 
     /// L'identification de l'appelant et la decision par requete, par le
@@ -3192,15 +3390,20 @@ mod imp {
     /// la CI), il vaut le niveau complet, et c'est ce qui se mesure aussi.
     #[cfg(test)]
     mod tests_appelant {
-        use super::tests_identite_serveur::administrateurs_actifs;
+        use super::tests_identite_serveur::{
+            administrateurs_actifs, proprietaire_par_defaut_du_jeton, proprietaire_vu_du_client,
+            utilisateur_du_jeton_est_system,
+        };
         use super::*;
         use crate::appelant::tests::une_de_chaque;
         use crate::appelant::{CommandeReservee, EtapeDIdentification};
         use crate::protocol::Command;
         use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
-        use windows_sys::Win32::Security::TOKEN_QUERY;
+        use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TokenSessionId};
         use windows_sys::Win32::Storage::FileSystem::SECURITY_ANONYMOUS;
-        use windows_sys::Win32::System::Threading::{GetCurrentThread, OpenThreadToken};
+        use windows_sys::Win32::System::Threading::{
+            GetCurrentProcess, GetCurrentThread, OpenProcessToken, OpenThreadToken,
+        };
 
         /// `ERROR_CANT_OPEN_ANONYMOUS`: le jeton d'un client anonyme ne
         /// s'ouvre pas.
@@ -3478,6 +3681,256 @@ mod imp {
                 jeton_du_fil(),
                 Err(SANS_JETON),
                 "apres une imitation impossible"
+            );
+        }
+
+        /// Le nom de la recette SYSTEM, tel que son abstention l'imprime et
+        /// que `ci/abstentions-attendues-windows.txt` le porte.
+        const RECETTE_SYSTEME: &str =
+            "sous_system_le_pipe_du_service_sert_le_client_au_niveau_complet";
+
+        /// La raison de son abstention, sans chiffre ni chemin.
+        const RAISON_SANS_SYSTEME: &str = "l'utilisateur du jeton des recettes n'est pas \
+            LocalSystem: le pipe du daemon en service et un appelant SYSTEM ne se mesurent pas \
+            sous ce jeton";
+
+        /// La session du processus, lue dans son jeton (`TokenSessionId`).
+        fn session_du_jeton() -> u32 {
+            let mut jeton: HANDLE = std::ptr::null_mut();
+            // SAFETY: GetCurrentProcess rend une pseudo-poignee a ne pas
+            // fermer; `jeton` recoit, a la reussite, une poignee fermee plus
+            // bas.
+            let ok = unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut jeton) };
+            assert!(
+                ok != 0,
+                "OpenProcessToken: {}",
+                std::io::Error::last_os_error()
+            );
+            let mut session = 0u32;
+            let mut taille = 0u32;
+            // SAFETY: TokenSessionId rend un DWORD, ecrit dans `session`, une
+            // variable locale de la taille passee.
+            let lu = unsafe {
+                GetTokenInformation(
+                    jeton,
+                    TokenSessionId,
+                    (&mut session as *mut u32).cast(),
+                    std::mem::size_of::<u32>() as u32,
+                    &mut taille,
+                )
+            };
+            let erreur = std::io::Error::last_os_error();
+            // SAFETY: la poignee a ete ouverte par OpenProcessToken, fermee ici
+            // une seule fois.
+            unsafe { CloseHandle(jeton) };
+            assert!(lu != 0, "GetTokenInformation(TokenSessionId): {erreur}");
+            session
+        }
+
+        /// Le daemon tel qu'il tourne en service, face a un appelant SYSTEM,
+        /// par le chemin reel des deux cotes.
+        ///
+        /// Premisse exacte: l'utilisateur du jeton de ce processus est
+        /// LocalSystem, lu dans le jeton (`utilisateur_du_jeton_est_system`);
+        /// sinon abstention nommee, `RAISON_SANS_SYSTEME`. Le runner de la CI
+        /// n'est pas SYSTEM: la recette s'y abstient, et se mesure sur
+        /// essai-windows par une tache planifiee ponctuelle sous SYSTEM.
+        ///
+        /// Sous la premisse, le pipe se lie comme le daemon en service:
+        /// `bind`, descripteur du daemon, proprietaire par defaut, sans groupe
+        /// d'acces. Avec groupe, il faudrait un groupe local cree par un
+        /// administrateur: le miroir du groupe prend le compte des recettes,
+        /// et LocalSystem n'est pas un compte cree. Le client passe par
+        /// `IpcClient::connect_verified`, verification du proprietaire
+        /// comprise, sous les deux exigences: `Privileged`, celle des preuves
+        /// (les declarations), et `Elevated`, celle des commandes. Sur chacune
+        /// des deux connexions, les dix commandes du protocole, les sept
+        /// reservees comprises (`check`, les trois declarations), atteignent
+        /// le serveur par `accept` et `Connection::recv`, identifiees SYSTEM
+        /// au niveau complet.
+        ///
+        /// Le RELEVE est imprime avant tout jugement: le proprietaire par
+        /// defaut du jeton, celui du pipe lu cote serveur et cote client, la
+        /// regle retenue par le client sous chaque exigence, la session du
+        /// processus, l'identification et le niveau. Le niveau est juge
+        /// d'abord, sur la connexion des commandes, qu'un pipe des
+        /// Administrateurs n'empecherait pas; le proprietaire et les regles
+        /// ensuite: un pipe du service qui n'appartiendrait pas a LocalSystem
+        /// serait refuse a toute preuve.
+        #[tokio::test]
+        async fn sous_system_le_pipe_du_service_sert_le_client_au_niveau_complet() {
+            if !utilisateur_du_jeton_est_system() {
+                println!("SKIPPED {RECETTE_SYSTEME}: {RAISON_SANS_SYSTEME}");
+                return;
+            }
+            let session = session_du_jeton();
+            let actifs = administrateurs_actifs();
+            let au_jeton = proprietaire_par_defaut_du_jeton();
+            let vu_du_client =
+                proprietaire_vu_du_client("systeme-vu", ProprietaireDuPipe::ParDefaut).await;
+            let nom = nom("systeme");
+            let mut serveur = IpcServer::bind(
+                &nom,
+                AuthPolicy::default(),
+                None,
+                ProprietaireDuPipe::ParDefaut,
+            )
+            .await
+            .expect("bind du pipe du service");
+            let pose = pipe_owner(serveur.next.as_raw_handle()).expect("proprietaire du pipe");
+            let commandes: Vec<&'static str> =
+                une_de_chaque().iter().map(|(c, _)| c.name()).collect();
+
+            let mut jambes = Vec::new();
+            for exigence in [ServerRequirement::Privileged, ServerRequirement::Elevated] {
+                let cote_serveur = async {
+                    let mut connexion = serveur.accept().await?;
+                    let mut recues = Vec::new();
+                    loop {
+                        match connexion.recv().await {
+                            Ok(requete) => {
+                                recues.push((
+                                    requete.command.name(),
+                                    connexion.identification(),
+                                    connexion.niveau(),
+                                ));
+                                connexion.send(&Response::Ok).await?;
+                            }
+                            Err(IpcError::Closed) => break,
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    Ok::<_, IpcError>(recues)
+                };
+                let cote_client = async {
+                    let (mut client, regle) = IpcClient::connect_verified(&nom, exigence).await?;
+                    let mut reponses = Vec::new();
+                    for (commande, _) in une_de_chaque() {
+                        let nom_commande = commande.name();
+                        let reponse = client.request(&Request::new(commande)).await?;
+                        reponses.push((nom_commande, reponse));
+                    }
+                    Ok::<_, IpcError>((regle, reponses))
+                };
+                let (cote_serveur, cote_client) = tokio::join!(cote_serveur, cote_client);
+                jambes.push((exigence, cote_serveur, cote_client));
+            }
+
+            let regles: Vec<String> = jambes
+                .iter()
+                .map(|(exigence, _, cote_client)| match cote_client {
+                    Ok((regle, _)) => format!("{exigence:?}={}", regle.name()),
+                    Err(e) => format!("{exigence:?}=refus ({e})"),
+                })
+                .collect();
+            let identifie: std::collections::BTreeSet<String> = jambes
+                .iter()
+                .flat_map(|(_, cote_serveur, _)| cote_serveur.iter().flatten())
+                .map(|(_, identification, niveau)| format!("{identification:?} {niveau:?}"))
+                .collect();
+            println!(
+                "RELEVE {RECETTE_SYSTEME}: utilisateur du jeton=LocalSystem, session={session}, \
+                 administrateurs actifs={actifs}, proprietaire par defaut du jeton={au_jeton:?}, \
+                 proprietaire lu du pipe cote serveur={pose:?}, cote client={vu_du_client:?}, \
+                 regle cliente: {}, identifie: {identifie:?}",
+                regles.join(", ")
+            );
+
+            // Le niveau, sur la connexion des commandes, puis sur celle des
+            // preuves si elle a ete admise.
+            let attendue = Some(Identification::Lue {
+                systeme: true,
+                administrateurs: actifs,
+            });
+            for (exigence, cote_serveur, cote_client) in jambes.iter().rev() {
+                let Ok((_, reponses)) = cote_client else {
+                    assert_eq!(
+                        *exigence,
+                        ServerRequirement::Privileged,
+                        "le client refuse le pipe du service pour une commande: {cote_client:?}"
+                    );
+                    continue;
+                };
+                for (nom_commande, reponse) in reponses {
+                    assert!(
+                        matches!(reponse, Response::Ok),
+                        "{exigence:?}, {nom_commande}: refusee a SYSTEM: {reponse:?}"
+                    );
+                }
+                let recues = cote_serveur
+                    .as_ref()
+                    .unwrap_or_else(|e| panic!("{exigence:?}: serveur: {e}"));
+                let rendues: Vec<&str> = recues.iter().map(|(nom, _, _)| *nom).collect();
+                assert_eq!(
+                    rendues, commandes,
+                    "{exigence:?}: commandes rendues au serveur"
+                );
+                for (nom_commande, identification, niveau) in recues {
+                    assert_eq!(*identification, attendue, "{exigence:?}, {nom_commande}");
+                    assert_eq!(
+                        *niveau,
+                        NiveauDAppelant::Complet,
+                        "{exigence:?}, {nom_commande}"
+                    );
+                }
+            }
+
+            // Le proprietaire, trois sources pour une valeur, puis les regles.
+            assert_eq!(pose, au_jeton, "proprietaire du pipe et du jeton");
+            assert_eq!(vu_du_client, au_jeton, "proprietaire lu par le client");
+            assert_eq!(
+                pose,
+                PipeOwner::LocalSystem,
+                "le pipe du daemon en service n'appartient pas a LocalSystem: une preuve \
+                 (Privileged) le refuserait"
+            );
+            for (exigence, _, cote_client) in &jambes {
+                assert!(
+                    matches!(cote_client, Ok((ServerRule::WindowsSystemPipeOwner, _))),
+                    "{exigence:?}: {cote_client:?}"
+                );
+            }
+        }
+
+        /// Les deux abstentions nouvelles, sous la forme que la CI compare. La
+        /// recette SYSTEM s'abstient sur le runner, dont le compte n'est pas
+        /// SYSTEM: `ci/abstentions-attendues-windows.txt` porte sa ligne
+        /// exacte, une fois. La recette de l'ACE des Administrateurs mesure
+        /// sur le runner, Administrateurs actifs: la liste ne la nomme pas.
+        /// Les deux raisons n'ont ni chiffre ni chemin, et aucune n'est celle
+        /// d'un miroir; celle de l'ACE dit l'inverse de
+        /// `RAISON_ADMINISTRATEURS_ACTIFS`. La garde lit la liste, pas le
+        /// source: le nom de la recette SYSTEM et sa raison sont ceux que son
+        /// abstention imprime.
+        #[test]
+        fn la_recette_system_avoue_son_abstention_dans_la_liste_windows() {
+            use super::tests_groupe_d_acces::{
+                RAISON_ADMINISTRATEURS_INACTIFS, RECETTE_ACE_DES_ADMINISTRATEURS,
+            };
+            use crate::groupe::{RAISON_ADMINISTRATEURS_ACTIFS, RAISON_COMPTE_PREDEFINI};
+            for raison in [RAISON_SANS_SYSTEME, RAISON_ADMINISTRATEURS_INACTIFS] {
+                assert!(!raison.chars().any(|c| c.is_ascii_digit()), "{raison}");
+                assert!(!raison.contains(['/', '\\']), "{raison}");
+                assert!(raison.is_ascii() && !raison.contains('\n'), "{raison}");
+                assert_ne!(raison, RAISON_ADMINISTRATEURS_ACTIFS);
+                assert_ne!(raison, RAISON_COMPTE_PREDEFINI);
+            }
+            assert_ne!(RAISON_SANS_SYSTEME, RAISON_ADMINISTRATEURS_INACTIFS);
+            let liste = std::fs::read_to_string(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../ci/abstentions-attendues-windows.txt"
+            ))
+            .expect("la liste des abstentions attendues du job Windows");
+            let attendue = format!("SKIPPED {RECETTE_SYSTEME}: {RAISON_SANS_SYSTEME}");
+            assert_eq!(
+                liste.lines().filter(|l| *l == attendue).count(),
+                1,
+                "la liste Windows doit porter la ligne exacte de la recette SYSTEM, une fois"
+            );
+            assert!(
+                !liste.contains(RECETTE_ACE_DES_ADMINISTRATEURS)
+                    && !liste.contains(RAISON_ADMINISTRATEURS_INACTIFS),
+                "la recette de l'ACE des Administrateurs mesure sur le runner"
             );
         }
     }

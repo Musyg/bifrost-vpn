@@ -313,7 +313,9 @@ Elle compare les filtres du fournisseur Bifrost, sa sous-couche, et
 l'arbitrage des filtres tiers au poids effectif que le moteur a rendu a la
 sous-couche de Bifrost. Un acces refuse rend UNMEASURED, jamais une liste vide.
 Avant de lire, le client exige que le pipe appartienne a LocalSystem, celui du
-service (`daemon_identity` vaut alors `windows-system-pipe-owner`); un daemon
+service (`daemon_identity` vaut alors `windows-system-pipe-owner`; un pipe lie
+sous SYSTEM avec le descripteur du daemon appartient bien a LocalSystem, mesure
+le 17/10/2026 sur essai-windows par une tache planifiee ponctuelle); un daemon
 lance en console, dont le pipe est attribue aux Administrateurs (`O:BA`), est admis
 par les commandes mais pas par la preuve, qui rend UNMEASURED avec
 `failed_input=daemon-identity` sans rien lui envoyer. Rien de la declaration ni
