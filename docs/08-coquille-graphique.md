@@ -287,11 +287,14 @@ cette page`), jamais comme un autre.
 
 ## Ce qui n'est pas fait
 
-- Aucun paquet pour la coquille: ni MSI, ni .deb, ni .rpm. Ceux du daemon et
-  de la CLI (README, section Paquets) n'en contiennent rien. `bundle.active`
-  vaut `false` dans `gui/tauri.conf.json`; la coquille se construit depuis
-  les sources (`cargo build --manifest-path gui/Cargo.toml`), et ses icones
-  sont engendrees a la construction, sous `gui/target/`.
+- Les paquets de la coquille (`bifrost-gui`: un .deb, un .rpm et un MSI;
+  README, section Paquets) ne sont pas signes, et aucun depot ne les sert.
+  Ils ne passent pas par l'empaquetage de Tauri (`bundle.active` vaut
+  toujours `false` dans `gui/tauri.conf.json`): `scripts/paquets-gui-linux.sh`
+  et `scripts/paquets-gui-windows.ps1` les assemblent depuis le binaire
+  construit (`cargo build --release --manifest-path gui/Cargo.toml`) et les
+  icones de `bifrost-icone`. Le .deb et le .rpm ne sont fabriques, et le .deb
+  installe, que par la CI.
 - Sous Windows, le bout en bout du groupe d'acces (un membre commande le
   daemon par la coquille et recoit un refus nomme pour toute autre
   commande, un non-membre est refuse, un processus eleve garde tout le
@@ -308,7 +311,15 @@ cette page`), jamais comme un autre.
   (`packaging/install-windows.ps1`, `scripts/service-windows.ps1`,
   `scripts/packaging-windows.ps1`) sont gardes par la lecture de leur
   texte; leur execution n'est pas mesuree.
-- Sous Linux, aucun lancement reel de la fenetre n'est mesure: la coquille y
-  est construite et ses recettes y tournent, dans le job `interface-linux`.
-- Le refus de demarrer elevee est garde par recette dans les deux sens; il
-  n'a pas ete observe sur un lancement reel eleve.
+- Sous Linux, le seul lancement reel de la fenetre est celui du job
+  `paquets-gui-linux`: la coquille installee par son .deb, lancee sous
+  l'utilisateur du runner sur un serveur X virtuel et sans daemon, doit tenir
+  8 secondes sans panique. Aucun membre du groupe `bifrost` n'y commande un
+  daemon installe.
+- Le refus de demarrer elevee est garde par recette dans les deux sens, et
+  rejoue sur la coquille installee: en root par le job `paquets-gui-linux`,
+  en administrateur par le job `paquets-gui-windows` (code 3 et message,
+  observes dans une VM Windows Server 2025 jetable). Le lancement non eleve
+  de la coquille installee n'est mesure sous aucun Windows: le runner et
+  cette VM tournent sous le compte administrateur predefini, dont le jeton
+  n'est pas filtre.

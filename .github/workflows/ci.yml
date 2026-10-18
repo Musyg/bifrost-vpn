@@ -436,6 +436,94 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  # Les paquets de la coquille graphique, sur le meme routage: le .deb et le
+  # .rpm de `bifrost-gui` a chaque push sur `main` et a chaque PR, le MSI
+  # seulement sur un lancement manuel avec la case `windows`; rien sur le run
+  # planifie. Non signes, en artefact du run, retenus 7 jours. Ils posent la
+  # coquille, son entree de menu et ses icones, sans demarrage automatique, et
+  # ne touchent ni au service, ni aux comptes, ni au groupe d'acces.
+  # `audit_planifie.rs` (regles 11 et 12) garde ce routage et ces etapes,
+  # `paquets_linux.rs` et `paquets_windows.rs` ce que les paquets posent.
+  paquets-gui-linux:
+    name: paquets de la coquille (Linux)
+    if: github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.windows)
+    runs-on: ubuntu-24.04
+    # Meme borne que les paquets du daemon; la construction de la coquille et
+    # les paquets apt s'y ajoutent.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Les paquets -dev que lie la coquille (ceux du job de la coquille Linux),
+      # puis l'outillage des paquets: rpm, lintian, fakeroot, dpkg-dev, man-db,
+      # desktop-file-utils (desktop-file-validate) et xvfb (le premier
+      # lancement sur un serveur X virtuel). Non epingles, comme ailleurs.
+      - name: Bibliotheques de la WebView et outillage
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev rpm lintian fakeroot dpkg-dev man-db desktop-file-utils xvfb
+      - name: Compilation de la coquille
+        run: cargo build --release --manifest-path gui/Cargo.toml --locked
+      - name: Compilation de bifrost-icone
+        run: cargo build --release --locked -p bifrost-icone
+      # Sans root: fakeroot suffit.
+      - name: Construction et verification des paquets
+        run: ./scripts/paquets-gui-linux.sh
+      # Installation, premier lancement et retrait reels, sur ce runner jetable
+      # seulement: la variable n'est posee que pour cette commande.
+      - name: Installation, lancement et retrait reels
+        run: sudo BIFROST_RUNNER_JETABLE=1 ./scripts/paquets-gui-linux-installer.sh
+      - name: Depot du .deb et du .rpm de la coquille
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: paquets-gui-linux
+          path: target/paquets-gui/bifrost-gui*
+          if-no-files-found: error
+          retention-days: 7
+
+  paquets-gui-windows:
+    name: paquets de la coquille (Windows)
+    if: github.event_name == 'workflow_dispatch' && inputs.windows
+    runs-on: windows-2025-vs2026
+    # Meme borne que le MSI du daemon, voir plus haut.
+    timeout-minutes: 30
+    concurrency:
+      group: ${{ github.workflow }}-paquets-gui-windows
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # WiX 5.0.2, comme le MSI du daemon; aucune extension.
+      - name: WiX
+        run: dotnet tool install --global wix --version 5.0.2
+      - name: Compilation de la coquille
+        run: cargo build --release --manifest-path gui/Cargo.toml --locked
+      - name: Compilation de bifrost-icone
+        run: cargo build --release --locked -p bifrost-icone
+      # Construction, validation ICE, lecture des tables du MSI, empreinte.
+      - name: Construction et verification du MSI de la coquille
+        run: ./scripts/paquets-gui-windows.ps1
+      # Installation, lancement eleve (refuse) et desinstallation reels, sur ce
+      # runner jetable seulement: la variable n'est posee que pour cette etape.
+      - name: Installation et desinstallation reelles
+        run: ./scripts/paquets-gui-windows-installer.ps1
+        env:
+          BIFROST_RUNNER_JETABLE: '1'
+      - name: Depot du MSI de la coquille et de son empreinte
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: paquets-gui-windows
+          path: target/msi-gui/bifrost-gui-*
+          if-no-files-found: error
+          retention-days: 7
+      # Les journaux de msiexec et le stderr du lancement eleve, verts ou rouges.
+      - name: Journaux de msiexec
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: paquets-gui-windows-journaux
+          path: target/msi-gui/*.log
+          if-no-files-found: ignore
+          retention-days: 7
+
   fuite:
     name: suite de fuite
     if: github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.windows)

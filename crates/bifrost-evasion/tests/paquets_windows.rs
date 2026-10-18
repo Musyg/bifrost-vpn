@@ -36,6 +36,33 @@
 //! 6. Une seule version (`$(var.Version)`), le fabricant `Bifrost`, la page du
 //!    depot.
 //!
+//! # Le MSI de la coquille
+//!
+//! `packaging/msi/bifrost-gui.wxs` n'a pas de script en face: il se compare au
+//! MSI du daemon, a cote duquel il s'installe.
+//!
+//! 7. Un paquet distinct: son nom, son UpgradeCode (le meme ferait prendre
+//!    l'un pour une mise a niveau de l'autre, qui serait retire), ses
+//!    composants; le meme dossier d'installation; le seul `bifrost-gui.exe`.
+//! 8. Ni action personnalisee, ni service, ni `%ProgramData%`, ni demarrage
+//!    automatique (valeur sous `CurrentVersion\Run`, dossier Demarrage),
+//!    ni raccourci sur le Bureau. Un seul raccourci, non annonce, a la racine
+//!    du Menu Demarrer, dans un composant sans fichier dont le KeyPath est une
+//!    valeur HKCU (ICE43, ICE57). La WebView2 exigee a la premiere
+//!    installation seulement. Des identifiants WiX legaux dans les deux
+//!    sources (pas de tiret: WIX0014).
+//!
+//! # L'editeur
+//!
+//! 9. `Bifrost`, dit en trois lieux qui restent d'accord: `bundle.publisher`
+//!    de `gui/tauri.conf.json` (tauri-build l'ecrit dans le CompanyName de
+//!    l'executable; absent, il y ecrit le deuxieme element de l'identifiant,
+//!    `github`), le `Manufacturer` du Package des deux sources WiX, et
+//!    `scripts/paquets-gui-windows.ps1`, qui lit l'editeur dans la
+//!    configuration et l'exige dans l'executable et dans le MSI. Les lignes
+//!    du script qui disent l'editeur ont une forme fermee: une autre fait
+//!    rougir.
+//!
 //! # Ce qu'elle ne fait pas
 //!
 //! Elle ne construit ni n'installe rien (`scripts/paquets-windows.ps1`,
@@ -817,4 +844,522 @@ fn chaque_exigence_mord() {
         e.iter().any(|x| x.contains("BifrostCleanupFirewall")),
         "{e:?}"
     );
+}
+
+// ================================================ le MSI de la coquille
+
+const WXS_GUI: &str = "packaging/msi/bifrost-gui.wxs";
+
+/// Un composant: (Id, Directory, balises de ses enfants, chacune avec ses
+/// attributs).
+type Composant = (String, String, Vec<(String, String)>);
+
+/// Les composants d'un XML, dans l'ordre du texte.
+fn composants(xml: &str) -> Vec<Composant> {
+    let mut sortie = Vec::new();
+    let mut courant: Option<Composant> = None;
+    for (nom, attributs, vide) in balises(xml) {
+        match nom.as_str() {
+            "Component" => {
+                let c = (
+                    attribut(&attributs, "Id").unwrap_or_default(),
+                    attribut(&attributs, "Directory").unwrap_or_default(),
+                    Vec::new(),
+                );
+                if vide {
+                    sortie.push(c);
+                } else {
+                    courant = Some(c);
+                }
+            }
+            "/Component" => {
+                if let Some(c) = courant.take() {
+                    sortie.push(c);
+                }
+            }
+            _ => {
+                if let Some((_, _, enfants)) = courant.as_mut() {
+                    enfants.push((nom, attributs));
+                }
+            }
+        }
+    }
+    sortie
+}
+
+/// Un identifiant WiX: lettres ASCII, chiffres, souligne et point, une lettre
+/// ou un souligne en tete. Le tiret rend WIX0014.
+fn identifiant_wix_legal(id: &str) -> bool {
+    let mut c = id.chars();
+    c.next()
+        .is_some_and(|p| p.is_ascii_alphabetic() || p == '_')
+        && c.all(|x| x.is_ascii_alphanumeric() || x == '_' || x == '.')
+}
+
+fn ecarts_du_msi_de_la_coquille(gui: &str, daemon: &str) -> Vec<String> {
+    let mut ecarts = Vec::new();
+    let xml = sans_commentaires_xml(gui);
+    let xml_daemon = sans_commentaires_xml(daemon);
+    let package = |x: &str| -> String {
+        balises(x)
+            .into_iter()
+            .find(|(n, _, _)| n == "Package")
+            .map(|(_, a, _)| a)
+            .unwrap_or_default()
+    };
+    let (p, pd) = (package(&xml), package(&xml_daemon));
+
+    // 7. Un paquet distinct, dans le meme dossier.
+    for (nom, attendu) in [
+        ("Name", "Bifrost GUI"),
+        ("Manufacturer", "Bifrost"),
+        ("Version", "$(var.Version)"),
+        ("Scope", "perMachine"),
+    ] {
+        if attribut(&p, nom).as_deref() != Some(attendu) {
+            ecarts.push(format!(
+                "Package {nom} de la coquille: {:?} au lieu de {attendu}",
+                attribut(&p, nom)
+            ));
+        }
+    }
+    if attribut(&p, "Name") == attribut(&pd, "Name") {
+        ecarts.push("les deux MSI portent le meme nom".to_string());
+    }
+    let upgrade = attribut(&p, "UpgradeCode").unwrap_or_default();
+    let upgrade_daemon = attribut(&pd, "UpgradeCode").unwrap_or_default();
+    if upgrade.len() != 36 || !upgrade.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-') {
+        ecarts.push(format!("UpgradeCode de la coquille illisible: {upgrade:?}"));
+    }
+    if upgrade.eq_ignore_ascii_case(&upgrade_daemon) {
+        ecarts.push(format!(
+            "le MSI de la coquille reprend l'UpgradeCode du daemon ({upgrade}): chacun retirerait l'autre"
+        ));
+    }
+    if !balises(&xml).iter().any(|(n, _, _)| n == "MajorUpgrade") {
+        ecarts.push("aucun MajorUpgrade dans le MSI de la coquille".to_string());
+    }
+    let dossier = repertoires_du_msi(&xml).get("INSTALLFOLDER").cloned();
+    let dossier_daemon = repertoires_du_msi(&xml_daemon)
+        .get("INSTALLFOLDER")
+        .cloned();
+    if dossier.is_none() || dossier != dossier_daemon {
+        ecarts.push(format!(
+            "dossier d'installation de la coquille {dossier:?}, du daemon {dossier_daemon:?}"
+        ));
+    }
+    let fichiers: Vec<String> = balises(&xml)
+        .into_iter()
+        .filter(|(n, _, _)| n == "File")
+        .filter_map(|(_, a, _)| attribut(&a, "Source"))
+        .collect();
+    if fichiers != ["$(var.Binaires)\\bifrost-gui.exe"] {
+        ecarts.push(format!(
+            "le MSI de la coquille pose {fichiers:?}, pas le seul bifrost-gui.exe"
+        ));
+    }
+    let ids_daemon: Vec<String> = composants(&xml_daemon).into_iter().map(|c| c.0).collect();
+    let comps = composants(&xml);
+    for (id, _, _) in &comps {
+        if ids_daemon.contains(id) {
+            ecarts.push(format!("composant {id} dans les deux MSI"));
+        }
+    }
+
+    // 8. Rien d'autre que le fichier et le raccourci.
+    for (nom, attributs, _) in balises(&xml) {
+        if matches!(
+            nom.as_str(),
+            "CustomAction" | "SetProperty" | "Custom" | "ServiceInstall" | "ServiceControl"
+        ) {
+            ecarts.push(format!("le MSI de la coquille porte un {nom}: {attributs}"));
+        }
+        let id = attribut(&attributs, "Id").unwrap_or_default();
+        if nom == "StandardDirectory"
+            && matches!(
+                id.as_str(),
+                "CommonAppDataFolder" | "StartupFolder" | "DesktopFolder"
+            )
+        {
+            ecarts.push(format!("le MSI de la coquille pose sous {id}"));
+        }
+        if matches!(nom.as_str(), "RegistryValue" | "RegistryKey")
+            && attribut(&attributs, "Key")
+                .unwrap_or_default()
+                .to_ascii_lowercase()
+                .contains("currentversion\\run")
+        {
+            ecarts.push(format!(
+                "le MSI de la coquille ecrit une valeur de demarrage automatique: {attributs}"
+            ));
+        }
+    }
+    let raccourcis: Vec<(&String, &String, &(String, String))> = comps
+        .iter()
+        .flat_map(|(id, rep, enfants)| {
+            enfants
+                .iter()
+                .filter(|(n, _)| n == "Shortcut")
+                .map(move |e| (id, rep, e))
+        })
+        .collect();
+    match raccourcis.as_slice() {
+        [(id, rep, (_, a))] => {
+            let repertoire = attribut(a, "Directory").unwrap_or_else(|| (*rep).clone());
+            if repertoire != "ProgramMenuFolder" {
+                ecarts.push(format!(
+                    "raccourci dans {repertoire}, pas a la racine du Menu Demarrer"
+                ));
+            }
+            if attribut(a, "Advertise").as_deref() != Some("no")
+                || attribut(a, "Target").as_deref() != Some("[INSTALLFOLDER]bifrost-gui.exe")
+            {
+                ecarts.push(format!(
+                    "raccourci annonce ou vers autre chose que bifrost-gui.exe: {a}"
+                ));
+            }
+            let (_, _, enfants) = comps
+                .iter()
+                .find(|(i, _, _)| i == *id)
+                .expect("le composant du raccourci");
+            let fichier = enfants.iter().any(|(n, _)| n == "File");
+            let cle_hkcu = enfants.iter().any(|(n, a)| {
+                n == "RegistryValue"
+                    && attribut(a, "Root").as_deref() == Some("HKCU")
+                    && attribut(a, "KeyPath").as_deref() == Some("yes")
+            });
+            if fichier || !cle_hkcu {
+                ecarts.push(format!(
+                    "le composant {id} du raccourci porte un fichier ou pas de KeyPath HKCU (ICE43, ICE57)"
+                ));
+            }
+        }
+        autre => ecarts.push(format!(
+            "{} raccourci(s) dans le MSI de la coquille, attendu un",
+            autre.len()
+        )),
+    }
+    let condition = balises(&xml)
+        .into_iter()
+        .find(|(n, _, _)| n == "Launch")
+        .and_then(|(_, a, _)| attribut(&a, "Condition"))
+        .unwrap_or_default();
+    if !condition.starts_with("Installed OR ")
+        || !condition.contains("WEBVIEW2HKLM")
+        || !condition.contains("WEBVIEW2HKCU")
+    {
+        ecarts.push(format!("condition de lancement: {condition:?}"));
+    }
+    let depot = lire("Cargo.toml")
+        .lines()
+        .find_map(|l| l.strip_prefix("repository = \""))
+        .map(|v| v.trim_end_matches('"').to_string())
+        .unwrap_or_default();
+    let page = element(&xml, "Property", "ARPURLINFOABOUT").and_then(|a| attribut(&a, "Value"));
+    if depot.is_empty() || page.as_deref() != Some(depot.as_str()) {
+        ecarts.push(format!("ARPURLINFOABOUT {page:?}, depot {depot:?}"));
+    }
+    for (source, x) in [(WXS_GUI, &xml), (WXS, &xml_daemon)] {
+        for (nom, attributs, _) in balises(x) {
+            if let Some(id) = attribut(&attributs, "Id")
+                && !nom.starts_with('/')
+                && !identifiant_wix_legal(&id)
+            {
+                ecarts.push(format!("{source}: identifiant WiX illegal {nom} Id={id:?}"));
+            }
+        }
+    }
+    ecarts
+}
+
+#[test]
+fn le_msi_de_la_coquille_est_distinct_et_ne_pose_que_la_coquille() {
+    let mut ecarts = ecarts_du_msi_de_la_coquille(&lire(WXS_GUI), &lire(WXS));
+    let version = lire("Cargo.toml")
+        .lines()
+        .find_map(|l| l.strip_prefix("version = \""))
+        .map(|v| v.trim_end_matches('"').to_string())
+        .unwrap_or_default();
+    if version.is_empty() || lire(WXS_GUI).contains(&format!("\"{version}\"")) {
+        ecarts.push(format!(
+            "{WXS_GUI} ecrit la version du workspace ({version}) en dur"
+        ));
+    }
+    assert!(
+        ecarts.is_empty(),
+        "{} ecart(s):\n  {}",
+        ecarts.len(),
+        ecarts.join("\n  ")
+    );
+}
+
+/// Chaque exigence du MSI de la coquille mord sur une mutation du texte reel.
+#[test]
+fn chaque_exigence_du_msi_de_la_coquille_mord() {
+    let gui = lire(WXS_GUI);
+    let daemon = lire(WXS);
+    assert!(ecarts_du_msi_de_la_coquille(&gui, &daemon).is_empty());
+    let upgrade_daemon = attribut(
+        &balises(&sans_commentaires_xml(&daemon))
+            .into_iter()
+            .find(|(n, _, _)| n == "Package")
+            .map(|(_, a, _)| a)
+            .unwrap_or_default(),
+        "UpgradeCode",
+    )
+    .expect("UpgradeCode du daemon");
+    let upgrade_gui = attribut(
+        &balises(&sans_commentaires_xml(&gui))
+            .into_iter()
+            .find(|(n, _, _)| n == "Package")
+            .map(|(_, a, _)| a)
+            .unwrap_or_default(),
+        "UpgradeCode",
+    )
+    .expect("UpgradeCode de la coquille");
+    let remplacer = |texte: &str, avant: &str, apres: &str| -> String {
+        assert_eq!(
+            texte.matches(avant).count(),
+            1,
+            "`{avant}` doit etre unique"
+        );
+        texte.replacen(avant, apres, 1)
+    };
+    let mord = |gui: &str, motif: &str| {
+        let e = ecarts_du_msi_de_la_coquille(gui, &daemon);
+        assert!(
+            e.iter().any(|x| x.contains(motif)),
+            "`{motif}` attendu dans {e:?}"
+        );
+    };
+    let raccourci_marqueur = "      <RegistryValue Root=\"HKCU\" Key=\"Software\\Bifrost\\GUI\" Name=\"installed\" Type=\"integer\" Value=\"1\" KeyPath=\"yes\" />\n";
+    let ancre_upgrade = format!("UpgradeCode=\"{upgrade_gui}\"");
+    let mutations: [(&str, String, &str); 9] = [
+        (
+            &ancre_upgrade,
+            format!("UpgradeCode=\"{upgrade_daemon}\""),
+            "reprend l'UpgradeCode du daemon",
+        ),
+        (
+            raccourci_marqueur,
+            format!(
+                "{raccourci_marqueur}      <RegistryValue Root=\"HKLM\" Key=\"Software\\Microsoft\\Windows\\CurrentVersion\\Run\" Name=\"Bifrost\" Type=\"string\" Value=\"[INSTALLFOLDER]bifrost-gui.exe\" />\n"
+            ),
+            "valeur de demarrage automatique",
+        ),
+        (
+            "    <StandardDirectory Id=\"ProgramMenuFolder\" />\n",
+            "    <StandardDirectory Id=\"ProgramMenuFolder\" />\n    <StandardDirectory Id=\"StartupFolder\" />\n".to_string(),
+            "pose sous StartupFolder",
+        ),
+        (
+            "<Directory Id=\"INSTALLFOLDER\" Name=\"Bifrost\" />",
+            "<Directory Id=\"INSTALLFOLDER\" Name=\"Bifrost GUI\" />".to_string(),
+            "dossier d'installation de la coquille",
+        ),
+        (
+            "      <File Id=\"bifrostgui.exe\" Source=\"$(var.Binaires)\\bifrost-gui.exe\" KeyPath=\"yes\" />\n",
+            "      <File Id=\"bifrostgui.exe\" Source=\"$(var.Binaires)\\bifrost-gui.exe\" KeyPath=\"yes\" />\n      <File Id=\"bifrostcli.exe\" Source=\"$(var.Binaires)\\bifrost-cli.exe\" />\n".to_string(),
+            "pas le seul bifrost-gui.exe",
+        ),
+        (
+            raccourci_marqueur,
+            format!(
+                "{raccourci_marqueur}      <File Id=\"bifrostgui2.exe\" Source=\"$(var.Binaires)\\bifrost-gui.exe\" />\n"
+            ),
+            "ICE43, ICE57",
+        ),
+        (
+            "<Component Id=\"GuiExe\"",
+            "<Component Id=\"DaemonExe\"".to_string(),
+            "composant DaemonExe dans les deux MSI",
+        ),
+        (
+            "<Launch Condition=\"Installed OR (",
+            "<Launch Condition=\"(".to_string(),
+            "condition de lancement",
+        ),
+        (
+            "<Icon Id=\"bifrostgui.ico\"",
+            "<Icon Id=\"bifrost-gui.ico\"".to_string(),
+            "identifiant WiX illegal",
+        ),
+    ];
+    for (avant, apres, motif) in &mutations {
+        mord(&remplacer(&gui, avant, apres), motif);
+    }
+    // Une action personnalisee ajoutee.
+    mord(
+        &remplacer(
+            &gui,
+            "    <Feature Id=\"Principal\"",
+            "    <CustomAction Id=\"Lancer\" FileRef=\"bifrostgui.exe\" ExeCommand=\"\" Execute=\"immediate\" Return=\"asyncNoWait\" />\n    <Feature Id=\"Principal\"",
+        ),
+        "porte un CustomAction",
+    );
+    assert!(identifiant_wix_legal("bifrostgui.exe"));
+    assert!(!identifiant_wix_legal("bifrost-gui.exe"));
+}
+
+// ================================================ l'editeur du logiciel
+
+const CONF_TAURI: &str = "gui/tauri.conf.json";
+const CONSTRUCTEUR_MSI_GUI: &str = "scripts/paquets-gui-windows.ps1";
+
+/// L'editeur du logiciel (decision du 18/10/2026): le fabricant des deux MSI
+/// et l'editeur de l'executable de la coquille.
+const EDITEUR: &str = "Bifrost";
+
+/// Les formes du script qui disent l'editeur, a blancs ecrases, chacune
+/// exactement une fois: la lecture dans la configuration, le refus si elle
+/// manque, l'exigence sur l'executable (suivie de son Refus), et l'exigence sur
+/// le MSI.
+const FORMES_EDITEUR: [&str; 4] = [
+    "$Editeur = $conf.bundle.publisher",
+    "if (-not $Editeur) { Refus ",
+    "if ($vi.CompanyName -cne $Editeur) {",
+    "'Manufacturer' = $Editeur",
+];
+
+fn ecarts_de_l_editeur(conf: &str, gui: &str, daemon: &str, constructeur: &str) -> Vec<String> {
+    let mut ecarts = Vec::new();
+    match serde_json::from_str::<serde_json::Value>(conf) {
+        Ok(v) => match v.get("bundle").and_then(|b| b.get("publisher")) {
+            Some(serde_json::Value::String(s)) if s == EDITEUR => {}
+            autre => ecarts.push(format!(
+                "{CONF_TAURI}: bundle.publisher {autre:?}, attendu \"{EDITEUR}\" (absent, \
+                 tauri-build ecrit dans CompanyName le deuxieme element de l'identifiant)"
+            )),
+        },
+        Err(e) => ecarts.push(format!("{CONF_TAURI} illisible: {e}")),
+    }
+    for (nom, xml) in [(WXS_GUI, gui), (WXS, daemon)] {
+        let fabricants: Vec<Option<String>> = balises(&sans_commentaires_xml(xml))
+            .into_iter()
+            .filter(|(n, _, _)| n == "Package")
+            .map(|(_, a, _)| attribut(&a, "Manufacturer"))
+            .collect();
+        if fabricants != [Some(EDITEUR.to_string())] {
+            ecarts.push(format!(
+                "{nom}: Manufacturer du Package {fabricants:?}, attendu [\"{EDITEUR}\"]"
+            ));
+        }
+    }
+    // Grammaire fermee: chaque ligne active qui nomme $Editeur, CompanyName ou
+    // Manufacturer est l'une des formes, ou un message (Ok, Fail, Refus).
+    let lignes: Vec<String> = lignes_ps(constructeur)
+        .iter()
+        .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect();
+    let mut vues = [0usize; 4];
+    for (i, l) in lignes.iter().enumerate() {
+        if !(l.contains("Editeur") || l.contains("CompanyName") || l.contains("Manufacturer")) {
+            continue;
+        }
+        if l == FORMES_EDITEUR[0] {
+            vues[0] += 1;
+        } else if l.starts_with(FORMES_EDITEUR[1]) && l.ends_with('}') {
+            vues[1] += 1;
+        } else if l == FORMES_EDITEUR[2] {
+            vues[2] += 1;
+            if !lignes.get(i + 1).is_some_and(|s| s.starts_with("Refus ")) {
+                ecarts.push(format!(
+                    "{CONSTRUCTEUR_MSI_GUI}: `{l}` sans Refus a la ligne suivante"
+                ));
+            }
+        } else if l == FORMES_EDITEUR[3] {
+            vues[3] += 1;
+        } else if !(l.starts_with("Ok \"") || l.starts_with("Fail \"") || l.starts_with("Refus \""))
+        {
+            ecarts.push(format!(
+                "{CONSTRUCTEUR_MSI_GUI}: ligne non reconnue qui dit l'editeur: `{l}`"
+            ));
+        }
+    }
+    for (n, forme) in vues.iter().zip(FORMES_EDITEUR) {
+        if *n != 1 {
+            ecarts.push(format!(
+                "{CONSTRUCTEUR_MSI_GUI}: `{forme}` {n} fois au lieu d'une"
+            ));
+        }
+    }
+    ecarts
+}
+
+#[test]
+fn l_editeur_a_une_seule_source() {
+    let ecarts = ecarts_de_l_editeur(
+        &lire(CONF_TAURI),
+        &lire(WXS_GUI),
+        &lire(WXS),
+        &lire(CONSTRUCTEUR_MSI_GUI),
+    );
+    assert!(
+        ecarts.is_empty(),
+        "{} ecart(s):\n  {}",
+        ecarts.len(),
+        ecarts.join("\n  ")
+    );
+}
+
+/// Chaque exigence sur l'editeur mord sur une mutation du texte reel.
+#[test]
+fn chaque_exigence_de_l_editeur_mord() {
+    let conf = lire(CONF_TAURI);
+    let gui = lire(WXS_GUI);
+    let daemon = lire(WXS);
+    let script = lire(CONSTRUCTEUR_MSI_GUI);
+    assert!(ecarts_de_l_editeur(&conf, &gui, &daemon, &script).is_empty());
+    let remplacer = |texte: &str, avant: &str, apres: &str| -> String {
+        assert_eq!(
+            texte.matches(avant).count(),
+            1,
+            "`{avant}` doit etre unique"
+        );
+        texte.replacen(avant, apres, 1)
+    };
+    let mord = |e: Vec<String>, motif: &str| {
+        assert!(
+            e.iter().any(|x| x.contains(motif)),
+            "`{motif}` attendu dans {e:?}"
+        );
+    };
+    let publisher = "\"publisher\": \"Bifrost\"";
+    let c = remplacer(&conf, publisher, "\"publisher\": \"Musyg\"");
+    mord(
+        ecarts_de_l_editeur(&c, &gui, &daemon, &script),
+        "bundle.publisher",
+    );
+    let c = remplacer(&conf, &format!("{publisher},"), "");
+    mord(
+        ecarts_de_l_editeur(&c, &gui, &daemon, &script),
+        "bundle.publisher None",
+    );
+    // L'attribut du Package, en fin de ligne (un commentaire du .wxs de la
+    // coquille le cite aussi, suivi d'une virgule).
+    let fabricant = "Manufacturer=\"Bifrost\"\n";
+    let g = remplacer(&gui, fabricant, "Manufacturer=\"Inaricom\"\n");
+    mord(ecarts_de_l_editeur(&conf, &g, &daemon, &script), WXS_GUI);
+    let d = remplacer(&daemon, fabricant, "Manufacturer=\"Inaricom\"\n");
+    mord(ecarts_de_l_editeur(&conf, &gui, &d, &script), WXS);
+    for (avant, apres, motif) in [
+        (
+            "$Editeur = $conf.bundle.publisher",
+            "$Editeur = 'Bifrost'",
+            "ligne non reconnue",
+        ),
+        (
+            "if ($vi.CompanyName -cne $Editeur) {",
+            "if ($false) {",
+            "0 fois au lieu d'une",
+        ),
+        (
+            "'Manufacturer'    = $Editeur",
+            "'Manufacturer'    = 'Bifrost'",
+            "ligne non reconnue",
+        ),
+    ] {
+        let s = remplacer(&script, avant, apres);
+        mord(ecarts_de_l_editeur(&conf, &gui, &daemon, &s), motif);
+    }
 }

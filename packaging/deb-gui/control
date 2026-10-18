@@ -1,0 +1,23 @@
+Package: bifrost-gui
+Version: @VERSION@
+Architecture: amd64
+Maintainer: Bifrost <security@inaricom.com>
+Section: net
+Priority: optional
+Depends: @SHLIBS@, @DLOPEN@, hicolor-icon-theme
+Recommends: bifrost
+Homepage: https://github.com/Musyg/bifrost-vpn
+Description: Coquille graphique de Bifrost, sans privilege
+ Bifrost est un VPN auto-heberge. Ce paquet installe sa coquille graphique:
+ une fenetre et une icone de zone de notification qui montrent l'etat du
+ tunnel et du kill switch, connectent au profil que le daemon detient et
+ deconnectent. Elle refuse de demarrer en root et ne parle au daemon que par
+ son socket, dont elle verifie qu'il est tenu par root avant d'y ecrire.
+ .
+ Le groupe bifrost, que cree le paquet bifrost, n'a que trois commandes du
+ canal du daemon: l'etat, connect-stored et disconnect, ce que la coquille
+ offre. root garde tout le canal. Le daemon est recommande, pas exige: sans
+ lui, la coquille dit qu'il est injoignable.
+ .
+ Pas de demarrage automatique: le paquet pose une entree de menu, aucune
+ entree de demarrage de session.

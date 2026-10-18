@@ -1,0 +1,24 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: bifrost
+Upstream-Contact: Bifrost <security@inaricom.com>
+Source: https://github.com/Musyg/bifrost-vpn
+Comment: Le binaire bifrost-gui est compile depuis le repertoire gui/ du depot,
+ un espace de travail a part, et lie statiquement aux bibliotheques Rust que
+ nomme gui/Cargo.lock, chacune sous sa propre licence. gui/deny.toml n'y admet
+ que des licences permissives (MPL-2.0, Apache-2.0, MIT, BSD-3-Clause, ISC,
+ Unicode-3.0, Zlib), ni GPL ni LGPL; cargo deny le verifie dans le job des
+ dependances de la CI. WebKitGTK, GTK et la bibliotheque de la zone de
+ notification sont des bibliotheques du systeme, fournies par leurs propres
+ paquets: celui-ci n'en contient aucune.
+
+Files: *
+Copyright: 2026 Bifrost contributors
+License: MPL-2.0
+
+License: MPL-2.0
+ This Source Code Form is subject to the terms of the Mozilla Public License,
+ v. 2.0. If a copy of the MPL was not distributed with this file, You can
+ obtain one at https://mozilla.org/MPL/2.0/.
+ .
+ On Debian systems, the complete text of the Mozilla Public License version 2.0
+ can be found in /usr/share/common-licenses/MPL-2.0.

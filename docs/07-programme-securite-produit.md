@@ -526,12 +526,13 @@ pose les politiques.
   pas, avec ou sans elles. Aucune chute sur une poignee invalide n'a ete provoquee.
 
 **2.5 Paquets (18/10/2026)** - Le daemon et la CLI ont un `.deb`, un `.rpm` et un MSI (WiX 5.0.2),
-fabriques par la CI et retenus 7 jours comme artefacts des runs: aucun depot ne les sert, aucune
-release ne les porte, et le MSI n'est construit que sur un lancement manuel `windows`. Ils ne sont
-**pas signes**: ni signature Authenticode du MSI ou de ses binaires, ni signature GPG des paquets
+et la coquille graphique les siens, a part (`bifrost-gui`, MSI `Bifrost GUI`), tous fabriques par
+la CI et retenus 7 jours comme artefacts des runs: aucun depot ne les sert, aucune release ne les
+porte, et les MSI ne sont construits que sur un lancement manuel `windows`. Ils ne sont **pas
+signes**: ni signature Authenticode des MSI ou de leurs binaires, ni signature GPG des paquets
 Linux. Leur origine se reduit donc a celle du run qui les a construits (depot, revision, journal du
-job); l'empreinte SHA-256 publiee a cote du MSI ne prouve que l'integrite du telechargement depuis
-ce run, pas son auteur.
+job); l'empreinte SHA-256 publiee a cote de chaque MSI ne prouve que l'integrite du telechargement
+depuis ce run, pas son auteur.
 
 Ce que les paquets executent avec les privileges de l'installation est borne et garde. Sous Linux,
 les scripts du mainteneur appliquent `sysusers.d`, refusent des comptes melanges comme
@@ -548,6 +549,12 @@ par le fichier que le MSI installe. Les recettes `paquets_linux.rs` et `paquets_
 comparent ces appels a ceux des scripts d'installation, et `audit_planifie.rs` borne les jobs (le
 MSI au seul lancement manuel `windows`, `BIFROST_RUNNER_JETABLE` a la seule etape qui installe,
 artefacts a 7 jours).
+
+Les paquets de la coquille n'executent rien avec les privileges de l'installation: ni script du
+mainteneur, ni action personnalisee du MSI, ni entree de demarrage de session. Le MSI de la
+coquille ne pose que son executable, dans le dossier du daemon, et un raccourci du menu, sous un
+code de mise a niveau distinct de celui du daemon; `paquets_linux.rs` et `paquets_windows.rs` le
+gardent, et `audit_planifie.rs` borne leurs jobs comme ceux du daemon.
 
 Limites, lues dans le code:
 - Un retour arriere de l'installation du MSI retire le service, mais laisse le groupe `Bifrost` s'il

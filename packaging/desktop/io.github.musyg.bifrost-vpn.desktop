@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Bifrost
+Comment=Etat du tunnel Bifrost, connexion et deconnexion par le daemon
+Exec=bifrost-gui
+TryExec=bifrost-gui
+Icon=io.github.musyg.bifrost-vpn
+Terminal=false
+Categories=Network;
+Keywords=VPN;WireGuard;

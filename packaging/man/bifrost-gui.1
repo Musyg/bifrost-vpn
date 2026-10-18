@@ -1,0 +1,48 @@
+.\" Manuel de bifrost-gui. Page ecrite a la main, ASCII strict, tirets \-.
+.\" La coquille ne prend aucun argument: la page dit ce qu'elle fait et son
+.\" rapport au daemon, d'apres gui/src/main.rs et crates/bifrost-coquille.
+.TH BIFROST\-GUI 1 "2026-10-18" "Bifrost" "Manuel Bifrost"
+.SH NAME
+bifrost\-gui \- coquille graphique de Bifrost, sans privilege
+.SH SYNOPSIS
+.B bifrost\-gui
+.SH DESCRIPTION
+bifrost\-gui est la coquille graphique de Bifrost. Elle ne prend aucun
+argument. Elle ouvre une fenetre et une icone de zone de notification qui
+montrent l'etat du tunnel et du kill switch, relu toutes les deux secondes,
+et offre deux actions: se connecter au profil que le daemon detient et se
+deconnecter. Elle ne lit jamais de cle ni de profil.
+.PP
+Fermer la fenetre la cache dans la zone de notification; seule l'entree
+Quitter du menu met fin au programme.
+.PP
+Elle refuse de demarrer en root: une fenetre qui rend du HTML n'a besoin
+d'aucun privilege. La relancer depuis une session utilisateur ordinaire.
+.PP
+Pas de demarrage automatique: le paquet pose une entree de menu, aucune
+entree de demarrage de session.
+.SH "DAEMON ET GROUPE DE PILOTAGE"
+La coquille parle au daemon (voir
+.BR bifrost\-daemon (1))
+par son socket Unix, /run/bifrost/daemon.sock, et verifie avant d'y ecrire
+qu'il est tenu par root: un autre serveur ne recoit rien, et la coquille le
+dit. Le daemon juge chaque commande. root a tout le canal. Un membre du groupe
+de pilotage bifrost n'a que trois commandes: status, connect\-stored (le
+profil que le daemon detient) et disconnect, ce que la coquille offre. C'est
+l'administrateur qui ajoute un compte au groupe:
+.PP
+.RS
+usermod \-aG bifrost <utilisateur>
+.RE
+.PP
+Quand le daemon est injoignable, la coquille le dit.
+.SH "CODES DE SORTIE"
+.TP
+.B 0
+Arret par l'entree Quitter.
+.TP
+.B 3
+Refus de demarrer: la coquille a ete lancee en root.
+.SH "VOIR AUSSI"
+.BR bifrost\-daemon (1),
+.BR bifrost\-cli (1)

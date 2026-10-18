@@ -142,18 +142,21 @@
 //!     manuel sans la case `windows`; `interface-windows` seulement sur un
 //!     lancement manuel avec elle; aucun des deux sur `schedule`, ce que la
 //!     regle 2 exige deja de tout job autre que `dependances`.
-//! 11. Les deux jobs des paquets suivent la meme politique: `paquets-linux`
-//!     (le .deb et le .rpm) comme `interface-linux`, `paquets-windows` (le
-//!     MSI) comme `interface-windows`. Decision du 17/10/2026: le MSI ne se
-//!     construit que sur un lancement manuel avec la case `windows`.
+//! 11. Les quatre jobs des paquets suivent la meme politique: ceux du .deb et
+//!     du .rpm (`paquets-linux` pour le daemon, `paquets-gui-linux` pour la
+//!     coquille) comme `interface-linux`, ceux du MSI (`paquets-windows`,
+//!     `paquets-gui-windows`) comme `interface-windows`. Decision du
+//!     17/10/2026: un MSI ne se construit que sur un lancement manuel avec la
+//!     case `windows`.
 //! 12. Leurs etapes: chaque commande de `ETAPES_DES_PAQUETS` est, a la
-//!     lettre, le corps entier d'une seule etape, dans cet ordre (WiX 5.0.2
-//!     et son extension util a la meme version, la construction, la
-//!     verification, l'installation reelle). `BIFROST_RUNNER_JETABLE` ne se
-//!     pose que sur l'installation reelle: dans sa commande pour le .deb,
-//!     dans l'`env:` de son etape pour le MSI, jamais au niveau du job ni
-//!     ailleurs. Chaque depot d'artefact (`actions/upload-artifact`) porte
-//!     `retention-days: 7`, et chaque job en a au moins un.
+//!     lettre, le corps entier d'une seule etape de son job, dans cet ordre
+//!     (WiX 5.0.2, et pour le daemon son extension util a la meme version,
+//!     la construction, la verification, l'installation reelle).
+//!     `BIFROST_RUNNER_JETABLE` ne se pose que sur l'installation reelle:
+//!     dans sa commande pour un .deb, dans l'`env:` de son etape pour un MSI,
+//!     jamais au niveau du job ni ailleurs. Chaque depot d'artefact
+//!     (`actions/upload-artifact`) porte `retention-days: 7`, et chaque job en
+//!     a au moins un.
 //!
 //! # La grammaire qu'elle lit
 //!
@@ -374,9 +377,11 @@ const SECTION_DE_LA_COQUILLE: SectionFigee = SectionFigee {
 const JOB_COQUILLE_LINUX: &str = "interface-linux";
 const JOB_COQUILLE_WINDOWS: &str = "interface-windows";
 
-/// Les deux jobs des paquets (regles 11 et 12).
+/// Les quatre jobs des paquets (regles 11 et 12): le daemon, puis la coquille.
 const JOB_PAQUETS_LINUX: &str = "paquets-linux";
 const JOB_PAQUETS_WINDOWS: &str = "paquets-windows";
+const JOB_PAQUETS_GUI_LINUX: &str = "paquets-gui-linux";
+const JOB_PAQUETS_GUI_WINDOWS: &str = "paquets-gui-windows";
 /// La variable qui autorise une installation reelle, et l'action de depot
 /// des artefacts, epinglee comme dans les autres jobs.
 const JETABLE: &str = "BIFROST_RUNNER_JETABLE";
@@ -2622,12 +2627,15 @@ fn les_jobs_de_la_coquille_suivent_la_politique_de_lancement() {
     );
 }
 
-/// Les commandes de chaque job des paquets (regle 12): chacune est, a la
-/// lettre, le corps entier du `run:` d'une seule etape, et elles viennent
-/// dans cet ordre. D'autres etapes peuvent s'intercaler.
-const ETAPES_DES_PAQUETS: [(&str, &[&str]); 2] = [
+/// Les commandes de chaque job des paquets (regle 12), et le systeme de son
+/// runner: `true` pour un job Linux (un .deb et un .rpm), `false` pour un job
+/// Windows (un MSI). Chaque commande est, a la lettre, le corps entier du
+/// `run:` d'une seule etape, et elles viennent dans cet ordre. D'autres etapes
+/// peuvent s'intercaler.
+const ETAPES_DES_PAQUETS: [(&str, bool, &[&str]); 4] = [
     (
         JOB_PAQUETS_LINUX,
+        true,
         &[
             "cargo build --release --locked -p bifrost-daemon -p bifrost-cli",
             "./scripts/paquets-linux.sh",
@@ -2636,6 +2644,7 @@ const ETAPES_DES_PAQUETS: [(&str, &[&str]); 2] = [
     ),
     (
         JOB_PAQUETS_WINDOWS,
+        false,
         &[
             "dotnet tool install --global wix --version 5.0.2",
             "wix extension add -g WixToolset.Util.wixext/5.0.2",
@@ -2644,11 +2653,32 @@ const ETAPES_DES_PAQUETS: [(&str, &[&str]); 2] = [
             "./scripts/paquets-windows-installer.ps1",
         ],
     ),
+    (
+        JOB_PAQUETS_GUI_LINUX,
+        true,
+        &[
+            "cargo build --release --manifest-path gui/Cargo.toml --locked",
+            "cargo build --release --locked -p bifrost-icone",
+            "./scripts/paquets-gui-linux.sh",
+            "sudo BIFROST_RUNNER_JETABLE=1 ./scripts/paquets-gui-linux-installer.sh",
+        ],
+    ),
+    (
+        JOB_PAQUETS_GUI_WINDOWS,
+        false,
+        &[
+            "dotnet tool install --global wix --version 5.0.2",
+            "cargo build --release --manifest-path gui/Cargo.toml --locked",
+            "cargo build --release --locked -p bifrost-icone",
+            "./scripts/paquets-gui-windows.ps1",
+            "./scripts/paquets-gui-windows-installer.ps1",
+        ],
+    ),
 ];
 
-/// Regles 11 et 12, sur le texte d'un workflow: ou tournent les deux jobs des
-/// paquets, et ce que leurs etapes font. `Err`: un workflow que la grammaire
-/// refuse.
+/// Regles 11 et 12, sur le texte d'un workflow: ou tournent les quatre jobs
+/// des paquets, et ce que leurs etapes font. `Err`: un workflow que la
+/// grammaire refuse.
 fn defauts_des_jobs_de_paquets(texte_du_workflow: &str) -> Result<Vec<String>, String> {
     let wf = lire_workflow(texte_du_workflow)?;
     let nom = if wf.nom.is_empty() {
@@ -2658,7 +2688,7 @@ fn defauts_des_jobs_de_paquets(texte_du_workflow: &str) -> Result<Vec<String>, S
     };
     let mut defauts = Vec::new();
 
-    // 11. Le routage: le .deb et le .rpm comme la coquille Linux, le MSI
+    // 11. Le routage: les .deb et les .rpm comme la coquille Linux, les MSI
     // seulement sur un lancement manuel `windows`.
     let mut table = Vec::new();
     for s in &SCENARIOS {
@@ -2672,16 +2702,12 @@ fn defauts_des_jobs_de_paquets(texte_du_workflow: &str) -> Result<Vec<String>, S
             .collect();
         table.push((s.nom, ids));
     }
-    for (job, ou) in [
-        (
-            JOB_PAQUETS_LINUX,
-            ["push", "pull_request", "workflow_dispatch windows=false"].as_slice(),
-        ),
-        (
-            JOB_PAQUETS_WINDOWS,
-            ["workflow_dispatch windows=true"].as_slice(),
-        ),
-    ] {
+    for (job, linux, _) in ETAPES_DES_PAQUETS {
+        let ou = if linux {
+            ["push", "pull_request", "workflow_dispatch windows=false"].as_slice()
+        } else {
+            ["workflow_dispatch windows=true"].as_slice()
+        };
         let vus: Vec<&str> = table
             .iter()
             .filter(|(_, jobs)| jobs.iter().any(|j| j == job))
@@ -2698,7 +2724,7 @@ fn defauts_des_jobs_de_paquets(texte_du_workflow: &str) -> Result<Vec<String>, S
     }
 
     // 12. Les etapes.
-    for (id, commandes) in ETAPES_DES_PAQUETS {
+    for (id, linux, commandes) in ETAPES_DES_PAQUETS {
         let Some(job) = wf.jobs.iter().find(|j| j.id == id) else {
             defauts.push(format!("job `{id}` absent du workflow"));
             continue;
@@ -2749,14 +2775,14 @@ fn defauts_des_jobs_de_paquets(texte_du_workflow: &str) -> Result<Vec<String>, S
                 .map(|(_, v)| v)
                 .collect();
             let est_installateur = corps_e == installateur;
-            if corps_e.contains(JETABLE) && !(id == JOB_PAQUETS_LINUX && est_installateur) {
+            if corps_e.contains(JETABLE) && !(linux && est_installateur) {
                 defauts.push(format!(
                     "job `{id}`, etape ligne {}: `{JETABLE}` dans une commande qui n'est pas \
                      l'installation reelle",
                     e.ligne
                 ));
             }
-            let attendu_ici = id == JOB_PAQUETS_WINDOWS && est_installateur;
+            let attendu_ici = !linux && est_installateur;
             match (attendu_ici, dans_env.as_slice()) {
                 (true, [Noeud::Feuille(Scalaire::Texte(v))]) if v == "1" => {}
                 (true, _) => defauts.push(format!(
@@ -2821,7 +2847,7 @@ fn chaque_mutation_des_jobs_de_paquets_rougit() {
     assert!(temoin.is_empty(), "temoin rouge: {temoin:?}");
     let condition_windows = "    if: github.event_name == 'workflow_dispatch' && inputs.windows\n    runs-on: windows-2025-vs2026\n    # Une borne pour un job bloque, pas une duree mesuree sur ce runner.";
     let condition_linux = "    if: github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.windows)\n    runs-on: windows-2025-vs2026\n    # Une borne pour un job bloque, pas une duree mesuree sur ce runner.";
-    let mutations: [(&str, &str, &str, &str); 7] = [
+    let mutations: [(&str, &str, &str, &str); 14] = [
         (
             "le MSI a chaque PR",
             condition_windows,
@@ -2842,9 +2868,9 @@ fn chaque_mutation_des_jobs_de_paquets_rougit() {
         ),
         (
             "WiX 6",
-            "        run: dotnet tool install --global wix --version 5.0.2\n",
-            "        run: dotnet tool install --global wix --version 6.0.0\n",
-            "aucune etape n'a pour seul corps `dotnet tool install --global wix --version 5.0.2`",
+            "        run: dotnet tool install --global wix --version 5.0.2\n      - name: Extension util de WiX\n",
+            "        run: dotnet tool install --global wix --version 6.0.0\n      - name: Extension util de WiX\n",
+            "job `paquets-windows`: aucune etape n'a pour seul corps `dotnet tool install --global wix --version 5.0.2`",
         ),
         (
             "la variable au niveau du job",
@@ -2863,6 +2889,48 @@ fn chaque_mutation_des_jobs_de_paquets_rougit() {
             "          path: target/paquets/bifrost*\n          if-no-files-found: error\n          retention-days: 7\n",
             "          path: target/paquets/bifrost*\n          if-no-files-found: error\n          retention-days: 30\n",
             "depot d'artefact sans `retention-days: 7`",
+        ),
+        (
+            "le MSI de la coquille a chaque PR",
+            "  paquets-gui-windows:\n    name: paquets de la coquille (Windows)\n    if: github.event_name == 'workflow_dispatch' && inputs.windows\n",
+            "  paquets-gui-windows:\n    name: paquets de la coquille (Windows)\n    if: github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.windows)\n",
+            "le job `paquets-gui-windows` tourne sur [push, pull_request, workflow_dispatch windows=false]",
+        ),
+        (
+            "les paquets Linux de la coquille au run planifie",
+            "  paquets-gui-linux:\n    name: paquets de la coquille (Linux)\n    if: github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.windows)",
+            "  paquets-gui-linux:\n    name: paquets de la coquille (Linux)\n    if: github.event_name != 'workflow_dispatch' || !inputs.windows",
+            "le job `paquets-gui-linux` tourne sur",
+        ),
+        (
+            "la coquille installee sans la variable",
+            "        run: sudo BIFROST_RUNNER_JETABLE=1 ./scripts/paquets-gui-linux-installer.sh\n",
+            "        run: sudo ./scripts/paquets-gui-linux-installer.sh\n",
+            "job `paquets-gui-linux`: aucune etape n'a pour seul corps `sudo BIFROST_RUNNER_JETABLE=1",
+        ),
+        (
+            "la variable sur la construction des paquets de la coquille",
+            "        run: ./scripts/paquets-gui-linux.sh\n",
+            "        run: BIFROST_RUNNER_JETABLE=1 ./scripts/paquets-gui-linux.sh\n",
+            "dans une commande qui n'est pas l'installation reelle",
+        ),
+        (
+            "WiX 6 pour la coquille",
+            "        run: dotnet tool install --global wix --version 5.0.2\n      - name: Compilation de la coquille\n",
+            "        run: dotnet tool install --global wix --version 6.0.0\n      - name: Compilation de la coquille\n",
+            "job `paquets-gui-windows`: aucune etape n'a pour seul corps `dotnet tool install --global wix --version 5.0.2`",
+        ),
+        (
+            "la variable retiree de l'installation de la coquille",
+            "        run: ./scripts/paquets-gui-windows-installer.ps1\n        env:\n          BIFROST_RUNNER_JETABLE: '1'\n",
+            "        run: ./scripts/paquets-gui-windows-installer.ps1\n",
+            "ne porte pas `BIFROST_RUNNER_JETABLE: '1'`",
+        ),
+        (
+            "un artefact de la coquille retenu 30 jours",
+            "          path: target/paquets-gui/bifrost-gui*\n          if-no-files-found: error\n          retention-days: 7\n",
+            "          path: target/paquets-gui/bifrost-gui*\n          if-no-files-found: error\n          retention-days: 30\n",
+            "job `paquets-gui-linux`, etape ligne",
         ),
     ];
     for (quoi, avant, apres, motif) in mutations {

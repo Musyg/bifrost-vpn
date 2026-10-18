@@ -35,6 +35,30 @@
 //!    hors bibliotheques, et la regle des trois commandes du groupe dite par
 //!    les textes des paquets et les pages de manuel.
 //!
+//! # La coquille graphique
+//!
+//! Les paquets de la coquille (`bifrost-gui`: `packaging/deb-gui/`, assemble
+//! par `scripts/paquets-gui-linux.sh`, et `packaging/rpm/bifrost-gui.spec`)
+//! n'ont pas d'installateur en face: le .deb et le .rpm se comparent entre
+//! eux. Ils ne se construisent que sur le runner (WebKitGTK), d'ou ces
+//! exigences lues dans les textes:
+//!
+//! 5. Le .deb et le .rpm posent les memes fichiers aux memes modes depuis les
+//!    memes sources, a leur copyright pres; une icone par cote de
+//!    `COTES_HICOLOR` (lu dans le code de `bifrost-icone`), le .deb depuis ce
+//!    que le binaire ecrit, le .rpm par une liste que `%files` declare a
+//!    l'identique.
+//! 6. L'identifiant de `gui/tauri.conf.json` nomme l'entree de bureau et
+//!    l'icone, et l'ancien identifiant n'est dans aucun fichier du depot.
+//! 7. Pas de demarrage automatique: aucune pose sous un repertoire autostart,
+//!    aucune cle de demarrage dans l'entree de bureau, ni script du mainteneur
+//!    ni scriptlet.
+//! 8. Champs, version, licence et contact a une seule source; la bibliotheque
+//!    chargee par dlopen nommee de la meme facon des deux cotes; les textes
+//!    disent les trois commandes du groupe et l'absence de demarrage
+//!    automatique. Les deux gabarits RPM n'ont ni macro nue dans un
+//!    commentaire (rpm la developpe) ni date de changelog au mauvais jour.
+//!
 //! # Ce qu'elle ne fait pas
 //!
 //! Elle ne construit ni n'installe rien: `scripts/paquets-linux.sh` construit
@@ -838,4 +862,912 @@ fn chaque_exigence_mord() {
         ["nom.prenom@exemple.ch"]
     );
     assert!(courriels("Version: @VERSION@").is_empty());
+}
+
+// ================================================== la coquille graphique
+
+// Seul `decouper` sert ici; les lectures par position servent aux voisines.
+#[allow(dead_code)]
+#[path = "commun/lexeur_rust.rs"]
+mod lexeur_rust;
+
+const CONSTRUCTEUR_GUI: &str = "scripts/paquets-gui-linux.sh";
+const INSTALLATEUR_GUI: &str = "scripts/paquets-gui-linux-installer.sh";
+const SPEC_GUI: &str = "packaging/rpm/bifrost-gui.spec";
+const CONTROL_GUI: &str = "packaging/deb-gui/control";
+const COPYRIGHT_GUI: &str = "packaging/deb-gui/copyright";
+const MAN_GUI: &str = "packaging/man/bifrost-gui.1";
+const BUREAU: &str = "packaging/desktop";
+const CONF_TAURI: &str = "gui/tauri.conf.json";
+const ICONES_SRC: &str = "crates/bifrost-icone/src/lib.rs";
+
+/// L'identifiant de l'application, lu dans `gui/tauri.conf.json`: il nomme
+/// l'entree de bureau et l'icone des paquets.
+fn identifiant() -> String {
+    let conf: serde_json::Value = serde_json::from_str(&lire(CONF_TAURI))
+        .unwrap_or_else(|e| panic!("{CONF_TAURI} illisible: {e}"));
+    conf["identifier"].as_str().unwrap_or_default().to_string()
+}
+
+/// L'identifiant que portaient les fichiers de la coquille avant celui du
+/// depot, en deux morceaux: cette recette ne le contient pas elle-meme.
+fn ancien_identifiant() -> String {
+    ["com", "inaricom"].join(".")
+}
+
+/// Le source sans ses commentaires ni ses litteraux, remplaces par des
+/// espaces (la lecture de `partage_entre_executions.rs`).
+fn code_seul(src: &str) -> Result<String, String> {
+    let d = lexeur_rust::decouper(src)?;
+    let mut o = src.as_bytes().to_vec();
+    for (a, b) in d.neutres {
+        for x in &mut o[a..b] {
+            if *x != b'\n' {
+                *x = b' ';
+            }
+        }
+    }
+    Ok(String::from_utf8_lossy(&o).into_owned())
+}
+
+/// Les cotes de `COTES_HICOLOR`, lues dans le code de `bifrost-icone`.
+fn cotes_hicolor(src: &str) -> Result<Vec<u32>, String> {
+    let code = code_seul(src)?;
+    let debut = code
+        .find("const COTES_HICOLOR")
+        .ok_or("const COTES_HICOLOR introuvable")?;
+    let reste = &code[debut..];
+    let egal = reste.find('=').ok_or("COTES_HICOLOR sans valeur")?;
+    let valeur = &reste[egal..];
+    let ouvrant = valeur.find('[').ok_or("COTES_HICOLOR sans tableau")? + 1;
+    let fermant = valeur
+        .find(']')
+        .ok_or("tableau de COTES_HICOLOR non ferme")?;
+    valeur[ouvrant..fermant]
+        .split(',')
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .map(|c| c.parse::<u32>().map_err(|e| format!("cote {c:?}: {e}")))
+        .collect()
+}
+
+/// Les lignes actives du constructeur de la coquille, variables resolues.
+fn lignes_du_constructeur_gui(texte: &str, id: &str) -> Vec<String> {
+    let lignes = lignes_shell(texte);
+    let vars = affectations(
+        &lignes,
+        &[
+            ("RACINE_DEPOT", "."),
+            ("GUI_BIN", "GUI"),
+            ("BIN", "BIN"),
+            ("SORTIE", "SORTIE"),
+            ("ARBRE", ""),
+            ("ID_APP", id),
+        ],
+    );
+    lignes.iter().map(|l| resoudre(l, &vars)).collect()
+}
+
+fn poses_du_rpm_gui(spec: &str) -> Poses {
+    let lignes: Vec<String> = section(spec, "%install")
+        .iter()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(|l| {
+            l.replace("%{gui_bindir}", "GUI")
+                .replace("%{pkg_source}", "packaging")
+                .replace("%{icones_source}", "ICONES")
+                .replace("%{buildroot}", "")
+        })
+        .collect();
+    poses(&lignes)
+}
+
+/// Les poses d'icones du .deb: (mode, destination) de chaque ligne `install`
+/// vers `/usr/share/icons/`, la destination telle qu'ecrite (le cote vient de
+/// la boucle sur ce que bifrost-icone a ecrit, il reste `${cote}`).
+fn poses_d_icones_du_deb(lignes: &[String]) -> Vec<(String, String)> {
+    lignes
+        .iter()
+        .filter_map(|l| {
+            let mots: Vec<&str> = l.split_whitespace().collect();
+            if mots.first() != Some(&"install") {
+                return None;
+            }
+            let destination = mots.last()?;
+            if !destination.starts_with("/usr/share/icons/") {
+                return None;
+            }
+            let mode = mots
+                .iter()
+                .position(|m| *m == "-m")
+                .and_then(|i| mots.get(i + 1))
+                .copied()
+                .unwrap_or("");
+            Some((mode.to_string(), (*destination).to_string()))
+        })
+        .collect()
+}
+
+fn ecarts_des_poses_gui(constructeur: &str, spec: &str, id: &str, cotes: &[u32]) -> Vec<String> {
+    let mut ecarts = Vec::new();
+    let lignes = lignes_du_constructeur_gui(constructeur, id);
+    let deb: Poses = poses(&lignes)
+        .into_iter()
+        .filter(|(d, _)| !d.starts_with("/DEBIAN/"))
+        .collect();
+    let rpm = poses_du_rpm_gui(spec);
+    if cotes.is_empty() {
+        ecarts.push("COTES_HICOLOR lu vide: la lecture est cassee".to_string());
+    }
+
+    // Hors icones et copyright: les memes poses des deux cotes.
+    let commun = |p: &Poses| -> Poses {
+        p.iter()
+            .filter(|(d, _)| {
+                !d.starts_with("/usr/share/icons/") && !d.ends_with("/bifrost-gui/copyright")
+            })
+            .map(|(d, v)| (d.clone(), v.clone()))
+            .collect()
+    };
+    if commun(&deb) != commun(&rpm) {
+        ecarts.push(format!(
+            "le .deb et le .rpm de la coquille ne posent pas les memes fichiers aux memes modes:\n    deb {:?}\n    rpm {:?}",
+            commun(&deb),
+            commun(&rpm)
+        ));
+    }
+
+    // Ce que chacun pose, et d'ou.
+    let bureau = format!("/usr/share/applications/{id}.desktop");
+    let bureau_src = format!("packaging/desktop/{id}.desktop");
+    let attendus: [(&str, &str, &str); 3] = [
+        ("/usr/bin/bifrost-gui", "0755", "GUI/bifrost-gui"),
+        (&bureau, "0644", &bureau_src),
+        (
+            "/usr/share/man/man1/bifrost-gui.1",
+            "0644",
+            "packaging/man/bifrost-gui.1",
+        ),
+    ];
+    for (nom, p, copyright) in [
+        ("le .deb", &deb, "/usr/share/doc/bifrost-gui/copyright"),
+        ("le .rpm", &rpm, "/usr/share/licenses/bifrost-gui/copyright"),
+    ] {
+        for (destination, mode, source) in
+            attendus
+                .iter()
+                .copied()
+                .chain([(copyright, "0644", COPYRIGHT_GUI)])
+        {
+            match p.get(destination) {
+                Some((m, s)) if m == mode && s == source => {}
+                Some((m, s)) => ecarts.push(format!(
+                    "{nom} de la coquille pose {destination} en {m} depuis {s}, attendu {mode} depuis {source}"
+                )),
+                None => ecarts.push(format!(
+                    "{nom} de la coquille ne pose pas {destination}"
+                )),
+            }
+        }
+    }
+
+    // Les icones: le .rpm une par cote de COTES_HICOLOR, le .deb par sa boucle.
+    let icones_rpm: Poses = rpm
+        .iter()
+        .filter(|(d, _)| d.starts_with("/usr/share/icons/"))
+        .map(|(d, v)| (d.clone(), v.clone()))
+        .collect();
+    let icones_attendues: Poses = cotes
+        .iter()
+        .map(|c| {
+            (
+                format!("/usr/share/icons/hicolor/{c}x{c}/apps/{id}.png"),
+                ("0644".to_string(), format!("ICONES/bifrost-{c}.png")),
+            )
+        })
+        .collect();
+    if icones_rpm != icones_attendues {
+        ecarts.push(format!(
+            "le .rpm de la coquille pose les icones {:?}, COTES_HICOLOR {cotes:?} en demande {:?}",
+            icones_rpm.keys().collect::<Vec<_>>(),
+            icones_attendues.keys().collect::<Vec<_>>()
+        ));
+    }
+    let gabarit = format!("/usr/share/icons/hicolor/${{cote}}x${{cote}}/apps/{id}.png");
+    let icones_deb = poses_d_icones_du_deb(&lignes);
+    if icones_deb != [("0644".to_string(), gabarit.clone())] {
+        ecarts.push(format!(
+            "le .deb de la coquille pose ses icones par {icones_deb:?}, attendu une pose 0644 vers {gabarit}"
+        ));
+    }
+
+    // %files declare exactement ce que %install pose (la page recomprimee).
+    let installes: std::collections::BTreeSet<String> = rpm
+        .keys()
+        .map(|d| {
+            if d.starts_with("/usr/share/man/") {
+                format!("{d}.gz")
+            } else {
+                d.clone()
+            }
+        })
+        .collect();
+    let declares: std::collections::BTreeSet<String> = section(spec, "%files")
+        .iter()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(|l| l.trim_start_matches("%license").trim().to_string())
+        .collect();
+    if installes != declares {
+        ecarts.push(format!(
+            "%files du spec de la coquille ne declare pas ce que %install pose:\n    pose {installes:?}\n    declare {declares:?}"
+        ));
+    }
+    ecarts
+}
+
+#[test]
+fn les_paquets_de_la_coquille_posent_les_memes_fichiers() {
+    let cotes =
+        cotes_hicolor(&lire(ICONES_SRC)).unwrap_or_else(|e| panic!("{ICONES_SRC} illisible: {e}"));
+    let ecarts = ecarts_des_poses_gui(
+        &lire(CONSTRUCTEUR_GUI),
+        &lire(SPEC_GUI),
+        &identifiant(),
+        &cotes,
+    );
+    assert!(
+        ecarts.is_empty(),
+        "{} ecart(s):\n  {}",
+        ecarts.len(),
+        ecarts.join("\n  ")
+    );
+}
+
+/// Ce que dit l'entree de bureau, et les fichiers du repertoire qui la porte.
+fn ecarts_de_l_entree_de_bureau(desktop: &str, fichiers: &[String], id: &str) -> Vec<String> {
+    let mut ecarts = Vec::new();
+    let attendu = format!("{id}.desktop");
+    if fichiers != [attendu.clone()] {
+        ecarts.push(format!(
+            "{BUREAU} porte {fichiers:?}, attendu la seule entree {attendu}"
+        ));
+    }
+    for (cle, valeur) in [
+        ("Type", "Application"),
+        ("Exec", "bifrost-gui"),
+        ("TryExec", "bifrost-gui"),
+        ("Icon", id),
+        ("Terminal", "false"),
+    ] {
+        let lues: Vec<&str> = desktop
+            .lines()
+            .filter_map(|l| l.strip_prefix(cle)?.strip_prefix('='))
+            .collect();
+        if lues != [valeur] {
+            ecarts.push(format!(
+                "entree de bureau: {cle}={lues:?}, attendu {valeur}"
+            ));
+        }
+    }
+    ecarts
+}
+
+/// Les fichiers d'un texte qui portent l'ancien identifiant: (chemin, texte).
+fn porteurs_de_l_ancien_identifiant(fichiers: &[(String, String)]) -> Vec<String> {
+    let ancien = ancien_identifiant();
+    fichiers
+        .iter()
+        .filter(|(_, t)| t.contains(&ancien))
+        .map(|(c, _)| c.clone())
+        .collect()
+}
+
+/// Chaque fichier du depot hors `.git` et des repertoires de compilation:
+/// (chemin relatif, texte).
+fn fichiers_du_depot(dossier: &std::path::Path, trouves: &mut Vec<(String, String)>) {
+    let Ok(entrees) = std::fs::read_dir(dossier) else {
+        return;
+    };
+    for entree in entrees.flatten() {
+        let chemin = entree.path();
+        let nom = entree.file_name().to_string_lossy().into_owned();
+        if chemin.is_dir() {
+            if ![".git", "target", "node_modules"].contains(&nom.as_str()) {
+                fichiers_du_depot(&chemin, trouves);
+            }
+        } else if let Ok(octets) = std::fs::read(&chemin) {
+            let relatif = chemin
+                .strip_prefix(racine())
+                .unwrap_or(&chemin)
+                .display()
+                .to_string()
+                .replace('\\', "/");
+            trouves.push((relatif, String::from_utf8_lossy(&octets).into_owned()));
+        }
+    }
+}
+
+#[test]
+fn la_coquille_porte_l_identifiant_du_depot_et_lui_seul() {
+    let id = identifiant();
+    let mut fichiers = Vec::new();
+    fichiers_du_depot(&racine(), &mut fichiers);
+    assert!(
+        fichiers.len() > 100,
+        "seuls {} fichier(s) lus: le parcours est casse",
+        fichiers.len()
+    );
+    let mut ecarts: Vec<String> = porteurs_de_l_ancien_identifiant(&fichiers)
+        .into_iter()
+        .map(|c| format!("{c} porte l'ancien identifiant {}", ancien_identifiant()))
+        .collect();
+    if id.is_empty() {
+        ecarts.push(format!("{CONF_TAURI}: identifier illisible"));
+    }
+    let mut noms: Vec<String> = std::fs::read_dir(racine().join(BUREAU))
+        .unwrap_or_else(|e| panic!("{BUREAU} illisible: {e}"))
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    noms.sort();
+    let desktop = noms
+        .first()
+        .map(|n| lire(&format!("{BUREAU}/{n}")))
+        .unwrap_or_default();
+    ecarts.extend(ecarts_de_l_entree_de_bureau(&desktop, &noms, &id));
+    assert!(
+        ecarts.is_empty(),
+        "{} ecart(s):\n  {}",
+        ecarts.len(),
+        ecarts.join("\n  ")
+    );
+}
+
+/// Les sections de scriptlet d'un spec.
+const SCRIPTLETS: [&str; 7] = [
+    "%pre",
+    "%post",
+    "%preun",
+    "%postun",
+    "%pretrans",
+    "%posttrans",
+    "%triggerin",
+];
+
+fn ecarts_du_demarrage_gui(
+    constructeur: &str,
+    spec: &str,
+    desktop: &str,
+    fichiers_deb_gui: &[String],
+    id: &str,
+) -> Vec<String> {
+    let mut ecarts = Vec::new();
+    let lignes = lignes_du_constructeur_gui(constructeur, id);
+    for (nom, p) in [
+        ("le .deb", poses(&lignes)),
+        ("le .rpm", poses_du_rpm_gui(spec)),
+    ] {
+        for destination in p.keys() {
+            let hors_de_usr =
+                !destination.starts_with("/usr/") && !destination.starts_with("/DEBIAN/");
+            if hors_de_usr || destination.to_ascii_lowercase().contains("autostart") {
+                ecarts.push(format!(
+                    "{nom} de la coquille pose {destination}: hors de /usr, ou une entree de demarrage de session"
+                ));
+            }
+            if destination.starts_with("/DEBIAN/") {
+                ecarts.push(format!(
+                    "{nom} de la coquille pose un script du mainteneur: {destination}"
+                ));
+            }
+        }
+    }
+    for l in &lignes {
+        if l.contains("xdg/autostart") || l.contains("config/autostart") {
+            ecarts.push(format!(
+                "{CONSTRUCTEUR_GUI} ecrit sous un repertoire autostart: `{l}`"
+            ));
+        }
+    }
+    for l in spec.lines() {
+        if l.split_whitespace()
+            .next()
+            .is_some_and(|m| SCRIPTLETS.contains(&m))
+        {
+            ecarts.push(format!("{SPEC_GUI} porte un scriptlet: `{l}`"));
+        }
+    }
+    for l in desktop.lines() {
+        if l.to_ascii_lowercase().contains("autostart") {
+            ecarts.push(format!("l'entree de bureau porte `{l}`"));
+        }
+    }
+    if fichiers_deb_gui != ["control", "copyright"] {
+        ecarts.push(format!(
+            "packaging/deb-gui porte {fichiers_deb_gui:?}, attendu control et copyright seuls"
+        ));
+    }
+    ecarts
+}
+
+#[test]
+fn aucun_paquet_de_la_coquille_ne_demarre_a_l_ouverture_de_session() {
+    let id = identifiant();
+    let mut fichiers: Vec<String> = std::fs::read_dir(racine().join("packaging/deb-gui"))
+        .expect("packaging/deb-gui doit exister")
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    fichiers.sort();
+    let ecarts = ecarts_du_demarrage_gui(
+        &lire(CONSTRUCTEUR_GUI),
+        &lire(SPEC_GUI),
+        &lire(&format!("{BUREAU}/{id}.desktop")),
+        &fichiers,
+        &id,
+    );
+    assert!(
+        ecarts.is_empty(),
+        "{} ecart(s):\n  {}",
+        ecarts.len(),
+        ecarts.join("\n  ")
+    );
+}
+
+/// Les valeurs d'un champ `Nom:` d'un texte, une par ligne qui le porte.
+fn champ_de(texte: &str, nom: &str) -> Vec<String> {
+    texte
+        .lines()
+        .filter_map(|l| l.strip_prefix(nom))
+        .map(|v| v.trim().to_string())
+        .collect()
+}
+
+/// La valeur `version = "..."` de la section `[section]` d'un Cargo.toml.
+fn version_de_section(cargo: &str, section: &str) -> String {
+    let mut dedans = false;
+    for l in cargo.lines() {
+        let t = l.trim();
+        if t.starts_with('[') {
+            dedans = t == section;
+            continue;
+        }
+        if dedans && let Some(v) = t.strip_prefix("version = \"") {
+            return v.trim_end_matches('"').to_string();
+        }
+    }
+    String::new()
+}
+
+/// Les textes de la coquille que lit [`ecarts_des_champs_gui`].
+struct TextesGui<'a> {
+    control: &'a str,
+    spec: &'a str,
+    copyright: &'a str,
+    man: &'a str,
+    constructeur: &'a str,
+    installateur: &'a str,
+    desktop: &'a str,
+}
+
+fn ecarts_des_champs_gui(t: &TextesGui, id: &str) -> Vec<String> {
+    let mut ecarts = Vec::new();
+    let cargo = lire("Cargo.toml");
+    let workspace = |cle: &str| -> String {
+        cargo
+            .lines()
+            .find_map(|l| l.strip_prefix(&format!("{cle} = \"")))
+            .map(|v| v.trim_end_matches('"').to_string())
+            .unwrap_or_default()
+    };
+    let (version, licence, depot) = (
+        workspace("version"),
+        workspace("license"),
+        workspace("repository"),
+    );
+    let conf: serde_json::Value = serde_json::from_str(&lire(CONF_TAURI)).unwrap_or_default();
+    let version_gui = version_de_section(&lire("gui/Cargo.toml"), "[package]");
+    if version.is_empty()
+        || version_gui != version
+        || conf["version"].as_str() != Some(version.as_str())
+    {
+        ecarts.push(format!(
+            "versions: workspace {version:?}, gui/Cargo.toml {version_gui:?}, {CONF_TAURI} {:?}",
+            conf["version"]
+        ));
+    }
+    let lignes = lignes_du_constructeur_gui(t.constructeur, id);
+    let vars = affectations(&lignes, &[]);
+    let soname = vars.get("DLOPEN_SONAME").cloned().unwrap_or_default();
+    let paquet_dlopen = vars.get("DLOPEN").cloned().unwrap_or_default();
+    if soname.is_empty() || paquet_dlopen.is_empty() {
+        ecarts.push(format!(
+            "{CONSTRUCTEUR_GUI}: DLOPEN_SONAME {soname:?} ou DLOPEN {paquet_dlopen:?} illisible"
+        ));
+    }
+    let requires = format!("{soname}()(64bit)");
+    let attendus: [(&str, &str, &str, &str); 13] = [
+        (CONTROL_GUI, t.control, "Package:", "bifrost-gui"),
+        (CONTROL_GUI, t.control, "Version:", "@VERSION@"),
+        (CONTROL_GUI, t.control, "Maintainer:", CONTACT),
+        (
+            CONTROL_GUI,
+            t.control,
+            "Depends:",
+            "@SHLIBS@, @DLOPEN@, hicolor-icon-theme",
+        ),
+        (CONTROL_GUI, t.control, "Recommends:", "bifrost"),
+        (CONTROL_GUI, t.control, "Homepage:", &depot),
+        (SPEC_GUI, t.spec, "Name:", "bifrost-gui"),
+        (SPEC_GUI, t.spec, "Version:", "@VERSION@"),
+        (SPEC_GUI, t.spec, "Packager:", CONTACT),
+        (SPEC_GUI, t.spec, "License:", &licence),
+        (SPEC_GUI, t.spec, "URL:", &depot),
+        (SPEC_GUI, t.spec, "Recommends:", "bifrost"),
+        (COPYRIGHT_GUI, t.copyright, "Source:", &depot),
+    ];
+    for (fichier, texte, nom, valeur) in attendus {
+        let lues = champ_de(texte, nom);
+        if valeur.is_empty() || lues != [valeur] {
+            ecarts.push(format!("{fichier}: {nom} {lues:?}, attendu {valeur:?}"));
+        }
+    }
+    let requis = champ_de(t.spec, "Requires:");
+    if requis != [requires.as_str(), "hicolor-icon-theme"] {
+        ecarts.push(format!(
+            "{SPEC_GUI}: Requires {requis:?}, attendu le soname que charge le .deb ({requires}) et hicolor-icon-theme"
+        ));
+    }
+    let licences = champ_de(t.copyright, "License:");
+    if licences.is_empty() || licences.iter().any(|l| *l != licence) {
+        ecarts.push(format!(
+            "{COPYRIGHT_GUI}: License {licences:?}, le depot declare {licence}"
+        ));
+    }
+    for (fichier, texte) in [(CONTROL_GUI, t.control), (SPEC_GUI, t.spec)] {
+        if texte.contains(&version) {
+            ecarts.push(format!(
+                "{fichier} ecrit la version du workspace ({version}) en dur"
+            ));
+        }
+    }
+    for (fichier, texte) in [
+        (CONTROL_GUI, t.control),
+        (COPYRIGHT_GUI, t.copyright),
+        (SPEC_GUI, t.spec),
+        (MAN_GUI, t.man),
+        (CONSTRUCTEUR_GUI, t.constructeur),
+        (INSTALLATEUR_GUI, t.installateur),
+        (BUREAU, t.desktop),
+    ] {
+        for c in courriels(texte) {
+            if c != "security@inaricom.com" {
+                ecarts.push(format!("{fichier} porte l'adresse {c}"));
+            }
+        }
+    }
+    let blancs = |t: &str| t.split_whitespace().collect::<Vec<_>>().join(" ");
+    for (fichier, texte) in [
+        (CONTROL_GUI, t.control),
+        (SPEC_GUI, t.spec),
+        (MAN_GUI, t.man),
+    ] {
+        for phrase in ["trois commandes", "Pas de demarrage automatique"] {
+            if !blancs(texte).contains(phrase) {
+                ecarts.push(format!("{fichier} ne dit pas << {phrase} >>"));
+            }
+        }
+    }
+    ecarts
+}
+
+#[test]
+fn champs_version_licence_et_textes_de_la_coquille_ont_une_seule_source() {
+    let id = identifiant();
+    let (control, spec, copyright, man, constructeur, installateur, desktop) = (
+        lire(CONTROL_GUI),
+        lire(SPEC_GUI),
+        lire(COPYRIGHT_GUI),
+        lire(MAN_GUI),
+        lire(CONSTRUCTEUR_GUI),
+        lire(INSTALLATEUR_GUI),
+        lire(&format!("{BUREAU}/{id}.desktop")),
+    );
+    let ecarts = ecarts_des_champs_gui(
+        &TextesGui {
+            control: &control,
+            spec: &spec,
+            copyright: &copyright,
+            man: &man,
+            constructeur: &constructeur,
+            installateur: &installateur,
+            desktop: &desktop,
+        },
+        &id,
+    );
+    assert!(
+        ecarts.is_empty(),
+        "{} ecart(s):\n  {}",
+        ecarts.len(),
+        ecarts.join("\n  ")
+    );
+}
+
+/// Le jour de la semaine d'une date du calendrier gregorien, 0 = dimanche
+/// (methode de Sakamoto).
+fn jour_de_semaine(annee: i32, mois: usize, jour: i32) -> usize {
+    const DECALAGES: [i32; 12] = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
+    let a = if mois < 3 { annee - 1 } else { annee };
+    (a + a / 4 - a / 100 + a / 400 + DECALAGES[mois - 1] + jour).rem_euclid(7) as usize
+}
+
+/// Un gabarit RPM: rpm developpe les macros jusque dans les commentaires (un
+/// `%` s'y ecrit `%%`), et refuse une entree de changelog dont le jour de la
+/// semaine ne tombe pas a sa date.
+fn ecarts_du_gabarit_rpm(nom: &str, spec: &str) -> Vec<String> {
+    const JOURS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const MOIS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let mut ecarts = Vec::new();
+    for (i, l) in spec.lines().enumerate() {
+        if !l.trim_start().starts_with('#') {
+            continue;
+        }
+        let o = l.as_bytes();
+        let mut k = 0usize;
+        while k < o.len() {
+            if o[k] == b'%' {
+                if o.get(k + 1) == Some(&b'%') {
+                    k += 2;
+                    continue;
+                }
+                if o.get(k + 1)
+                    .is_some_and(|c| c.is_ascii_alphabetic() || *c == b'{' || *c == b'(')
+                {
+                    ecarts.push(format!(
+                        "{nom}, ligne {}: macro nue dans un commentaire: `{l}`",
+                        i + 1
+                    ));
+                    break;
+                }
+            }
+            k += 1;
+        }
+    }
+    let mut entrees = 0usize;
+    for l in section(spec, "%changelog") {
+        let Some(reste) = l.strip_prefix("* ") else {
+            continue;
+        };
+        entrees += 1;
+        let mots: Vec<&str> = reste.split_whitespace().take(4).collect();
+        let lue = match mots.as_slice() {
+            [j, m, d, a] => MOIS
+                .iter()
+                .position(|x| x == m)
+                .zip(d.parse::<i32>().ok())
+                .zip(a.parse::<i32>().ok())
+                .map(|((m, d), a)| (*j, JOURS[jour_de_semaine(a, m + 1, d)])),
+            _ => None,
+        };
+        match lue {
+            Some((ecrit, vrai)) if ecrit == vrai => {}
+            Some((ecrit, vrai)) => {
+                ecarts.push(format!("{nom}: changelog `{l}`: {ecrit} au lieu de {vrai}"))
+            }
+            None => ecarts.push(format!("{nom}: changelog illisible: `{l}`")),
+        }
+    }
+    if entrees == 0 {
+        ecarts.push(format!("{nom}: aucune entree de changelog"));
+    }
+    ecarts
+}
+
+#[test]
+fn les_gabarits_rpm_n_ont_ni_macro_nue_en_commentaire_ni_date_fausse() {
+    let mut ecarts = ecarts_du_gabarit_rpm(SPEC, &lire(SPEC));
+    ecarts.extend(ecarts_du_gabarit_rpm(SPEC_GUI, &lire(SPEC_GUI)));
+    assert!(
+        ecarts.is_empty(),
+        "{} ecart(s):\n  {}",
+        ecarts.len(),
+        ecarts.join("\n  ")
+    );
+}
+
+/// Chaque exigence de la coquille mord sur une mutation du texte reel.
+#[test]
+fn chaque_exigence_de_la_coquille_mord() {
+    let id = identifiant();
+    let icones_src = lire(ICONES_SRC);
+    let cotes = cotes_hicolor(&icones_src).expect("COTES_HICOLOR lisible");
+    let (control, spec, copyright, man, constructeur, installateur, desktop) = (
+        lire(CONTROL_GUI),
+        lire(SPEC_GUI),
+        lire(COPYRIGHT_GUI),
+        lire(MAN_GUI),
+        lire(CONSTRUCTEUR_GUI),
+        lire(INSTALLATEUR_GUI),
+        lire(&format!("{BUREAU}/{id}.desktop")),
+    );
+    let deb_gui = ["control".to_string(), "copyright".to_string()];
+    let champs = |control: &str, spec: &str, desktop: &str| -> Vec<String> {
+        ecarts_des_champs_gui(
+            &TextesGui {
+                control,
+                spec,
+                copyright: &copyright,
+                man: &man,
+                constructeur: &constructeur,
+                installateur: &installateur,
+                desktop,
+            },
+            &id,
+        )
+    };
+    assert!(ecarts_des_poses_gui(&constructeur, &spec, &id, &cotes).is_empty());
+    assert!(ecarts_du_demarrage_gui(&constructeur, &spec, &desktop, &deb_gui, &id).is_empty());
+    assert!(champs(&control, &spec, &desktop).is_empty());
+    assert!(ecarts_du_gabarit_rpm(SPEC_GUI, &spec).is_empty());
+
+    let remplacer = |texte: &str, avant: &str, apres: &str| -> String {
+        assert_eq!(
+            texte.matches(avant).count(),
+            1,
+            "`{avant}` doit etre unique"
+        );
+        texte.replacen(avant, apres, 1)
+    };
+    let mord = |e: Vec<String>, motif: &str| {
+        assert!(
+            e.iter().any(|x| x.contains(motif)),
+            "`{motif}` attendu dans {e:?}"
+        );
+    };
+
+    // Une icone retiree du .rpm, puis une cote ajoutee au crate.
+    let ligne_64 = format!(
+        "install -D -m 0644 %{{icones_source}}/bifrost-64.png %{{buildroot}}/usr/share/icons/hicolor/64x64/apps/{id}.png\n"
+    );
+    let ligne_64_files = format!("/usr/share/icons/hicolor/64x64/apps/{id}.png\n");
+    let spec_mute = remplacer(&remplacer(&spec, &ligne_64, ""), &ligne_64_files, "");
+    mord(
+        ecarts_des_poses_gui(&constructeur, &spec_mute, &id, &cotes),
+        "le .rpm de la coquille pose les icones",
+    );
+    let cotes_mutees = cotes_hicolor(&remplacer(
+        &icones_src,
+        "&[16, 24, 32, 48, 64, 128, 256]",
+        "&[16, 24, 32, 48, 64, 128, 256, 512]",
+    ))
+    .expect("source mutee lisible");
+    mord(
+        ecarts_des_poses_gui(&constructeur, &spec, &id, &cotes_mutees),
+        "COTES_HICOLOR",
+    );
+    // Une declaration en commentaire n'est pas le code.
+    let commentee = format!("// pub const COTES_HICOLOR: &[u32] = &[8];\n{icones_src}");
+    assert_eq!(cotes_hicolor(&commentee), Ok(cotes.clone()));
+
+    // L'entree de bureau du .deb posee sous un autre nom.
+    let constructeur_mute = remplacer(
+        &constructeur,
+        "\"$ARBRE/usr/share/applications/$ID_APP.desktop\"",
+        "\"$ARBRE/usr/share/applications/bifrost.desktop\"",
+    );
+    mord(
+        ecarts_des_poses_gui(&constructeur_mute, &spec, &id, &cotes),
+        "le .deb de la coquille ne pose pas /usr/share/applications/",
+    );
+
+    // Un %files qui oublie la page.
+    let spec_mute = remplacer(&spec, "/usr/share/man/man1/bifrost-gui.1.gz\n", "");
+    mord(
+        ecarts_des_poses_gui(&constructeur, &spec_mute, &id, &cotes),
+        "%files du spec de la coquille",
+    );
+
+    // Une entree de demarrage de session, dans le .deb, le .rpm ou l'entree.
+    let constructeur_mute = remplacer(
+        &constructeur,
+        "gzip -9n \"$ARBRE/usr/share/man/man1/bifrost-gui.1\"\n",
+        "gzip -9n \"$ARBRE/usr/share/man/man1/bifrost-gui.1\"\ninstall -D -m 0644 \"$DESKTOP_SRC\" \"$ARBRE/etc/xdg/autostart/$ID_APP.desktop\"\n",
+    );
+    mord(
+        ecarts_du_demarrage_gui(&constructeur_mute, &spec, &desktop, &deb_gui, &id),
+        "entree de demarrage de session",
+    );
+    let spec_mute = remplacer(
+        &spec,
+        "\n%files\n",
+        &format!(
+            "install -D -m 0644 %{{pkg_source}}/desktop/{id}.desktop %{{buildroot}}/etc/xdg/autostart/{id}.desktop\n\n%files\n"
+        ),
+    );
+    mord(
+        ecarts_du_demarrage_gui(&constructeur, &spec_mute, &desktop, &deb_gui, &id),
+        "le .rpm de la coquille pose /etc/xdg/autostart/",
+    );
+    let desktop_mute = format!("{desktop}X-GNOME-Autostart-enabled=true\n");
+    mord(
+        ecarts_du_demarrage_gui(&constructeur, &spec, &desktop_mute, &deb_gui, &id),
+        "l'entree de bureau porte",
+    );
+    let spec_mute = remplacer(
+        &spec,
+        "\n%changelog\n",
+        "\n%post\nupdate-desktop-database\n\n%changelog\n",
+    );
+    mord(
+        ecarts_du_demarrage_gui(&constructeur, &spec_mute, &desktop, &deb_gui, &id),
+        "porte un scriptlet",
+    );
+    mord(
+        ecarts_du_demarrage_gui(
+            &constructeur,
+            &spec,
+            &desktop,
+            &[
+                "control".to_string(),
+                "copyright".to_string(),
+                "postinst".to_string(),
+            ],
+            &id,
+        ),
+        "packaging/deb-gui porte",
+    );
+
+    // L'ancien identifiant remis dans l'entree de bureau.
+    let ancien = format!("Icon={}.bifrost", ancien_identifiant());
+    let desktop_mute = remplacer(&desktop, &format!("Icon={id}"), &ancien);
+    assert_eq!(
+        porteurs_de_l_ancien_identifiant(&[(BUREAU.to_string(), desktop_mute.clone())]),
+        [BUREAU]
+    );
+    mord(
+        ecarts_de_l_entree_de_bureau(&desktop_mute, &[format!("{id}.desktop")], &id),
+        "entree de bureau: Icon=",
+    );
+
+    // Les champs: la bibliotheque dlopen oubliee du Depends, un soname qui
+    // diverge, une adresse personnelle, les trois commandes tues.
+    let control_mute = remplacer(
+        &control,
+        "@SHLIBS@, @DLOPEN@, hicolor-icon-theme",
+        "@SHLIBS@, hicolor-icon-theme",
+    );
+    mord(champs(&control_mute, &spec, &desktop), "Depends:");
+    let spec_mute = remplacer(
+        &spec,
+        "libayatana-appindicator3.so.1()(64bit)",
+        "libappindicator3.so.1()(64bit)",
+    );
+    mord(champs(&control, &spec_mute, &desktop), "Requires");
+    let control_mute = remplacer(
+        &control,
+        "Maintainer: Bifrost <security@inaricom.com>",
+        "Maintainer: Nom <nom.prenom@exemple.ch>",
+    );
+    mord(
+        champs(&control_mute, &spec, &desktop),
+        "nom.prenom@exemple.ch",
+    );
+    let control_mute = control.replace("trois commandes", "commandes");
+    mord(champs(&control_mute, &spec, &desktop), "trois commandes");
+
+    // Le gabarit: une macro nue en commentaire, un jour faux.
+    let spec_mute = remplacer(&spec, "(voir %%files)", "(voir %files)");
+    mord(
+        ecarts_du_gabarit_rpm(SPEC_GUI, &spec_mute),
+        "macro nue dans un commentaire",
+    );
+    let spec_mute = remplacer(&spec, "* Sun Oct 18 2026", "* Sat Oct 18 2026");
+    mord(
+        ecarts_du_gabarit_rpm(SPEC_GUI, &spec_mute),
+        "Sat au lieu de Sun",
+    );
 }

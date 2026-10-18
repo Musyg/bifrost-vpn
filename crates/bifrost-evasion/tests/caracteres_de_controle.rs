@@ -72,10 +72,11 @@ const DOSSIERS_IGNORES: [&str; 2] = [".git", "target"];
 /// py, lock, conf, service, plus `.gitignore` et `.gitattributes` qui n'ont pas
 /// d'extension. `json` et `txt` sont ajoutes par anticipation, `yaml` parce que
 /// les deux orthographes cohabitent partout.
-const EXTENSIONS: [&str; 16] = [
+const EXTENSIONS: [&str; 17] = [
     "rs", "sh", "md", "toml", "ps1", "yml", "yaml", "py", "lock", "conf", "service", "json", "txt",
-    // Les sources des paquets: WiX, gabarit RPM, pages de manuel.
-    "wxs", "spec", "1",
+    // Les sources des paquets: WiX, gabarit RPM, pages de manuel, entree de
+    // bureau.
+    "wxs", "spec", "1", "desktop",
 ];
 
 /// Un fichier sans extension est du texte: `.gitignore`, `.gitattributes`,
@@ -312,6 +313,7 @@ fn le_perimetre_couvre_ce_que_le_depot_contient() {
         "packaging/rpm/bifrost.spec",
         "packaging/man/bifrost-daemon.1",
         "packaging/deb/postinst",
+        "packaging/desktop/io.github.musyg.bifrost-vpn.desktop",
         "crates/bifrost-evasion/tests/caracteres_de_controle.rs",
     ] {
         assert!(

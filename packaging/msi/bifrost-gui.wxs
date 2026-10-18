@@ -1,0 +1,121 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Source WiX 5 du MSI de la coquille graphique de Bifrost (bifrost-gui.exe). Un
+  paquet distinct de celui du daemon (packaging/msi/bifrost.wxs), installe dans
+  le meme dossier, avec ses propres composants. crates/bifrost-evasion/tests/
+  paquets_windows.rs garde ce qui suit.
+
+  ASCII strict, LF. Un commentaire XML ne peut pas contenir deux tirets de suite.
+
+  - Name="Bifrost GUI": le nom que Programmes et fonctionnalites affiche, distinct
+    de << Bifrost >> (le daemon), comme le paquet Linux bifrost-gui a cote de
+    bifrost. Manufacturer="Bifrost", comme le daemon.
+
+  - Version="$(var.Version)": aucune version ecrite ici. scripts/
+    paquets-gui-windows.ps1 la lit dans Cargo.toml ([workspace.package]) et
+    refuse si gui/Cargo.toml ou gui/tauri.conf.json en annoncent une autre.
+
+  - UpgradeCode fixe, propre a ce MSI et distinct de celui du daemon: avec le
+    meme, l'installation de l'un serait prise pour une mise a niveau de l'autre,
+    qui serait retire. Le script de construction refuse les deux egaux.
+    ProductCode est engendre a chaque construction (MajorUpgrade l'exige).
+
+  - Le meme dossier que le daemon, %ProgramFiles%\Bifrost (INSTALLFOLDER). Chaque
+    MSI ne retire que ses composants, et le dossier ne part que vide. Rien sous
+    %ProgramData%: ce qui s'y trouve est au daemon.
+
+  - Un seul fichier, bifrost-gui.exe, pris dans $(var.Binaires) (le repertoire
+    de la coquille construite, gui\target\release). Aucun binaire tiers: la
+    WebView2 est celle du systeme.
+
+  - Un raccourci << Bifrost >> a la racine du Menu Demarrer commun, non annonce,
+    dans son propre composant. Un raccourci non annonce est une donnee par
+    utilisateur: ICE43 exige que son composant ait pour KeyPath une valeur sous
+    HKCU, et ICE57 refuse qu'un composant melange donnees par utilisateur et par
+    machine. Le KeyPath est donc la valeur HKCU Software\Bifrost\GUI installed=1,
+    et le fichier garde son propre composant. A la racine de ProgramMenuFolder,
+    le raccourci n'a aucun dossier a retirer.
+
+  - Pas de demarrage automatique: aucune valeur sous CurrentVersion\Run ni
+    RunOnce, aucun raccourci dans le dossier Demarrage, aucune tache planifiee.
+    Aucun raccourci sur le Bureau.
+
+  - Rien d'autre: aucune action personnalisee, aucun service, aucune ACL, et le
+    groupe local Bifrost n'est pas touche (le MSI du daemon le cree vide; y
+    entrer reste un acte d'administrateur). Aucune condition sur le daemon: sans
+    lui, la coquille dit qu'il est injoignable.
+
+  - La WebView2: Tauri rend la fenetre dans le Runtime Microsoft Edge WebView2, et
+    l'installation est refusee s'il manque, lu a sa cle EdgeUpdate (valeur pv).
+    Installe pour la machine sur un Windows 64 bits, sous HKLM dans la ruche
+    WOW6432Node (EdgeUpdate est 32 bits), lue en vue 64 bits au chemin ecrit;
+    installe pour un utilisateur, sous HKCU, sans WOW6432Node. 0.0.0.0 est la
+    valeur laissee apres le retrait du Runtime. << Installed OR >>: la condition
+    ne bloque ni une reparation ni une desinstallation.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+
+  <Package Name="Bifrost GUI"
+           Manufacturer="Bifrost"
+           Version="$(var.Version)"
+           UpgradeCode="024E718C-1706-4638-AC65-53BF76D2D04C"
+           Scope="perMachine"
+           Language="1033">
+
+    <MajorUpgrade DowngradeErrorMessage="Une version plus recente de Bifrost GUI est deja installee." />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- L'icone est ecrite par bifrost-icone sous target/ (-d Icone=<ico>),
+         jamais versionnee. Un identifiant WiX n'admet pas le tiret, et l'Id d'une
+         icone que reference un raccourci finit par .ico. -->
+    <Icon Id="bifrostgui.ico" SourceFile="$(var.Icone)" />
+    <Property Id="ARPPRODUCTICON" Value="bifrostgui.ico" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/Musyg/bifrost-vpn" />
+    <Property Id="ARPNOMODIFY" Value="1" />
+
+    <Property Id="WEBVIEW2HKLM" Secure="yes">
+      <RegistrySearch Id="WebView2Machine"
+                      Root="HKLM"
+                      Key="SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+                      Name="pv"
+                      Type="raw"
+                      Bitness="always64" />
+    </Property>
+    <Property Id="WEBVIEW2HKCU" Secure="yes">
+      <RegistrySearch Id="WebView2Utilisateur"
+                      Root="HKCU"
+                      Key="SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+                      Name="pv"
+                      Type="raw" />
+    </Property>
+    <Launch Condition="Installed OR (WEBVIEW2HKLM AND WEBVIEW2HKLM&lt;&gt;&quot;0.0.0.0&quot;) OR (WEBVIEW2HKCU AND WEBVIEW2HKCU&lt;&gt;&quot;0.0.0.0&quot;)"
+            Message="Bifrost GUI exige le Runtime Microsoft Edge WebView2. L'installer, puis relancer l'installation." />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Bifrost" />
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder" />
+
+    <Component Id="GuiExe" Directory="INSTALLFOLDER" Bitness="always64">
+      <File Id="bifrostgui.exe" Source="$(var.Binaires)\bifrost-gui.exe" KeyPath="yes" />
+    </Component>
+
+    <Component Id="RaccourciMenu" Directory="ProgramMenuFolder" Bitness="always64">
+      <Shortcut Id="RaccourciBifrost"
+                Directory="ProgramMenuFolder"
+                Name="Bifrost"
+                Target="[INSTALLFOLDER]bifrost-gui.exe"
+                WorkingDirectory="INSTALLFOLDER"
+                Icon="bifrostgui.ico"
+                Advertise="no" />
+      <RegistryValue Root="HKCU" Key="Software\Bifrost\GUI" Name="installed" Type="integer" Value="1" KeyPath="yes" />
+    </Component>
+
+    <Feature Id="Principal" Title="Bifrost GUI" Level="1">
+      <ComponentRef Id="GuiExe" />
+      <ComponentRef Id="RaccourciMenu" />
+    </Feature>
+
+  </Package>
+</Wix>

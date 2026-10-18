@@ -17,7 +17,7 @@ Le logiciel s'appelle Bifrost. Les documents de conception ont porte le nom de t
 
 ## Statut actuel
 
-Bifrost est en developpement. Le MVP de l'objectif 1 est implemente. Daemon et CLI; la coquille graphique (fenetre Tauri et tray, [document 08](docs/08-coquille-graphique.md)) est dans le depot, hors MVP et sans paquet. Elle tourne sans elevation; sous Windows, le canal du daemon admet les membres d'un groupe d'acces local que l'installeur cree vide, et la coquille d'un membre y a les trois commandes que le daemon ouvre aux membres: l'etat, `connect-stored` et `disconnect`. Le flux de connexion appelle la selection des transports: WireGuard directement, VLESS+REALITY et Hysteria2 par sing-box, avec interface TUN et passage SOCKS5. La couche DNS anti-telemetrie et les reglages Windows du registre, des services et des taches planifiees sont implementes; les filtres WFP par service restent une defense en profondeur, dont l'effet mesure est documente cible par cible.
+Bifrost est en developpement. Le MVP de l'objectif 1 est implemente. Daemon et CLI; la coquille graphique (fenetre Tauri et tray, [document 08](docs/08-coquille-graphique.md)) est dans le depot, hors MVP; elle a ses paquets (section Paquets). Elle tourne sans elevation; sous Windows, le canal du daemon admet les membres d'un groupe d'acces local que l'installeur cree vide, et la coquille d'un membre y a les trois commandes que le daemon ouvre aux membres: l'etat, `connect-stored` et `disconnect`. Le flux de connexion appelle la selection des transports: WireGuard directement, VLESS+REALITY et Hysteria2 par sing-box, avec interface TUN et passage SOCKS5. La couche DNS anti-telemetrie et les reglages Windows du registre, des services et des taches planifiees sont implementes; les filtres WFP par service restent une defense en profondeur, dont l'effet mesure est documente cible par cible.
 
 Les commandes `prove` confrontent aussi le pare-feu et le routage a une reference explicite ou a ce que le daemon declare avoir pose; la preuve des resolveurs DNS effectifs est livree sous Linux. Elles rendent MATCH, MISMATCH ou UNMEASURED, avec le perimetre de chaque mesure. Les chantiers ouverts restent dans [`ETAT.md`](ETAT.md); les sections detaillees ci-dessous conservent aussi l'historique des mesures et des corrections.
 
@@ -127,7 +127,7 @@ C'est pourquoi la recette de bout en bout tourne dans des namespaces reseau.
 
 ## Paquets
 
-Le daemon et la CLI ont des paquets: un `.deb` et un `.rpm` pour Linux (amd64), un MSI pour Windows (x64). Ils ne sont **pas signes**, et aucun depot ne les sert ni aucune release ne les porte : ce sont les artefacts des runs de la CI, retenus 7 jours (Actions > ci > le run > Artifacts). Le `.deb` et le `.rpm` (artefact `paquets-linux`) sortent de chaque push sur `main`, de chaque PR et d'un lancement manuel sans la case `windows` ; le MSI (artefact `paquets-windows`, avec son empreinte SHA-256) seulement d'un lancement manuel avec la case `windows`. Aucune version n'est promise : un paquet porte la version du `Cargo.toml` de la revision qui l'a construit.
+Le daemon et la CLI ont des paquets: un `.deb` et un `.rpm` pour Linux (amd64), un MSI pour Windows (x64). Ils ne sont **pas signes**, et aucun depot ne les sert ni aucune release ne les porte : ce sont les artefacts des runs de la CI, retenus 7 jours (Actions > ci > le run > Artifacts). Le `.deb` et le `.rpm` (artefact `paquets-linux`) sortent de chaque push sur `main`, de chaque PR et d'un lancement manuel sans la case `windows` ; le MSI (artefact `paquets-windows`, avec son empreinte SHA-256) seulement d'un lancement manuel avec la case `windows`. Aucune version n'est promise : un paquet porte la version du `Cargo.toml` de la revision qui l'a construit. Construits sur Ubuntu 24.04, les paquets Linux visent les distributions de sa generation : le `.deb` du daemon demande `libc6 (>= 2.39)`, que n'ont ni Debian 12 ni Ubuntu 22.04.
 
 Un paquet installe ce qu'installent les scripts des deux sections suivantes, aux memes chemins et avec les memes droits : memes comptes, meme unite (sous `/usr/lib/systemd/system`, ou les paquets la posent, au lieu de `/etc/systemd/system`), meme ligne de service Windows, groupe d'acces `Bifrost` compris. Il **ne demarre pas** le service, pas plus que les scripts : sous Linux l'unite n'est ni activee ni demarree ; sous Windows le service est enregistre en demarrage automatique, comme par `install-windows.ps1`, et part au prochain redemarrage. `dnscrypt-proxy` et `wireguard.dll` ne sont dans aucun paquet : le MSI fait nommer le resolveur par la ligne du service s'il trouve `dnscrypt-proxy.exe` deja depose dans `%ProgramFiles%\Bifrost`, et `wireguard.dll` se depose a la main a cote du daemon.
 
@@ -141,6 +141,16 @@ msiexec /i bifrost-<version>-x64.msi
 ```
 
 Retirer le paquet arrete le service, retire les filtres du kill switch (`--cleanup-firewall`), puis le service et les binaires ; une mise a niveau ne retire pas les filtres. Comme avec les scripts, les comptes et le groupe d'acces restent (les sections de desinstallation ci-dessous disent comment les retirer), et les donnees aussi quand il y en a, sous `/var/lib/bifrost` ou `%ProgramData%\Bifrost`. La purge du `.deb` retire `/var/lib/bifrost` s'il est vide, et le garde sinon en le disant.
+
+La coquille graphique a ses propres paquets, `bifrost-gui` : un `.deb` et un `.rpm` (artefact `paquets-gui-linux`, des memes runs que `paquets-linux`) et un MSI, `Bifrost GUI` (artefact `paquets-gui-windows`, avec son empreinte SHA-256, du seul lancement manuel avec la case `windows`). Ils ne sont **pas signes** non plus, et sont retenus 7 jours de meme. Ils posent le binaire `bifrost-gui`, une entree de menu, ses icones et, sous Linux, une page de manuel : aucune entree de demarrage de session, aucun script du mainteneur, aucune action personnalisee du MSI. Le `.deb` depend de la bibliotheque du tray, que la coquille charge a l'execution (`libayatana-appindicator3-1`), et recommande le paquet `bifrost` sans l'exiger ; le MSI s'installe dans `%ProgramFiles%\Bifrost`, comme celui du daemon mais sous un autre code de mise a niveau, si bien que retirer l'un laisse l'autre en place, et refuse de s'installer sans le Runtime WebView2. Lancee en root ou en administrateur, la coquille refuse de demarrer ; elle commande le daemon depuis un compte du groupe `bifrost` sous Linux (`sudo usermod -aG bifrost <compte>`, puis une nouvelle session), du groupe d'acces `Bifrost` sous Windows.
+
+```bash
+sudo apt install ./bifrost-gui_<version>_amd64.deb
+```
+
+```powershell
+msiexec /i bifrost-gui-<version>-x64.msi
+```
 
 ## Installer sur un systeme systemd
 
@@ -495,8 +505,9 @@ MATCH n'est pas une preuve d'etancheite du VPN. Voir
 
 Les PR et les push sur `main` lancent les controles Linux, la coquille
 graphique sous Linux (format, compilation, clippy, recettes), les paquets
-Linux (`.deb` et `.rpm` fabriques et verifies, le `.deb` installe puis retire
-sur le runner jetable), la suite de fuite, l'audit des dependances et le
+Linux du daemon et ceux de la coquille (`.deb` et `.rpm` fabriques et
+verifies, le `.deb` installe puis retire sur le runner jetable, la coquille
+lancee une fois installee), la suite de fuite, l'audit des dependances et le
 fuzzing des parseurs (graines rejouees, puis 30 secondes par cible). Chaque
 jour a 04:37 UTC, un run planifie ne lance
 que l'audit des dependances (`cargo audit`, `cargo deny`, `cargo vet`) sur le
@@ -515,11 +526,13 @@ revision a livrer (Actions > ci > Run workflow > cocher `windows`), ou:
 gh workflow run ci.yml --repo Musyg/bifrost-vpn --ref main -f windows=true
 ```
 
-Ce lancement ne fait tourner que les trois jobs Windows: lint et tests (limite
-de 30 minutes), la coquille graphique (compilation, clippy et recettes,
-limite de 25 minutes) et le MSI (construction, validation ICE, installation
-reelle, reparation et desinstallation, limite de 30 minutes), chacun avec un
-seul run actif a la fois. Sans la case
+Ce lancement ne fait tourner que les quatre jobs Windows: lint et tests
+(limite de 30 minutes), la coquille graphique (compilation, clippy et
+recettes, limite de 25 minutes), le MSI (construction, validation ICE,
+installation reelle, reparation et desinstallation, limite de 30 minutes) et
+le MSI de la coquille (construction, validation ICE, installation reelle,
+lancement eleve refuse et desinstallation, limite de 30 minutes), chacun avec
+un seul run actif a la fois. Sans la case
 `windows`, un lancement manuel execute les controles Linux habituels. Un job
 Windows `skipped` n'est pas une validation Windows; ne pas presenter le vert
 Linux comme tel. La derniere validation Windows doit nommer le SHA
@@ -546,7 +559,11 @@ droits de `%ProgramData%\Bifrost`, ligne du service relue dans le registre),
 repare, puis desinstalle, avec et sans resolveur depose; les journaux de
 `msiexec` sont gardes 7 jours a cote du MSI. Le job `paquets-linux` le porte a
 l'etape qui installe le `.deb`, rejoue le refus des comptes melanges, puis le
-retire et le purge.
+retire et le purge. Les jobs de la coquille le portent a leur seule etape
+d'installation: `paquets-gui-linux` installe son `.deb`, la lance en root
+(refus attendu) puis sous l'utilisateur du runner sur un serveur X virtuel,
+et la retire; `paquets-gui-windows` installe son MSI, la lance elevee (refus
+attendu) et le desinstalle, journaux de `msiexec` gardes 7 jours.
 
 Une PR qui touche `gui/`, `crates/bifrost-coquille`, `crates/bifrost-icone`,
 `crates/bifrost-ipc` ou `packaging/msi` attend, avant sa fusion, un run manuel
@@ -562,6 +579,7 @@ sudo ./scripts/e2e-linux.sh target/debug --unite packaging/systemd/bifrost-daemo
 sudo ./scripts/check-strict.sh         # exige que les dix vecteurs soient PASSED
 sudo ./scripts/packaging-linux.sh      # l'installateur Linux, dans une racine jetable
 ./scripts/paquets-linux.sh             # .deb et .rpm depuis target/release, verifies, rien d'installe
+./scripts/paquets-gui-linux.sh         # .deb et .rpm de la coquille (gui/target/release), verifies, rien d'installe
 ./scripts/resolveur-linux.sh           # configuration du resolveur chiffre et liste anti-telemetrie
 sudo ./scripts/resolveur-systemd-linux.sh   # le resolveur sous l'unite reelle
 sudo ./scripts/service-systemd-linux.sh     # connect complet par le service installe

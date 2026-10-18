@@ -17,7 +17,7 @@ The software is called Bifrost. Early design documents used the working name "Hy
 
 ## Current implementation
 
-Bifrost is in development. The first-objective MVP is implemented. The daemon and CLI are available. The graphical shell (Tauri window and tray, [document 08](docs/08-coquille-graphique.md), in French) is in the repository, outside the MVP and without packages. It runs without elevation; on Windows, the daemon's channel admits the members of a local access group that the installer creates empty, and a member's shell has the three commands the daemon opens to members: status, `connect-stored` and `disconnect`.
+Bifrost is in development. The first-objective MVP is implemented. The daemon and CLI are available. The graphical shell (Tauri window and tray, [document 08](docs/08-coquille-graphique.md), in French) is in the repository, outside the MVP; it has its own packages (see Packages). It runs without elevation; on Windows, the daemon's channel admits the members of a local access group that the installer creates empty, and a member's shell has the three commands the daemon opens to members: status, `connect-stored` and `disconnect`.
 
 The connection path now uses transport selection. WireGuard runs directly; VLESS + REALITY and Hysteria2 profiles run through sing-box, with a TUN interface and a SOCKS5 forwarding path. DNS filtering and Windows telemetry settings are implemented. Service-specific WFP telemetry filters remain a separate defense-in-depth layer, with their measured effects recorded individually.
 
@@ -134,7 +134,7 @@ Arming the kill switch cuts outgoing traffic outside the tunnel, including alrea
 
 ## Packages
 
-The daemon and CLI have packages: a `.deb` and an `.rpm` for Linux (amd64) and an MSI for Windows (x64). They are **not signed**, no repository serves them and no release carries them: they are CI run artifacts, kept for 7 days (Actions > ci > the run > Artifacts). The `.deb` and `.rpm` (artifact `paquets-linux`) come from every push to `main`, every pull request and a manual run without the `windows` box; the MSI (artifact `paquets-windows`, with its SHA-256 digest) only from a manual run with the `windows` box checked. No version is promised: a package carries the `Cargo.toml` version of the revision that built it.
+The daemon and CLI have packages: a `.deb` and an `.rpm` for Linux (amd64) and an MSI for Windows (x64). They are **not signed**, no repository serves them and no release carries them: they are CI run artifacts, kept for 7 days (Actions > ci > the run > Artifacts). The `.deb` and `.rpm` (artifact `paquets-linux`) come from every push to `main`, every pull request and a manual run without the `windows` box; the MSI (artifact `paquets-windows`, with its SHA-256 digest) only from a manual run with the `windows` box checked. No version is promised: a package carries the `Cargo.toml` version of the revision that built it. Built on Ubuntu 24.04, the Linux packages target distributions of that generation: the daemon `.deb` requires `libc6 (>= 2.39)`, which neither Debian 12 nor Ubuntu 22.04 provides.
 
 A package installs what the scripts in the next two sections install, at the same paths with the same rights: the same accounts, the same unit (under `/usr/lib/systemd/system`, where packages put it, instead of `/etc/systemd/system`), the same Windows service command line, the `Bifrost` access group included. Like the scripts, it **does not start** the service: on Linux the unit is neither enabled nor started; on Windows the service is registered for automatic startup, as by `install-windows.ps1`, and starts at the next reboot. `dnscrypt-proxy` and `wireguard.dll` are in no package: the MSI has the service command line name the resolver if it finds `dnscrypt-proxy.exe` already placed in `%ProgramFiles%\Bifrost`, and `wireguard.dll` is placed by hand next to the daemon.
 
@@ -148,6 +148,16 @@ msiexec /i bifrost-<version>-x64.msi
 ```
 
 Removing a package stops the service, removes the kill switch filters (`--cleanup-firewall`), then the service and the binaries; an upgrade does not remove the filters. As with the scripts, the accounts and the access group stay (the uninstall sections below say how to remove them), and so does any data under `/var/lib/bifrost` or `%ProgramData%\Bifrost`. Purging the `.deb` removes `/var/lib/bifrost` if it is empty and keeps it otherwise, saying so.
+
+The graphical shell has its own packages, `bifrost-gui`: a `.deb` and an `.rpm` (artifact `paquets-gui-linux`, from the same runs as `paquets-linux`) and an MSI, `Bifrost GUI` (artifact `paquets-gui-windows`, with its SHA-256 digest, only from a manual run with the `windows` box checked). They are **not signed** either, and are kept for 7 days as well. They install the `bifrost-gui` binary, a menu entry, its icons and, on Linux, a manual page: no session autostart entry, no maintainer script, no MSI custom action. The `.deb` depends on the tray library the shell loads at run time (`libayatana-appindicator3-1`) and recommends the `bifrost` package without requiring it; the MSI installs into `%ProgramFiles%\Bifrost`, like the daemon's but under a different upgrade code, so removing one leaves the other in place, and it refuses to install without the WebView2 Runtime. Started as root or as an administrator, the shell refuses to start; it commands the daemon from an account in the `bifrost` group on Linux (`sudo usermod -aG bifrost <account>`, then a new session), in the `Bifrost` access group on Windows.
+
+```bash
+sudo apt install ./bifrost-gui_<version>_amd64.deb
+```
+
+```powershell
+msiexec /i bifrost-gui-<version>-x64.msi
+```
 
 ## Install on systemd
 
@@ -320,7 +330,7 @@ Reports contain categories and counts, not local addresses, domains, interfaces 
 
 ### CI and platform coverage
 
-Pull requests and pushes to `main` run Linux formatting/lint/tests, the graphical shell's Linux checks (format, build, clippy, tests), the Linux packages (`.deb` and `.rpm` built and checked, the `.deb` installed then removed on the disposable runner), leak checks, dependency auditing and parser fuzzing. Fuzzing replays the seeds, then runs each target for 30 seconds. Every day at 04:37 UTC, a scheduled run executes only the dependency audit (`cargo audit`, `cargo deny`, `cargo vet`) on the latest commit of `main`, with a freshly downloaded RustSec advisory database, so an advisory published against a dependency in any lockfile (root, fuzzing harness, graphical shell) turns it red without waiting for a commit. GitHub may delay scheduled runs and disables them after 60 days without repository activity. New revisions cancel obsolete automatic runs on the same PR or branch.
+Pull requests and pushes to `main` run Linux formatting/lint/tests, the graphical shell's Linux checks (format, build, clippy, tests), the Linux packages of the daemon and of the shell (`.deb` and `.rpm` built and checked, the `.deb` installed then removed on the disposable runner, the shell started once installed), leak checks, dependency auditing and parser fuzzing. Fuzzing replays the seeds, then runs each target for 30 seconds. Every day at 04:37 UTC, a scheduled run executes only the dependency audit (`cargo audit`, `cargo deny`, `cargo vet`) on the latest commit of `main`, with a freshly downloaded RustSec advisory database, so an advisory published against a dependency in any lockfile (root, fuzzing harness, graphical shell) turns it red without waiting for a commit. GitHub may delay scheduled runs and disables them after 60 days without repository activity. New revisions cancel obsolete automatic runs on the same PR or branch.
 
 **Windows validation is manual.** Before a Windows delivery, run it on the revision being delivered through Actions > ci > Run workflow > `windows`, or:
 
@@ -328,9 +338,9 @@ Pull requests and pushes to `main` run Linux formatting/lint/tests, the graphica
 gh workflow run ci.yml --repo Musyg/bifrost-vpn --ref main -f windows=true
 ```
 
-That dispatch runs only the three Windows jobs: lint and tests (30-minute limit), the graphical shell (build, clippy and tests, 25-minute limit) and the MSI (build, ICE validation, real install, repair and uninstall, 30-minute limit), each with one active run at a time. The Windows lint-and-test job sets `BIFROST_RUNNER_JETABLE`: on that disposable runner, and only there, a test creates a local group and two accounts, measures the access group's channel (a member commands the daemon through the shell, gets a named refusal for every other command and cannot add a pipe instance; a non-member is refused; the elevated test process keeps the whole channel), measures on that real group what the unit tests of `bifrost-ipc` measure elsewhere on the test account (form and domain of the group, an equivalent form of its SID rendered canonical, the built-in administrator's RID refused, the DACL of the bound pipe: SYSTEM, Administrators and the group, nothing else), and removes them. Elsewhere it reports `SKIPPED` with its reason. The runner's account is a built-in account, so those unit tests report `SKIPPED` there, under one stated reason; the Windows abstention budget expects exactly those lines. A skipped Windows job is not Windows validation. The recorded result must identify the SHA it actually checked.
+That dispatch runs only the four Windows jobs: lint and tests (30-minute limit), the graphical shell (build, clippy and tests, 25-minute limit), the MSI (build, ICE validation, real install, repair and uninstall, 30-minute limit) and the shell's MSI (build, ICE validation, real install, refused elevated start and uninstall, 30-minute limit), each with one active run at a time. The Windows lint-and-test job sets `BIFROST_RUNNER_JETABLE`: on that disposable runner, and only there, a test creates a local group and two accounts, measures the access group's channel (a member commands the daemon through the shell, gets a named refusal for every other command and cannot add a pipe instance; a non-member is refused; the elevated test process keeps the whole channel), measures on that real group what the unit tests of `bifrost-ipc` measure elsewhere on the test account (form and domain of the group, an equivalent form of its SID rendered canonical, the built-in administrator's RID refused, the DACL of the bound pipe: SYSTEM, Administrators and the group, nothing else), and removes them. Elsewhere it reports `SKIPPED` with its reason. The runner's account is a built-in account, so those unit tests report `SKIPPED` there, under one stated reason; the Windows abstention budget expects exactly those lines. A skipped Windows job is not Windows validation. The recorded result must identify the SHA it actually checked.
 
-The MSI job also sets `BIFROST_RUNNER_JETABLE`, on its install step only: the MSI is really installed there (service, `Bifrost` group, rights on `%ProgramData%\Bifrost`, service command line read back from the registry), repaired, then uninstalled, with and without a resolver in place; the `msiexec` logs are kept for 7 days next to the MSI. The `paquets-linux` job sets it on the step that installs the `.deb`, replays the refusal of mixed accounts, then removes and purges it.
+The MSI job also sets `BIFROST_RUNNER_JETABLE`, on its install step only: the MSI is really installed there (service, `Bifrost` group, rights on `%ProgramData%\Bifrost`, service command line read back from the registry), repaired, then uninstalled, with and without a resolver in place; the `msiexec` logs are kept for 7 days next to the MSI. The `paquets-linux` job sets it on the step that installs the `.deb`, replays the refusal of mixed accounts, then removes and purges it. The shell's jobs set it on their install step only: `paquets-gui-linux` installs its `.deb`, starts the shell as root (refusal expected) then as the runner's user on a virtual X server, and removes it; `paquets-gui-windows` installs its MSI, starts the shell elevated (refusal expected) and uninstalls it, keeping the `msiexec` logs for 7 days.
 
 A pull request that touches `gui/`, `crates/bifrost-coquille`, `crates/bifrost-icone`, `crates/bifrost-ipc` or `packaging/msi` waits, before merging, for a green manual `windows` run on its revision: it is the only run where the shell and the MSI are built on Windows.
 
@@ -343,6 +353,7 @@ sudo ./scripts/e2e-linux.sh target/debug --unite packaging/systemd/bifrost-daemo
 sudo ./scripts/check-strict.sh
 sudo ./scripts/packaging-linux.sh
 ./scripts/paquets-linux.sh
+./scripts/paquets-gui-linux.sh
 ./scripts/resolveur-linux.sh
 sudo ./scripts/resolveur-systemd-linux.sh
 sudo ./scripts/service-systemd-linux.sh
