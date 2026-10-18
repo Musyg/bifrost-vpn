@@ -14,7 +14,7 @@
 //!   dans le temps, l'analyse stricte;
 //! - le protocole ([`encadrer`]): la declaration lue (N1), la mesure propre a
 //!   chaque preuve, la declaration relue (N2), et ce que le rapport en dit
-//!   (`failed_input`, `daemon_identity`);
+//!   (`failed_input`, `daemon_identity`, `daemon_refusal`);
 //! - l'identite telle que le rapport la dit ([`IdentiteDaemon`]).
 //!
 //! Une copie par preuve deriverait. La premiere forme de `prove wfp` en avait
@@ -48,24 +48,95 @@ const DELAI: Duration = Duration::from_secs(5);
 /// manque: le rapport distingue un serveur dont l'identite n'est pas admise
 /// (`daemon-identity`) d'une declaration absente ou illisible
 /// (`daemon-declaration`). Les raisons ne nomment ni uid, ni pid, ni SID.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Refus {
+    /// Le serveur n'est pas admis par l'exigence, ou son identite ne se lit
+    /// pas: rien ne lui a ete ecrit.
     Identite(&'static str),
+    /// Pas de serveur admis a qui ecrire: canal absent, ferme a ce compte,
+    /// ou muet avant que son identite soit etablie.
     Declaration(&'static str),
+    /// Le serveur est admis par la regle `regle`, et la demande ne lui a pas
+    /// rendu de declaration. `refus` est le refus nomme que le daemon a
+    /// ecrit, sous sa forme montrable ([`montrable`]), quand c'en est un:
+    /// jamais un refus d'acces, qui nomme l'appelant (uid, gid, pid).
+    Reponse {
+        raison: &'static str,
+        refus: Option<String>,
+        regle: &'static str,
+    },
 }
 
 impl Refus {
-    pub(crate) fn entree(self) -> &'static str {
+    pub(crate) fn entree(&self) -> &'static str {
         match self {
             Refus::Identite(_) => "daemon-identity",
-            Refus::Declaration(_) => "daemon-declaration",
+            Refus::Declaration(_) | Refus::Reponse { .. } => "daemon-declaration",
         }
     }
 
-    pub(crate) fn raison(self) -> &'static str {
+    pub(crate) fn raison(&self) -> &'static str {
         match self {
-            Refus::Identite(r) | Refus::Declaration(r) => r,
+            Refus::Identite(r) | Refus::Declaration(r) | Refus::Reponse { raison: r, .. } => r,
         }
+    }
+}
+
+/// La raison d'une reponse d'erreur qui commence par << acces refuse >>: le
+/// serveur a refuse l'appelant lui-meme (`bifrost_ipc::auth::AuthError`).
+pub(crate) const ACCES_REFUSE: &str = "acces au daemon refuse";
+
+/// La raison de toute autre reponse d'erreur: le daemon a recu la demande et
+/// l'a refusee (une commande reservee aux administrateurs, une commande qu'il
+/// ne connait pas).
+pub(crate) const DEMANDE_REFUSEE: &str = "le daemon a refuse la demande";
+
+/// La borne du refus montre, en octets du texte rendu, marque de coupe
+/// comprise.
+pub(crate) const BORNE_REFUS: usize = 512;
+
+/// La fin d'un refus coupe a la borne.
+pub(crate) const COUPE: &str = " [tronque]";
+
+/// Le refus du daemon tel qu'il peut se montrer, dans le rapport JSON comme
+/// sur un terminal: chaque caractere de controle (`char::is_control`: C0, DEL
+/// et C1) et chaque caractere de mise en forme bidirectionnelle (U+061C,
+/// U+200E, U+200F, U+202A a U+202E, U+2066 a U+2069) ecrit en sequence
+/// `\u{..}`, la barre oblique inverse doublee pour qu'un texte qui ecrirait
+/// lui-meme une sequence ne se lise pas comme un caractere filtre, et le tout
+/// borne a [`BORNE_REFUS`] octets, coupe entre deux caracteres et marque de
+/// [`COUPE`]. Les autres caracteres restent tels quels.
+pub(crate) fn montrable(message: &str) -> String {
+    let mut rendu = String::new();
+    let mut coupe_a = None;
+    for c in message.chars() {
+        let avant = rendu.len();
+        if c == '\\' {
+            rendu.push_str("\\\\");
+        } else if c.is_control()
+            || matches!(c, '\u{61c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+        {
+            rendu.push_str(&format!("\\u{{{:x}}}", u32::from(c)));
+        } else {
+            rendu.push(c);
+        }
+        if coupe_a.is_none() && rendu.len() > BORNE_REFUS - COUPE.len() {
+            coupe_a = Some(avant);
+        }
+        if rendu.len() > BORNE_REFUS {
+            rendu.truncate(coupe_a.unwrap_or(avant));
+            rendu.push_str(COUPE);
+            return rendu;
+        }
+    }
+    rendu
+}
+
+/// La ligne du refus du daemon dans le rapport texte, vide sans refus.
+pub(crate) fn ligne_du_refus(refus: Option<&str>) -> String {
+    match refus {
+        Some(texte) => format!("refus du daemon: {texte}\n"),
+        None => String::new(),
     }
 }
 
@@ -128,7 +199,7 @@ pub(crate) async fn lire_avec(
 ) -> Result<Lue, Refus> {
     let (octets, regle) =
         connecter_et_demander(socket, delai, attendu, Command::DeclarationPareFeu).await?;
-    Ok((analyser(&octets).map_err(Refus::Declaration)?, regle))
+    lue_du_serveur_admis(&octets, regle, analyser)
 }
 
 /// La lecture de production de `prove routes --politique-daemon`: meme exigence
@@ -147,10 +218,7 @@ pub(crate) async fn lire_routage_avec(
 ) -> Result<LueRoutage, Refus> {
     let (octets, regle) =
         connecter_et_demander(socket, delai, attendu, Command::DeclarationRoutage).await?;
-    Ok((
-        analyser_routage(&octets).map_err(Refus::Declaration)?,
-        regle,
-    ))
+    lue_du_serveur_admis(&octets, regle, analyser_routage)
 }
 
 /// La lecture de production de `prove routes --politique-daemon` sous Windows:
@@ -169,10 +237,7 @@ pub(crate) async fn lire_routage_windows_avec(
 ) -> Result<LueRoutageWindows, Refus> {
     let (octets, regle) =
         connecter_et_demander(socket, delai, attendu, Command::DeclarationRoutage).await?;
-    Ok((
-        analyser_routage_windows(&octets).map_err(Refus::Declaration)?,
-        regle,
-    ))
+    lue_du_serveur_admis(&octets, regle, analyser_routage_windows)
 }
 
 /// La lecture de production de `prove dns --politique-daemon`: meme exigence
@@ -191,7 +256,7 @@ pub(crate) async fn lire_dns_avec(
 ) -> Result<LueDns, Refus> {
     let (octets, regle) =
         connecter_et_demander(socket, delai, attendu, Command::DeclarationDns).await?;
-    Ok((analyser_dns(&octets).map_err(Refus::Declaration)?, regle))
+    lue_du_serveur_admis(&octets, regle, analyser_dns)
 }
 
 /// Le tronc commun aux deux lectures: l'identite du serveur exigee AVANT le
@@ -205,49 +270,86 @@ pub(crate) async fn lire_dns_avec(
 /// MATCH. Sous Linux le daemon tourne en root sans exception; sous Windows, la
 /// regle des preuves n'admet que le pipe de LocalSystem. La regle vit dans
 /// `bifrost_ipc`; les deux lectures la reprennent ici, sans la changer.
+///
+/// Une seule echeance pour tout l'echange, en deux etapes: avant que le
+/// serveur soit admis, un echec n'a aucune regle a dire ([`Refus::Identite`]
+/// ou [`Refus::Declaration`]); une fois la requete ecrite au serveur admis,
+/// chaque echec porte la regle qui l'a admis ([`Refus::Reponse`]).
 async fn connecter_et_demander(
     socket: &str,
     delai: Duration,
     attendu: ServerRequirement,
     commande: Command,
 ) -> Result<(Vec<u8>, &'static str), Refus> {
-    let echange = async {
-        let (mut client, regle) =
-            IpcClient::connect_verified(socket, attendu)
-                .await
-                .map_err(|e| match e {
-                    IpcError::ServerIdentity(ServerIdentityError::Refused) => {
-                        Refus::Identite("serveur de la declaration non privilegie")
-                    }
-                    IpcError::ServerIdentity(ServerIdentityError::Unreadable) => {
-                        Refus::Identite("identite du serveur de la declaration illisible")
-                    }
-                    // Le canal existe et n'a pris aucune connexion de plus: le
-                    // daemon n'a pas repondu dans le delai, il n'est pas absent.
-                    ref e if e.is_server_busy() => {
-                        Refus::Declaration("daemon sans reponse dans le delai")
-                    }
-                    // Le socket existe et ses droits nous ecartent: ce n'est pas une
-                    // absence de daemon, et le rapport ne doit pas le laisser croire.
-                    IpcError::Io(e) if e.kind() == ErrorKind::PermissionDenied => {
-                        Refus::Declaration("acces au daemon refuse")
-                    }
-                    _ => Refus::Declaration("daemon injoignable"),
-                })?;
-        let octets = client
-            .request_raw(&Request::new(commande))
+    const SANS_REPONSE: &str = "daemon sans reponse dans le delai";
+    let echeance = tokio::time::Instant::now() + delai;
+    let (mut client, regle) =
+        tokio::time::timeout_at(echeance, IpcClient::connect_verified(socket, attendu))
             .await
-            .map_err(|_| Refus::Declaration("reponse du daemon tronquee ou illisible"))?;
-        Ok((octets, regle.name()))
+            .map_err(|_| Refus::Declaration(SANS_REPONSE))?
+            .map_err(|e| match e {
+                IpcError::ServerIdentity(ServerIdentityError::Refused) => {
+                    Refus::Identite("serveur de la declaration non privilegie")
+                }
+                IpcError::ServerIdentity(ServerIdentityError::Unreadable) => {
+                    Refus::Identite("identite du serveur de la declaration illisible")
+                }
+                // Le canal existe et n'a pris aucune connexion de plus: le
+                // daemon n'a pas repondu dans le delai, il n'est pas absent.
+                ref e if e.is_server_busy() => Refus::Declaration(SANS_REPONSE),
+                // Le socket existe et ses droits nous ecartent: ce n'est pas une
+                // absence de daemon, et le rapport ne doit pas le laisser croire.
+                IpcError::Io(e) if e.kind() == ErrorKind::PermissionDenied => {
+                    Refus::Declaration(ACCES_REFUSE)
+                }
+                _ => Refus::Declaration("daemon injoignable"),
+            })?;
+    let regle = regle.name();
+    let apres_la_verification = |raison| Refus::Reponse {
+        raison,
+        refus: None,
+        regle,
     };
-    tokio::time::timeout(delai, echange)
+    let octets = tokio::time::timeout_at(echeance, client.request_raw(&Request::new(commande)))
         .await
-        .map_err(|_| Refus::Declaration("daemon sans reponse dans le delai"))?
+        .map_err(|_| apres_la_verification(SANS_REPONSE))?
+        .map_err(|_| apres_la_verification("reponse du daemon tronquee ou illisible"))?;
+    Ok((octets, regle))
+}
+
+/// Ce que la lecture rend d'une reponse servie par le serveur que `regle` a
+/// admis: la declaration que `analyse` en tire, avec la regle, ou le refus,
+/// qui porte la regle et, quand le daemon a refuse la demande, son refus
+/// sous sa forme montrable.
+pub(crate) fn lue_du_serveur_admis<D>(
+    octets: &[u8],
+    regle: &'static str,
+    analyse: impl FnOnce(&[u8]) -> Result<D, &'static str>,
+) -> Result<(D, &'static str), Refus> {
+    analyse(octets)
+        .map(|d| (d, regle))
+        .map_err(|raison| Refus::Reponse {
+            raison,
+            refus: (raison == DEMANDE_REFUSEE)
+                .then(|| refus_ecrit(octets))
+                .flatten(),
+            regle,
+        })
+}
+
+/// Le message d'une reponse d'erreur, sous sa forme montrable. Lu par le
+/// meme lecteur strict que les declarations ([`Unique`]); appele seulement
+/// quand l'analyse a juge la trame un refus de la demande.
+fn refus_ecrit(octets: &[u8]) -> Option<String> {
+    let Unique(v) = serde_json::from_slice(octets).ok()?;
+    v.get("message").and_then(Value::as_str).map(montrable)
 }
 
 /// Analyse une trame de reponse, sans jamais recopier ce qu'elle contient
-/// dans une raison: un message d'erreur du daemon nomme l'appelant (uid, gid,
-/// pid, SID), et une declaration porte des parametres de politique.
+/// dans une raison: un refus d'acces du daemon nomme l'appelant (uid, gid,
+/// pid), et une declaration porte des parametres de politique. Le refus d'une
+/// demande, qui ne nomme que la commande, se montre a part, hors de la raison
+/// (`lue_du_serveur_admis`).
 pub fn analyser(octets: &[u8]) -> Result<DeclarationPareFeu, &'static str> {
     let Unique(v) =
         serde_json::from_slice(octets).map_err(|_| "reponse du daemon tronquee ou illisible")?;
@@ -291,9 +393,9 @@ fn erreur_declaree(objet: &serde_json::Map<String, Value>) -> Result<(), &'stati
             .and_then(Value::as_str)
             .ok_or(HORS_SCHEMA)?;
         return Err(if message.starts_with("acces refuse") {
-            "acces au daemon refuse"
+            ACCES_REFUSE
         } else {
-            "le daemon a refuse la demande"
+            DEMANDE_REFUSEE
         });
     }
     Ok(())
@@ -594,12 +696,15 @@ impl Serialize for IdentiteDaemon {
     }
 }
 
-/// Ce que le protocole ecrit dans le rapport d'une preuve: l'entree qui manque
-/// et l'identite du serveur. Chaque preuve a son rapport; aucune n'ecrit ces
-/// deux champs elle-meme autour des lectures.
+/// Ce que le protocole ecrit dans le rapport d'une preuve: l'entree qui manque,
+/// l'identite du serveur, et le refus nomme du daemon s'il en a ecrit un.
+/// Chaque preuve a son rapport; aucune n'ecrit ces champs elle-meme autour des
+/// lectures.
 pub(crate) trait Suivi {
     fn entree_manquante(&mut self, entree: &'static str);
     fn identite(&mut self, identite: IdentiteDaemon);
+    /// Le refus du daemon, deja sous sa forme montrable ([`montrable`]).
+    fn refus_du_daemon(&mut self, refus: String);
 }
 
 /// Le protocole des preuves par declaration: N1, la mesure, N2.
@@ -617,7 +722,10 @@ pub(crate) trait Suivi {
 /// [`lire`]). Le rapport en garde le NOM de la regle, et `failed_input =
 /// daemon-identity` quand c'est elle qui manque, a N1 comme a N2: une
 /// declaration dont le second serveur n'est pas admis n'est pas attribuable
-/// non plus, et le rapport ne garde pas alors la regle de N1.
+/// non plus, et le rapport ne garde pas alors la regle de N1. Une lecture qui
+/// echoue apres avoir ecrit sa requete au serveur admis ([`Refus::Reponse`])
+/// garde la regle, et le refus nomme du daemon, s'il en a ecrit un, entre au
+/// rapport sous sa forme montrable.
 ///
 /// Rendu `Ok`, le rapport attend sa comparaison: `failed_input` vaut
 /// `observed` jusqu'a ce que la preuve l'ait faite.
@@ -640,9 +748,18 @@ where
     EX: FnOnce(&D) -> Result<X, &'static str>,
     M: AsyncFnOnce(&mut R, X) -> Result<T, &'static str>,
 {
+    const SECONDE_ILLISIBLE: &str =
+        "declaration du daemon illisible ou injoignable apres la collecte";
     let (premiere, regle) = lire().await.map_err(|refus| {
         r.entree_manquante(refus.entree());
-        refus.raison()
+        let raison = refus.raison();
+        if let Refus::Reponse { refus, regle, .. } = refus {
+            r.identite(IdentiteDaemon::Verifiee(regle));
+            if let Some(texte) = refus {
+                r.refus_du_daemon(texte);
+            }
+        }
+        raison
     })?;
     r.identite(IdentiteDaemon::Verifiee(regle));
     let attendu = extraire(&premiere)?;
@@ -654,7 +771,13 @@ where
             r.identite(IdentiteDaemon::NonVerifiee);
             raison
         }
-        Refus::Declaration(_) => "declaration du daemon illisible ou injoignable apres la collecte",
+        Refus::Declaration(_) => SECONDE_ILLISIBLE,
+        Refus::Reponse { refus, .. } => {
+            if let Some(texte) = refus {
+                r.refus_du_daemon(texte);
+            }
+            SECONDE_ILLISIBLE
+        }
     })?;
     if seconde != premiere {
         return Err("declaration du daemon modifiee pendant la collecte");
@@ -673,6 +796,7 @@ mod tests {
     struct Journal {
         entree: Option<&'static str>,
         identite: Option<IdentiteDaemon>,
+        refus: Option<String>,
         mesures: usize,
     }
 
@@ -682,6 +806,9 @@ mod tests {
         }
         fn identite(&mut self, identite: IdentiteDaemon) {
             self.identite = Some(identite);
+        }
+        fn refus_du_daemon(&mut self, refus: String) {
+            self.refus = Some(refus);
         }
     }
 
@@ -743,18 +870,131 @@ mod tests {
     #[tokio::test]
     async fn une_identite_refusee_a_n1_ne_laisse_rien_mesurer() {
         let refus = Refus::Identite("serveur de la declaration non privilegie");
-        let (j, issue) = jouer(vec![Err(refus)]).await;
+        let (j, issue) = jouer(vec![Err(refus.clone())]).await;
         assert_eq!(issue, Err(refus.raison()));
         assert_eq!(j.mesures, 0);
         assert_eq!(j.entree, Some("daemon-identity"));
         assert_eq!(j.identite, None);
+        assert_eq!(j.refus, None);
+    }
+
+    /// Une lecture qui echoue apres avoir ecrit sa requete au serveur admis:
+    /// rien n'est mesure, l'entree manquante est la declaration, l'identite
+    /// est dite verifiee par la regle qui a admis le serveur, et le refus
+    /// nomme du daemon entre au rapport tel que la lecture l'a rendu. Sans
+    /// refus ecrit (reponse tronquee, delai), rien n'y entre. Avant le
+    /// serveur admis, ni regle ni refus.
+    #[tokio::test]
+    async fn un_echec_apres_la_requete_garde_la_regle_et_le_refus_nomme() {
+        let (j, issue) = jouer(vec![Err(Refus::Reponse {
+            raison: DEMANDE_REFUSEE,
+            refus: Some("commande refusee".to_owned()),
+            regle: "regle-de-recette",
+        })])
+        .await;
+        assert_eq!(issue, Err(DEMANDE_REFUSEE));
+        assert_eq!(j.mesures, 0);
+        assert_eq!(j.entree, Some("daemon-declaration"));
+        assert_eq!(
+            j.identite,
+            Some(IdentiteDaemon::Verifiee("regle-de-recette"))
+        );
+        assert_eq!(j.refus.as_deref(), Some("commande refusee"));
+
+        let (j, issue) = jouer(vec![Err(Refus::Reponse {
+            raison: "reponse du daemon tronquee ou illisible",
+            refus: None,
+            regle: "regle-de-recette",
+        })])
+        .await;
+        assert_eq!(issue, Err("reponse du daemon tronquee ou illisible"));
+        assert_eq!(
+            j.identite,
+            Some(IdentiteDaemon::Verifiee("regle-de-recette"))
+        );
+        assert_eq!(j.refus, None);
+
+        let (j, issue) = jouer(vec![Err(Refus::Declaration(ACCES_REFUSE))]).await;
+        assert_eq!(issue, Err(ACCES_REFUSE));
+        assert_eq!(j.entree, Some("daemon-declaration"));
+        assert_eq!(j.identite, None);
+        assert_eq!(j.refus, None);
+    }
+
+    /// La lecture d'une trame d'erreur servie par le serveur admis: un refus
+    /// de la demande porte la regle et son message montrable; un refus
+    /// d'acces porte la regle et aucun message (il nomme l'appelant); une
+    /// trame hors schema, la regle seule.
+    #[test]
+    fn une_trame_d_erreur_rend_la_regle_et_le_seul_refus_de_la_demande() {
+        let lue =
+            |trame: &str| lue_du_serveur_admis(trame.as_bytes(), "regle-de-recette", analyser);
+        assert_eq!(
+            lue("{\"result\":\"error\",\"message\":\"commande x refusee\\u001b[2J\"}"),
+            Err(Refus::Reponse {
+                raison: DEMANDE_REFUSEE,
+                refus: Some("commande x refusee\\u{1b}[2J".to_owned()),
+                regle: "regle-de-recette",
+            })
+        );
+        assert_eq!(
+            lue(
+                "{\"result\":\"error\",\"message\":\"acces refuse pour uid=1000 gid=1000 pid=42\"}"
+            ),
+            Err(Refus::Reponse {
+                raison: ACCES_REFUSE,
+                refus: None,
+                regle: "regle-de-recette",
+            })
+        );
+        assert_eq!(
+            lue("{\"result\":\"error\"}"),
+            Err(Refus::Reponse {
+                raison: HORS_SCHEMA,
+                refus: None,
+                regle: "regle-de-recette",
+            })
+        );
+    }
+
+    /// La forme montrable: les caracteres de controle (C0, DEL, C1) et de
+    /// mise en forme bidirectionnelle ecrits en sequence, la barre oblique
+    /// inverse doublee, le reste intact; un texte long coupe a la borne,
+    /// entre deux caracteres, et marque.
+    #[test]
+    fn le_refus_montre_n_a_ni_controle_ni_mise_en_forme_et_reste_borne() {
+        assert_eq!(montrable("commande x refusee"), "commande x refusee");
+        assert_eq!(
+            montrable("a\nb\rc\td\u{1b}[31me\u{7f}f\u{85}g\u{9b}h"),
+            "a\\u{a}b\\u{d}c\\u{9}d\\u{1b}[31me\\u{7f}f\\u{85}g\\u{9b}h"
+        );
+        assert_eq!(
+            montrable("x\u{202e}y\u{2066}z\u{200f}\u{61c}"),
+            "x\\u{202e}y\\u{2066}z\\u{200f}\\u{61c}"
+        );
+        assert_eq!(montrable("deja \\u{1b} ecrit"), "deja \\\\u{1b} ecrit");
+        assert_eq!(montrable("e\u{301}te"), "e\u{301}te");
+        let juste = "a".repeat(BORNE_REFUS);
+        assert_eq!(montrable(&juste), juste);
+        let long = montrable(&"\u{e9}".repeat(BORNE_REFUS));
+        assert!(long.len() <= BORNE_REFUS, "{}", long.len());
+        assert!(long.ends_with(COUPE), "{long}");
+        assert!(long.trim_end_matches(COUPE).chars().all(|c| c == '\u{e9}'));
+        let echappe = montrable(&"\u{1b}".repeat(BORNE_REFUS));
+        assert!(echappe.len() <= BORNE_REFUS, "{}", echappe.len());
+        assert!(echappe.ends_with(&format!("\\u{{1b}}{COUPE}")), "{echappe}");
+        assert!(!echappe.chars().any(char::is_control));
     }
 
     /// Un serveur admis a N1 et refuse a N2: la regle de N1 n'est pas gardee.
     #[tokio::test]
     async fn une_identite_refusee_a_n2_efface_la_regle_de_n1() {
         let refus = Refus::Identite("identite du serveur de la declaration illisible");
-        let (j, issue) = jouer(vec![Ok((declaree(4), "regle-de-recette")), Err(refus)]).await;
+        let (j, issue) = jouer(vec![
+            Ok((declaree(4), "regle-de-recette")),
+            Err(refus.clone()),
+        ])
+        .await;
         assert_eq!(issue, Err(refus.raison()));
         assert_eq!(j.mesures, 1);
         assert_eq!(j.entree, Some("daemon-identity"));

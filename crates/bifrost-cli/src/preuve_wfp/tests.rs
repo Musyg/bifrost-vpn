@@ -4,7 +4,7 @@
 //! comme un tiers ou une panne l'altererait.
 
 use super::*;
-use crate::declaration::{CLES, HORS_SCHEMA, analyser};
+use crate::declaration::{CLES, HORS_SCHEMA, analyser, lue_du_serveur_admis};
 use bifrost_core::ports::{EnvironnementMoteur, FirewallPolicy};
 use bifrost_firewall::instantane_wfp::{
     ConditionVue, FiltreVu, Instantane, SousCoucheVue, ValeurVue, descripteur_autorisant,
@@ -27,11 +27,10 @@ fn regle() -> &'static str {
     ServerRule::WindowsSystemPipeOwner.name()
 }
 
-/// Une trame lue par le VRAI lecteur strict, servie par un serveur admis.
+/// Une trame lue par le VRAI lecteur strict, servie par un serveur admis: ce
+/// que la lecture de production en rend (`lue_du_serveur_admis`).
 fn lue(trame: &[u8]) -> Result<Lue, Refus> {
-    analyser(trame)
-        .map(|d| (d, regle()))
-        .map_err(Refus::Declaration)
+    lue_du_serveur_admis(trame, regle(), analyser)
 }
 const LUID: u64 = 0x0123_4567_89ab_cdef;
 const AUTRE_SOUS_COUCHE: u128 = 0x1111_2222_3333_4444_5555_6666_7777_8888;
@@ -782,7 +781,7 @@ async fn un_serveur_non_admis_n_est_jamais_mesure() {
         Refus::Identite("identite du serveur de la declaration illisible"),
     ] {
         let r = verifier_declaration_avec(
-            || std::future::ready(Err(refus)),
+            || std::future::ready(Err(refus.clone())),
             || async { panic!("collecte interdite sans identite admise") },
             identifiant,
         )
@@ -798,7 +797,7 @@ async fn un_serveur_non_admis_n_est_jamais_mesure() {
         assert!(r["expected_counts"].is_null());
         rien_de_la_declaration(&r);
 
-        let mut lectures = vec![Err(refus), lue(&bonne)];
+        let mut lectures = vec![Err(refus.clone()), lue(&bonne)];
         let r = verifier_declaration_avec(
             || std::future::ready(lectures.pop().unwrap()),
             || async { Ok(conforme()) },

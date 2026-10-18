@@ -666,6 +666,10 @@ pub struct Rapport {
     /// daemon; absent en mode intention. Jamais un SID ni un pid.
     #[serde(skip_serializing_if = "IdentiteDaemon::hors_perimetre")]
     daemon_identity: IdentiteDaemon,
+    /// Le refus nomme que le daemon a ecrit a la demande de la declaration,
+    /// borne et sans caractere de controle; absent sans refus.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    daemon_refusal: Option<String>,
     tunnel_interface_present: Option<bool>,
     expected_counts: Option<ParFamille<Attendus>>,
     observed_counts: Option<ParFamille<Observes>>,
@@ -686,10 +690,11 @@ impl Rapport {
 
     pub fn texte(&self) -> String {
         format!(
-            "{}  {}\n{}\n{}entree non mesuree: {}\necarts: {}\n\n{}\n",
+            "{}  {}\n{}\n{}{}entree non mesuree: {}\necarts: {}\n\n{}\n",
             self.verdict,
             self.scope,
             self.reason,
+            crate::declaration::ligne_du_refus(self.daemon_refusal.as_deref()),
             self.daemon_identity.ligne(),
             self.failed_input.unwrap_or("aucune"),
             self.differences.join(", "),
@@ -713,6 +718,7 @@ fn commencer() -> Rapport {
         collection_verified: false,
         network_security: "not-evaluated",
         daemon_identity: IdentiteDaemon::HorsPerimetre,
+        daemon_refusal: None,
         tunnel_interface_present: None,
         expected_counts: None,
         observed_counts: None,
@@ -809,6 +815,9 @@ impl crate::declaration::Suivi for Rapport {
     }
     fn identite(&mut self, identite: IdentiteDaemon) {
         self.daemon_identity = identite;
+    }
+    fn refus_du_daemon(&mut self, refus: String) {
+        self.daemon_refusal = Some(refus);
     }
 }
 

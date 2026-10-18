@@ -69,6 +69,10 @@ pub struct Rapport {
     expected_source: &'static str,
     #[serde(skip_serializing_if = "IdentiteDaemon::hors_perimetre")]
     daemon_identity: IdentiteDaemon,
+    /// Le refus nomme que le daemon a ecrit a la demande de la declaration,
+    /// borne et sans caractere de controle; absent sans refus.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    daemon_refusal: Option<String>,
     policy_schema_version: Option<u32>,
     live_kernel: bool,
     generation_verified: bool,
@@ -92,8 +96,9 @@ impl Rapport {
 
     pub fn texte(&self) -> String {
         let identite = self.daemon_identity.ligne();
+        let refus = crate::declaration::ligne_du_refus(self.daemon_refusal.as_deref());
         format!(
-            "{}  {}\n{}\n{identite}entree non mesuree: {}\necarts: {}\n\n{}\n",
+            "{}  {}\n{}\n{refus}{identite}entree non mesuree: {}\necarts: {}\n\n{}\n",
             self.verdict,
             self.scope,
             self.reason,
@@ -348,6 +353,7 @@ fn commencer() -> Rapport {
         source: "user-supplied-snapshots",
         expected_source: "user-supplied-snapshot",
         daemon_identity: IdentiteDaemon::HorsPerimetre,
+        daemon_refusal: None,
         policy_schema_version: None,
         live_kernel: false,
         generation_verified: false,
@@ -543,6 +549,9 @@ impl crate::declaration::Suivi for Rapport {
     }
     fn identite(&mut self, identite: IdentiteDaemon) {
         self.daemon_identity = identite;
+    }
+    fn refus_du_daemon(&mut self, refus: String) {
+        self.daemon_refusal = Some(refus);
     }
 }
 

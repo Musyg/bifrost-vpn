@@ -235,7 +235,11 @@ sous une tache planifiee ponctuelle sous SYSTEM). Un membre du groupe d'acces (`
 Linux, le groupe d'acces du service sous Windows) n'y a que `status`,
 `connect-stored` et `disconnect`: la declaration lui est refusee par une
 reponse qui nomme la commande, et la preuve rend UNMEASURED (`le daemon a
-refuse la demande`). Qui peut la lire pouvait deja connecter et deconnecter.
+refuse la demande`), montre ce refus (`daemon_refusal` au rapport, ligne
+`refus du daemon` au texte; 512 octets au plus, caracteres de controle et de
+mise en forme bidirectionnelle echappes) et nomme la regle d'identite que le
+serveur a passee avant l'envoi de la requete. Qui peut la lire pouvait deja
+connecter et deconnecter.
 Elle ne porte ni cle, ni profil, ni point d'acces: version, alea,
 numero, moteur, issue (`aucune`, `posee`, `retiree`, `echec`) et, si posee, la
 projection v1 des six champs que le rendu nft lit. Une recette verifie sur le
@@ -301,7 +305,9 @@ privilegie ne peut ni creer un pipe possede par SYSTEM ou les Administrateurs,
 ni le lui attribuer apres coup (ERROR_INVALID_OWNER, mesure). Sinon: UNMEASURED,
 `failed_input=daemon-identity`, sans rien envoyer au serveur. Le rapport porte
 `daemon_identity`: le nom de la regle, ou `null` tant qu'elle n'est pas
-etablie; jamais un uid, un pid ou un SID.
+etablie; jamais un uid, un pid ou un SID. Etablie avant l'envoi de la
+requete, elle reste nommee quand le daemon refuse ensuite la demande, ne
+repond pas dans le delai ou rend une reponse hors schema.
 
 Limites: la regle dit qui ecoute, pas que c'est le daemon. Un serveur root, ou un
 pipe de LocalSystem, qui n'est pas le daemon est admis (mesure: un rejeu sous
@@ -1016,7 +1022,8 @@ pare-feu et du routage, la declaration DNS est reservee aux appelants qui
 ont tout le canal, sous Linux root, admis par son uid: un membre du groupe
 `--group`, qui n'y a que `status`, `connect-stored` et `disconnect`, recoit
 un refus qui nomme la commande, et la preuve rend UNMEASURED (`le daemon a
-refuse la demande`) sans lire le systeme. La declaration lue est analysee
+refuse la demande`) sans lire le systeme, ce refus montre (`daemon_refusal`)
+et l'identite du daemon nommee. La declaration lue est analysee
 strictement (cles exactes au niveau superieur et dans le plan, doublons,
 entiers, version, coherence de l'etat, du numero et du plan, adresses sous
 leur forme canonique), puis jugee avec les regles de l'intention v1

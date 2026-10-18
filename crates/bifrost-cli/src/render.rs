@@ -6,7 +6,13 @@ use bifrost_core::state::{State, TunnelStatus};
 pub fn confirmation(command: &crate::Cmd) -> &'static str {
     match command {
         crate::Cmd::Connect { .. } => "tunnel monte",
-        crate::Cmd::Disconnect => "tunnel demonte, kill switch desarme",
+        // Le `ok` du daemon a `disconnect` ne dit pas qu'il a demonte quoi que
+        // ce soit: il repond aussi `ok` sans tunnel ni kill switch arme. Il
+        // dit l'etat APRES la demande: la machine d'etat en `deconnecte`
+        // (toute deconnexion y mene), et le kill switch relu non arme par le
+        // moteur (arme, le daemon rend une erreur au lieu de `ok`). Les mots
+        // sont ceux de `status` pour cet etat.
+        crate::Cmd::Disconnect => "etat deconnecte, kill switch desarme",
         _ => "ok",
     }
 }
@@ -147,6 +153,33 @@ mod tests {
         let s = status(&st);
         assert!(s.contains("desarme"));
         assert!(!s.contains("NON ARME"));
+    }
+
+    /// `disconnect` ne dit que ce que la reponse du daemon porte. Son `ok`
+    /// dit que le daemon a joue la deconnexion et que son kill switch n'est
+    /// plus arme apres elle (sinon il rend une erreur), pas qu'un tunnel ou un
+    /// kill switch viennent d'etre demontes: sans tunnel ni kill switch arme,
+    /// il repond `ok` aussi. La phrase dit donc l'etat apres la demande, avec
+    /// les mots que `status` rend pour cet etat, et aucune action.
+    #[test]
+    fn disconnect_dit_l_etat_apres_la_demande_et_aucune_action() {
+        let apres = TunnelStatus {
+            state: State::Disconnected,
+            kill_switch_engaged: false,
+            firewall_backend: "wfp".into(),
+            interface: None,
+            endpoint: None,
+            last_handshake_secs_ago: None,
+            rx_bytes: 0,
+            tx_bytes: 0,
+        };
+        let attendu = status(&apres)
+            .lines()
+            .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+            .collect::<Vec<_>>()
+            .join(", ");
+        assert_eq!(attendu, "etat deconnecte, kill switch desarme");
+        assert_eq!(confirmation(&crate::Cmd::Disconnect), attendu);
     }
 
     #[test]

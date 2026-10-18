@@ -345,6 +345,7 @@ mod tests {
         let r = sans_collecte(&daemon).await;
         assert_eq!(r["verdict"], "UNMEASURED");
         assert_eq!(r["reason"], "acces au daemon refuse");
+        assert!(r.get("daemon_refusal").is_none(), "{r}");
         rien_de_la_declaration(&r);
 
         let daemon = FauxDaemon::demarrer(vec![posee(&politique())]);
@@ -359,6 +360,31 @@ mod tests {
                 "SKIPPED: root ignore les droits d'un socket, le refus par le systeme de fichiers n'est pas mesurable ici"
             ),
         }
+    }
+
+    /// Le refus nomme du daemon, quand la requete lui a ete ecrite apres la
+    /// verification de son identite (un membre du groupe `bifrost`, au niveau
+    /// restreint): par la lecture de production et un vrai socket, le rapport
+    /// montre le texte du refus, tel que le daemon de cette plateforme l'ecrit
+    /// (`bifrost_ipc::CommandeReservee`), et dit l'identite verifiee par le
+    /// nom de sa regle.
+    #[tokio::test]
+    async fn un_refus_nomme_du_daemon_est_montre_et_son_identite_dite_verifiee() {
+        let refus = bifrost_ipc::CommandeReservee {
+            commande: "declaration-pare-feu",
+        }
+        .to_string();
+        let mut trame = serde_json::to_vec(&Response::error(refus.clone())).unwrap();
+        trame.push(b'\n');
+        let daemon = FauxDaemon::demarrer(vec![trame]);
+        let r = sans_collecte(&daemon).await;
+        assert_eq!(r["verdict"], "UNMEASURED", "{r}");
+        assert_eq!(r["reason"], "le daemon a refuse la demande", "{r}");
+        assert_eq!(r["daemon_refusal"], refus.as_str(), "{r}");
+        assert_eq!(r["daemon_identity"], "uid-peer-credentials", "{r}");
+        assert_eq!(r["failed_input"], "daemon-declaration", "{r}");
+        assert_eq!(daemon.requetes(), 1);
+        rien_de_la_declaration(&r);
     }
 
     #[tokio::test]
@@ -610,7 +636,9 @@ mod tests {
         }
     }
 
-    /// Un daemon qui accepte et se tait ne fait pas attendre la preuve.
+    /// Un daemon qui accepte et se tait ne fait pas attendre la preuve. Son
+    /// identite est verifiee avant que la requete lui soit ecrite: le refus
+    /// garde la regle qui l'a admis.
     #[tokio::test]
     async fn un_daemon_muet_rend_la_main() {
         let dossier = FauxDaemon::dossier();
@@ -632,7 +660,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dossier);
         assert_eq!(
             r,
-            Err(Refus::Declaration("daemon sans reponse dans le delai"))
+            Err(Refus::Reponse {
+                raison: "daemon sans reponse dans le delai",
+                refus: None,
+                regle: "uid-peer-credentials",
+            })
         );
     }
 
@@ -703,7 +735,7 @@ mod tests {
                 "daemon-identity",
             ),
         ] {
-            let mut lectures = vec![Err(refus), Ok((d.clone(), "root-peer-credentials"))];
+            let mut lectures = vec![Err(refus.clone()), Ok((d.clone(), "root-peer-credentials"))];
             let capture = noyau(&p);
             let r = verifier_declaration_avec(
                 || std::future::ready(lectures.pop().unwrap()),

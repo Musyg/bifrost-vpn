@@ -323,8 +323,11 @@ une declaration confrontee au noyau, pas une preuve d'etancheite du VPN.
 Avant de lire, le client exige que le processus qui ecoute sur le socket soit
 root (SO_PEERCRED); sinon le rapport rend UNMEASURED avec
 `failed_input=daemon-identity`, sans rien lui envoyer. `daemon_identity` nomme
-la regle appliquee (`root-peer-credentials`), jamais un uid. Un processus root
-qui n'est pas le daemon reste admis: la regle dit qui ecoute, pas que c'est le
+la regle appliquee (`root-peer-credentials`), jamais un uid. Un membre du
+groupe `bifrost`, a qui la declaration est refusee, recoit un refus qui la
+nomme: le rapport rend UNMEASURED (`le daemon a refuse la demande`), montre ce
+refus dans `daemon_refusal` et nomme la regle passee. Un processus root qui
+n'est pas le daemon reste admis: la regle dit qui ecoute, pas que c'est le
 daemon.
 
 Sous Windows, la meme preuve confronte le moteur WFP a la declaration du

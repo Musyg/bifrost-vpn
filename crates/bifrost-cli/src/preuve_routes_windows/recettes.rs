@@ -11,7 +11,7 @@
 use super::*;
 use crate::declaration::{
     CLES_ROUTAGE, HORS_SCHEMA, LueRoutageWindows, PLAN_WINDOWS_CLES, Refus,
-    analyser_routage_windows,
+    analyser_routage_windows, lue_du_serveur_admis,
 };
 use bifrost_core::routage_windows::LigneLue;
 use bifrost_ipc::ServerRule;
@@ -1187,11 +1187,10 @@ fn regle() -> &'static str {
     ServerRule::WindowsSystemPipeOwner.name()
 }
 
-/// Une trame lue par le VRAI lecteur strict, servie par un serveur admis.
+/// Une trame lue par le VRAI lecteur strict, servie par un serveur admis: ce
+/// que la lecture de production en rend (`lue_du_serveur_admis`).
 fn lue(trame: &[u8]) -> Result<LueRoutageWindows, Refus> {
-    analyser_routage_windows(trame)
-        .map(|d| (d, regle()))
-        .map_err(Refus::Declaration)
+    lue_du_serveur_admis(trame, regle(), analyser_routage_windows)
 }
 
 fn decl_wg() -> PlanRoutageWindows {
@@ -1745,8 +1744,9 @@ async fn une_reponse_hors_schema_n_est_pas_mesuree() {
     ));
     for (nom, t) in cas {
         let lu = lue(&t);
+        // Servie par le serveur admis: le refus porte sa regle.
         assert!(
-            matches!(lu, Err(Refus::Declaration(_))),
+            matches!(&lu, Err(Refus::Reponse { regle: admise, .. }) if *admise == regle()),
             "{nom}: {:?}",
             lu.as_ref().map(|_| ())
         );
@@ -1759,6 +1759,12 @@ async fn une_reponse_hors_schema_n_est_pas_mesuree() {
                 "le daemon a refuse la demande",
             ]
             .contains(&r["reason"].as_str().unwrap()),
+            "{nom}: {r}"
+        );
+        assert_eq!(r["daemon_identity"], regle(), "{nom}: {r}");
+        assert_eq!(
+            r.get("daemon_refusal").is_some(),
+            r["reason"] == "le daemon a refuse la demande",
             "{nom}: {r}"
         );
         assert_eq!(r["failed_input"], "daemon-declaration", "{nom}");
@@ -1777,6 +1783,74 @@ async fn un_acces_refuse_ne_nomme_personne() {
     assert_eq!(r["reason"], "acces au daemon refuse");
     assert_eq!(c, 0);
     rien_de_la_declaration(&r);
+}
+
+/// Le refus nomme du daemon, quand la requete lui a ete ecrite apres la
+/// verification de son identite (un compte membre du groupe, au niveau
+/// restreint): le rapport montre le texte du refus et dit l'identite verifiee,
+/// par le nom de sa regle, en JSON comme en texte. Le texte est celui que le
+/// daemon de CETTE plateforme ecrit (`bifrost_ipc::CommandeReservee`), servi
+/// par un serveur admis et lu par la lecture de production
+/// (`lue_du_serveur_admis`). Temoin: un compte refuse a l'ouverture du canal
+/// (hors du groupe) reste << acces au daemon refuse >>, identite non verifiee,
+/// sans refus montre.
+#[tokio::test]
+async fn un_refus_nomme_du_daemon_est_montre_et_son_identite_dite_verifiee() {
+    let refus = bifrost_ipc::CommandeReservee {
+        commande: "declaration-routage",
+    }
+    .to_string();
+    let mut trame = serde_json::to_vec(&Response::error(refus.clone())).unwrap();
+    trame.push(b'\n');
+    let (r, n, c) = prouver(vec![lue(&trame)], &posee(&plan_wg()), "bfwg0").await;
+    assert_eq!(r["verdict"], "UNMEASURED", "{r}");
+    assert_eq!(r["reason"], "le daemon a refuse la demande", "{r}");
+    assert_eq!(r["daemon_refusal"], refus.as_str(), "{r}");
+    assert_eq!(r["daemon_identity"], "windows-system-pipe-owner", "{r}");
+    assert_eq!(r["failed_input"], "daemon-declaration", "{r}");
+    assert_eq!((n, c), (1, 0));
+    rien_de_la_declaration(&r);
+    let texte = verifier_declaration_avec(
+        || std::future::ready(lue(&trame)),
+        |_alias: &str| -> Result<TableIpHelper, &'static str> {
+            panic!("collecte interdite sans declaration")
+        },
+    )
+    .await
+    .texte();
+    assert!(
+        texte.contains(&format!("\nrefus du daemon: {refus}\n")),
+        "{texte}"
+    );
+    assert!(
+        texte.contains("\nidentite du daemon: windows-system-pipe-owner\n"),
+        "{texte}"
+    );
+
+    let (r, n, c) = prouver(
+        vec![Err(Refus::Declaration("acces au daemon refuse"))],
+        &posee(&plan_wg()),
+        "bfwg0",
+    )
+    .await;
+    assert_eq!(r["verdict"], "UNMEASURED", "{r}");
+    assert_eq!(r["reason"], "acces au daemon refuse", "{r}");
+    assert!(r["daemon_identity"].is_null(), "{r}");
+    assert!(r.get("daemon_refusal").is_none(), "{r}");
+    assert_eq!(r["failed_input"], "daemon-declaration", "{r}");
+    assert_eq!((n, c), (1, 0));
+    let texte = verifier_declaration_avec(
+        || std::future::ready(Err(Refus::Declaration("acces au daemon refuse"))),
+        |_alias: &str| -> Result<TableIpHelper, &'static str> {
+            panic!("collecte interdite sans declaration")
+        },
+    )
+    .await
+    .texte();
+    assert!(
+        texte.contains("\nidentite du daemon: non verifiee\n") && !texte.contains("refus du"),
+        "{texte}"
+    );
 }
 
 /// Un plan declare que le produit ne pose pas ne se compare jamais: la
