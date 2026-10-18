@@ -344,6 +344,98 @@ jobs:
       - name: Recettes
         run: cargo test --manifest-path gui/Cargo.toml --locked -- --nocapture
 
+  # Les paquets du daemon et de son client. Le .deb et le .rpm a chaque push
+  # sur `main` et a chaque PR, comme la coquille Linux; le MSI seulement sur un
+  # lancement manuel avec la case `windows`, comme les autres jobs Windows.
+  # Aucun ne tourne sur le run planifie. Les paquets ne sont pas signes et ne
+  # sont attaches a aucune version: ils partent en artefact du run, retenus 7
+  # jours. Ils font ce que font `packaging/install-linux.sh` et
+  # `packaging/install-windows.ps1` (memes comptes, memes droits, meme unite ou
+  # meme ligne de service) et n'activent ni ne demarrent le service.
+  # `audit_planifie.rs` (regles 11 et 12) garde ce routage et ces etapes,
+  # `paquets_linux.rs` et `paquets_windows.rs` la parite avec les deux
+  # installateurs.
+  paquets-linux:
+    name: paquets (Linux)
+    if: github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.windows)
+    runs-on: ubuntu-24.04
+    # Une borne pour un job bloque, pas une duree mesuree sur ce runner.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # rpm fournit rpmbuild, lintian juge le .deb (une erreur fait echouer),
+      # dpkg-dev fournit dpkg-shlibdeps, man-db rend les pages de manuel.
+      # Non epingles, comme les paquets apt des autres jobs.
+      - name: Outillage
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends rpm lintian fakeroot dpkg-dev man-db
+      - name: Compilation des binaires du paquet
+        run: cargo build --release --locked -p bifrost-daemon -p bifrost-cli
+      # Sans root: fakeroot suffit.
+      - name: Construction et verification des paquets
+        run: ./scripts/paquets-linux.sh
+      # Installation et retrait reels, sur ce runner jetable seulement: la
+      # variable n'est posee que pour cette commande.
+      - name: Installation et retrait reels
+        run: sudo BIFROST_RUNNER_JETABLE=1 ./scripts/paquets-linux-installer.sh
+      - name: Depot du .deb et du .rpm
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: paquets-linux
+          path: target/paquets/bifrost*
+          if-no-files-found: error
+          retention-days: 7
+
+  paquets-windows:
+    name: paquets (Windows)
+    if: github.event_name == 'workflow_dispatch' && inputs.windows
+    runs-on: windows-2025-vs2026
+    # Une borne pour un job bloque, pas une duree mesuree sur ce runner.
+    timeout-minutes: 30
+    concurrency:
+      group: ${{ github.workflow }}-paquets-windows
+      cancel-in-progress: false
+    # Une commande par etape, sous le shell par defaut du runner (PowerShell),
+    # comme le job de la coquille Windows: le code de sortie de la commande est
+    # celui de l'etape.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # WiX 5.0.2 et son extension util, a la meme version. La serie 6 change
+      # de licence (Open Source Maintenance Fee): elle n'est pas prise.
+      - name: WiX
+        run: dotnet tool install --global wix --version 5.0.2
+      - name: Extension util de WiX
+        run: wix extension add -g WixToolset.Util.wixext/5.0.2
+      - name: Compilation des binaires du paquet
+        run: cargo build --release --locked -p bifrost-daemon -p bifrost-cli -p bifrost-icone
+      # Construction, validation ICE, lecture des tables du MSI, empreinte.
+      - name: Construction et verification du MSI
+        run: ./scripts/paquets-windows.ps1
+      # Installation, reparation et desinstallation reelles, sur ce runner
+      # jetable seulement: la variable n'est posee que pour cette etape. Le
+      # service est enregistre, jamais demarre.
+      - name: Installation et desinstallation reelles
+        run: ./scripts/paquets-windows-installer.ps1
+        env:
+          BIFROST_RUNNER_JETABLE: '1'
+      - name: Depot du MSI et de son empreinte
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: paquets-windows
+          path: target/msi/bifrost-*
+          if-no-files-found: error
+          retention-days: 7
+      # Les journaux de msiexec, verts ou rouges.
+      - name: Journaux de msiexec
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: paquets-windows-journaux
+          path: target/msi/*.log
+          if-no-files-found: ignore
+          retention-days: 7
+
   fuite:
     name: suite de fuite
     if: github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.windows)

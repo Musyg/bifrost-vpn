@@ -287,11 +287,11 @@ cette page`), jamais comme un autre.
 
 ## Ce qui n'est pas fait
 
-- Aucun paquet: ni MSI, ni .deb, ni .rpm, pour la coquille comme pour le
-  daemon. `bundle.active` vaut `false` dans `gui/tauri.conf.json`; la
-  coquille se construit depuis les sources (`cargo build --manifest-path
-  gui/Cargo.toml`), et ses icones sont engendrees a la construction, sous
-  `gui/target/`.
+- Aucun paquet pour la coquille: ni MSI, ni .deb, ni .rpm. Ceux du daemon et
+  de la CLI (README, section Paquets) n'en contiennent rien. `bundle.active`
+  vaut `false` dans `gui/tauri.conf.json`; la coquille se construit depuis
+  les sources (`cargo build --manifest-path gui/Cargo.toml`), et ses icones
+  sont engendrees a la construction, sous `gui/target/`.
 - Sous Windows, le bout en bout du groupe d'acces (un membre commande le
   daemon par la coquille et recoit un refus nomme pour toute autre
   commande, un non-membre est refuse, un processus eleve garde tout le

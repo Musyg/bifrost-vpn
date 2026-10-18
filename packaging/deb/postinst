@@ -1,0 +1,69 @@
+#!/bin/sh
+# Script postinst du paquet Bifrost (Debian, Ubuntu).
+#
+# Il fait ce que fait packaging/install-linux.sh apres la pose des fichiers, et
+# rien de plus:
+#   1. cree les comptes systeme depuis la declaration posee par le paquet
+#      (/usr/lib/sysusers.d/bifrost.conf, copie de packaging/sysusers.d/), par
+#      systemd-sysusers, comme l'installateur;
+#   2. refuse, comme l'installateur, un compte de service membre du groupe de
+#      pilotage, et un coeur et un resolveur qui partageraient un uid;
+#   3. recharge systemd pour qu'il voie l'unite posee.
+#
+# Il N'ACTIVE NI NE DEMARRE le service, comme l'installateur. Armer un kill
+# switch coupe tout trafic hors tunnel, session SSH comprise: le demarrage reste
+# une decision explicite. Une mise a jour ne relance pas non plus un service qui
+# tourne: le binaire remplace ne sert qu'au demarrage suivant, et le message de
+# fin le dit.
+#
+# Une difference avec l'installateur, dite: sans systemd-sysusers, il retombe
+# sur useradd (packaging/comptes.sh); le paquet, lui, depend de systemd, qui
+# fournit systemd-sysusers, et refuse de se configurer s'il manque plutot que de
+# laisser un service sans ses comptes.
+#
+# set -e: une etape qui echoue interrompt la configuration, plutot que de
+# laisser une installation a moitie faite passer pour reussie.
+set -e
+
+DECLARATION=/usr/lib/sysusers.d/bifrost.conf
+GROUPE_PILOTAGE=bifrost
+COMPTE_COEUR=bifrost-coeur
+COMPTE_RESOLVEUR=bifrost-resolveur
+
+case "$1" in
+  configure)
+    if ! command -v systemd-sysusers >/dev/null 2>&1; then
+      echo "bifrost: systemd-sysusers absent, les comptes ne peuvent pas etre crees depuis $DECLARATION" >&2
+      exit 1
+    fi
+    systemd-sysusers "$DECLARATION"
+
+    for compte in "$COMPTE_COEUR" "$COMPTE_RESOLVEUR"; do
+      # Membre du groupe de pilotage, ce compte pourrait DECONNECTER le VPN.
+      if id -nG "$compte" | tr ' ' '\n' | grep -x "$GROUPE_PILOTAGE" >/dev/null; then
+        echo "bifrost: REFUS, $compte appartient au groupe $GROUPE_PILOTAGE et pourrait piloter le daemon" >&2
+        exit 1
+      fi
+    done
+    # Le resolveur qui partagerait l'uid du coeur heriterait de son exemption
+    # du kill switch et pourrait emettre du DNS en clair hors tunnel.
+    if [ "$(id -u "$COMPTE_COEUR")" = "$(id -u "$COMPTE_RESOLVEUR")" ]; then
+      echo "bifrost: REFUS, $COMPTE_COEUR et $COMPTE_RESOLVEUR partagent un uid" >&2
+      exit 1
+    fi
+
+    # /run/systemd/system n'existe que si systemd est le PID 1: dans un
+    # conteneur ou une image en construction, rien a recharger.
+    if [ -d /run/systemd/system ]; then
+      systemctl daemon-reload
+    fi
+
+    echo "bifrost: installe. Le service n'est ni active ni demarre."
+    echo "  usermod -aG $GROUPE_PILOTAGE <utilisateur>   # l'etat, connect-stored et disconnect"
+    echo "  systemctl enable --now bifrost-daemon"
+    echo "Armer le kill switch coupe tout trafic hors tunnel, session SSH comprise."
+    echo "Apres une mise a jour, un service deja demarre garde l'ancien binaire jusqu'a son redemarrage."
+    ;;
+esac
+
+exit 0

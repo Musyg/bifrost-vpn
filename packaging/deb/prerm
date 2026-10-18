@@ -1,0 +1,43 @@
+#!/bin/sh
+# Script prerm du paquet Bifrost (Debian, Ubuntu).
+#
+# Lance AVANT le retrait des fichiers du paquet. C'est ici, et seulement ici,
+# que le pare-feu est retire: la desinstallation est un acte explicite d'un
+# humain, pas une fin de processus. L'unite ne retire jamais le pare-feu a
+# l'arret (packaging/systemd/bifrost-daemon.service dit pourquoi).
+#
+# Sur remove et deconfigure:
+#   1. arrete le service, s'il tourne: le daemon vivant tient le socket et
+#      l'etat du kill switch;
+#   2. le desactive, s'il avait ete active a la main: sans cela le lien laisse
+#      dans multi-user.target.wants pointerait vers une unite retiree, et une
+#      reinstallation le ferait revivre au demarrage suivant, alors que le paquet
+#      n'active jamais le service;
+#   3. retire les filtres et restaure le resolveur par
+#      `bifrost-daemon --cleanup-firewall`, qui rend 0 quand rien n'est pose.
+#
+# Sur upgrade, rien: une mise a jour n'arrete ni ne relance le service.
+#
+# Un code non nul de --cleanup-firewall ne bloque pas la desinstallation: un
+# daemon abime ne doit pas rendre le paquet impossible a retirer. Le journal le
+# dit, pour qu'un retrait incomplet se voie.
+set -e
+
+case "$1" in
+  remove|deconfigure)
+    if [ -d /run/systemd/system ]; then
+      systemctl stop bifrost-daemon.service >/dev/null 2>&1 || true
+    fi
+    systemctl disable bifrost-daemon.service >/dev/null 2>&1 || true
+
+    # Par le PATH, sans chemin absolu (lintian:
+    # command-with-path-in-maintainer-script). Le binaire est encore la: prerm
+    # tourne avant le retrait des fichiers.
+    if command -v bifrost-daemon >/dev/null 2>&1; then
+      bifrost-daemon --cleanup-firewall \
+        || echo "bifrost: --cleanup-firewall a rendu un code non nul, verifier les filtres a la main" >&2
+    fi
+    ;;
+esac
+
+exit 0

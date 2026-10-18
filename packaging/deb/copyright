@@ -1,0 +1,23 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: bifrost
+Upstream-Contact: Bifrost <security@inaricom.com>
+Source: https://github.com/Musyg/bifrost-vpn
+Comment: Les deux binaires sont compiles depuis le depot et lies statiquement
+ aux bibliotheques Rust que nomme son Cargo.lock, chacune sous sa propre
+ licence. Une seule est sous LGPL: wireguard-control, sous LGPL-2.1-or-later,
+ compilee sous Linux seulement; le source complet du client est publie, ce qui
+ permet de la relier. La garde frontiere_licence.rs du depot refuse toute
+ dependance sous GPL ou AGPL, toute autre LGPL et tout paquet sans licence
+ declaree.
+
+Files: *
+Copyright: 2026 Bifrost contributors
+License: MPL-2.0
+
+License: MPL-2.0
+ This Source Code Form is subject to the terms of the Mozilla Public License,
+ v. 2.0. If a copy of the MPL was not distributed with this file, You can
+ obtain one at https://mozilla.org/MPL/2.0/.
+ .
+ On Debian systems, the complete text of the Mozilla Public License version 2.0
+ can be found in /usr/share/common-licenses/MPL-2.0.

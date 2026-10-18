@@ -1,0 +1,28 @@
+Package: bifrost
+Version: @VERSION@
+Architecture: amd64
+Maintainer: Bifrost <security@inaricom.com>
+Section: net
+Priority: optional
+Depends: @SHLIBS@, systemd, nftables
+Homepage: https://github.com/Musyg/bifrost-vpn
+Description: Daemon Bifrost, tunnel WireGuard et kill switch
+ Bifrost est un VPN auto-heberge. Ce paquet installe le daemon privilegie et
+ son client en ligne de commande, l'unite systemd du daemon, le hook de reprise
+ apres veille, la declaration des comptes systeme et les pages de manuel. Le
+ daemon monte un tunnel WireGuard, arme un kill switch nftables et pilote un
+ resolveur DNS chiffre optionnel.
+ .
+ Le paquet fait la meme installation que packaging/install-linux.sh du depot:
+ memes comptes (groupe bifrost, comptes bifrost-coeur et bifrost-resolveur,
+ crees par systemd-sysusers depuis la meme declaration), memes binaires, meme
+ unite, memes modes. Comme lui, il n'active ni ne demarre le service: armer un
+ kill switch coupe tout trafic hors tunnel, session SSH comprise.
+ .
+ Le groupe bifrost n'a que trois commandes du canal du daemon: l'etat,
+ connect-stored et disconnect. root garde tout le canal.
+ .
+ Le resolveur chiffre (dnscrypt-proxy) n'est pas distribue: c'est un binaire
+ tiers, a recuperer et verifier separement, que le daemon attend au chemin
+ /usr/lib/bifrost/dnscrypt-proxy. Un profil qui demande le resolveur embarque
+ echoue avec un message clair tant qu'il manque.

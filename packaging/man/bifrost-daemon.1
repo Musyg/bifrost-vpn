@@ -1,0 +1,399 @@
+.\" Manuel de bifrost-daemon. Page ecrite a la main, ASCII strict, tirets \-.
+.\" Elle decrit les options reelles du binaire, reprises de son aide
+.\" (crates/bifrost-daemon/src/main.rs). Les options masquees (bancs et
+.\" doublures de recette) n'y figurent pas. La recette
+.\" la_page_de_manuel_couvre_les_options_et_commandes_clap, dans les tests du
+.\" binaire, exige que chaque option visible y figure, et qu'elle ne nomme rien
+.\" qui n'existe pas sur la plateforme de la recette hors d'une ligne marquee
+.\" (Windows seulement) ou (Linux seulement).
+.TH BIFROST\-DAEMON 1 "2026-10-17" "Bifrost" "Manuel Bifrost"
+.SH NAME
+bifrost\-daemon \- daemon privilegie Bifrost: tunnel WireGuard et kill switch
+.SH SYNOPSIS
+.B bifrost\-daemon
+[\fIOPTIONS\fR]
+.SH DESCRIPTION
+bifrost\-daemon est le composant privilegie de Bifrost, un VPN auto\-heberge.
+Il monte un tunnel WireGuard, arme un kill switch nftables et pilote un
+resolveur DNS chiffre optionnel. Il recoit les ordres du client bifrost\-cli
+sur un socket Unix, et juge chaque commande selon celui qui la demande.
+.PP
+Sous Linux, root a tout le canal. Le groupe donne par \-\-group (bifrost dans
+l'unite livree) ouvre le socket a ses membres, qui n'y ont que trois
+commandes: l'etat, connect\-stored (le profil que le daemon detient) et
+disconnect. Toute autre commande recoit un refus qui la nomme. Le niveau est
+fixe a l'acceptation de la connexion, une fois par connexion.
+.PP
+Lance sans profil, le daemon n'arme rien: ni kill switch, ni route, ni table
+nft. Arrete ou tue, il ne desarme pas non plus: le retrait des filtres est
+explicite (bifrost\-cli disconnect, ou \-\-cleanup\-firewall).
+.PP
+Le binaire porte aussi la suite des vecteurs de fuite (\-\-run\-checks), des
+modes d'entretien hors ligne (\-\-cleanup\-firewall) et des auto\-tests de banc.
+Une option qui n'existe que sous une plateforme porte le marqueur
+(Windows seulement) ou (Linux seulement).
+.PP
+Le paquet installe l'unite systemd du daemon sans l'activer ni la demarrer:
+armer le kill switch coupe tout trafic hors tunnel, session SSH comprise.
+.SH OPTIONS
+.TP
+.B \-h, \-\-help
+Affiche l'aide et sort.
+.TP
+.B \-V, \-\-version
+Affiche la version et sort.
+.TP
+.B \-\-socket \fICHEMIN\fR
+Chemin du socket Unix ou du named pipe. Par defaut /run/bifrost/daemon.sock.
+.TP
+.B \-\-group \fIGROUPE\fR
+Groupe systeme autorise a piloter le daemon, en plus de root, avec les seules
+trois commandes dites plus haut. Sous Windows, un groupe local cree par un
+administrateur, designe par son nom ou son SID; le daemon refuse un groupe
+predefini ou un compte.
+.TP
+.B \-\-profil \fICHEMIN\fR
+Profil que le daemon detient, et qu'il monte quand on le lui demande sans en
+fournir un. Le chemin vient du daemon, jamais du client. Un profil scelle
+porte un fichier .cred a cote, qui l'emporte. Par defaut
+/etc/bifrost/tunnel.toml.
+.TP
+.B \-\-cleanup\-firewall
+Rend la machine a son etat d'avant le tunnel et sort: filtres du kill switch
+retires, et resolveur restaure la ou le tunnel en laisse une trace durable.
+Appele par la desinstallation, ou a la main si un daemon est mort en laissant
+le trafic bloque.
+.TP
+.B \-\-sonder\-reseau
+Sonde le reseau courant, dit ce qui a ete mesure et ce qui ne l'a pas ete,
+puis le plan d'essai qui en decoule. N'ouvre que des sockets clients, ne
+demande aucun privilege et ne touche ni au tunnel ni au kill switch.
+.TP
+.B \-\-sonder\-quand\-meme
+Sonde meme si le carnet dispense de le faire.
+.TP
+.B \-\-pays \fIPAYS\fR
+Juridiction supposee, pour le plan d'essai: non\-censure (par defaut), chine,
+russie, iran ou turkmenistan.
+.TP
+.B \-\-facade \fIADRESSE\fR
+Adresse d'ecoute de la facade, l'adresse locale stable derriere laquelle les
+coeurs se remplacent. Absente par defaut.
+.TP
+.B \-\-coeurs\-dans \fIREP\fR
+Repertoire contenant les binaires des coeurs. Avec \-\-facade, donne au daemon
+un chemin par coeur.
+.TP
+.B \-\-coeurs\-configurations \fIREP\fR
+Ou ecrire les configurations engendrees pour les coeurs. Elles portent des
+secrets et ne survivent pas a leur coeur. Par defaut /run/bifrost/coeurs.
+.TP
+.B \-\-coeur\-socks\-port \fIPORT\fR
+Port SOCKS local, sur la boucle locale, sur lequel le coeur ecoutera.
+.TP
+.B \-\-coeur\-api\-port \fIPORT\fR
+Port local de l'API de controle du coeur. Son secret est engendre a chaque
+demarrage, jamais passe en argument.
+.TP
+.B \-\-coeur\-utilisateur \fINOM|UID:GID\fR (Linux seulement)
+Compte systeme sous lequel les coeurs anti\-censure tournent, et que le kill
+switch exempte. bifrost\-coeur dans l'unite livree.
+.TP
+.B \-\-coeur\-binaire \fICHEMIN\fR
+Executable du coeur, pour les plateformes qui designent un processus par son
+binaire plutot que par son compte.
+.TP
+.B \-\-coeur\-selftest \fICOEUR\fR
+Eprouve un coeur tiers reel (sing\-box, xray ou amnezia\-wg) sur la boucle
+locale, sans toucher au tunnel ni au kill switch. Rend 3 si le binaire est
+absent.
+.TP
+.B \-\-coeur\-e2e \fIPROFIL.JSON\fR
+Eprouve qu'un profil fait passer le trafic par le coeur, par une banniere
+placee sur la boucle locale du serveur de sortie. Le profil porte des secrets.
+.TP
+.B \-\-journal\-routage \fIREP\fR (Linux seulement)
+Ou tenir le journal des sessions de routage: ce que chaque session a pose. Le
+montage ne retire un objet de Bifrost que s'il est a une session morte de ce
+journal. Par defaut /run/bifrost/routage.
+.TP
+.B \-\-resolveur\-utilisateur \fICOMPTE\fR
+Compte systeme sous lequel tourne le resolveur chiffre embarque. Il n'exempte
+rien: le declarer ferme le :53 a tous les comptes sauf lui.
+bifrost\-resolveur dans l'unite livree.
+.TP
+.B \-\-resolveur\-binaire \fICHEMIN\fR
+Executable du resolveur chiffre (dnscrypt\-proxy), designe par un chemin, jamais
+cherche dans le PATH. /usr/lib/bifrost/dnscrypt\-proxy dans l'unite livree.
+.TP
+.B \-\-resolveur\-configuration \fICHEMIN\fR
+Ou ecrire la configuration engendree pour le resolveur.
+.TP
+.B \-\-resolveur\-etat \fIREP\fR
+Repertoire persistant du resolveur chiffre, ou il garde la liste des serveurs.
+Par defaut /var/lib/bifrost/resolveur.
+.TP
+.B \-\-resolveur\-serveurs \fINOMS\fR
+Noms des serveurs chiffres, tels qu'ils figurent dans la liste publique.
+.TP
+.B \-\-resolveur\-bootstrap \fIIP\fR
+Adresses interrogees en clair pour resoudre le nom des serveurs chiffres; leurs
+requetes partent par le tunnel.
+.TP
+.B \-\-resolveur\-selftest
+Eprouve la supervision d'un vrai resolveur chiffre, sur une adresse de boucle
+locale ecartee, sans toucher au tunnel ni au kill switch. Rend 3 si le binaire
+est absent.
+.TP
+.B \-\-qualifier\-dest \fIHOTES\fR
+Qualifie des sites empruntes par REALITY, separes par des virgules.
+.TP
+.B \-\-doh\-policy \fIposer|constater|retirer\fR
+Pose, constate ou retire les politiques qui coupent le DoH des navigateurs.
+Ecrit sur la machine; une politique posee par quelqu'un d'autre fait refuser
+la cible.
+.TP
+.B \-\-run\-checks
+Execute la suite des vecteurs de fuite et sort, sans daemon ni IPC. Hors du
+service, en root complet: c'est ainsi qu'elle conclut.
+.TP
+.B \-\-list\-checks
+Affiche l'identifiant de chaque vecteur, un par ligne, et sort.
+.TP
+.B \-\-json
+Sortie JSON pour \-\-run\-checks.
+.TP
+.B \-\-veille\-selftest (Linux seulement)
+Eprouve le kill switch a travers une mise en veille: coupe tout le reseau puis
+endort la machine. Machine dediee uniquement.
+.TP
+.B \-\-veille\-cible \fIADDR:PORT\fR (Linux seulement)
+Cible de l'auto\-test de veille, qui accepte une connexion TCP au repos.
+.TP
+.B \-\-veille\-secondes\-linux \fISECONDES\fR (Linux seulement)
+Duree de sommeil de l'auto\-test de veille.
+.TP
+.B \-\-veille\-interface \fIINTERFACE\fR (Linux seulement)
+Interface de tunnel deja montee dont le permis doit etre eprouve a travers la
+veille.
+.TP
+.B \-\-genkey (Linux seulement)
+Engendre une paire de cles WireGuard et l'affiche: privee puis publique.
+.TP
+.B \-\-install\-service (Windows seulement)
+Enregistre le daemon comme service Windows a demarrage automatique, sans le
+demarrer. Avec \-\-group, juge le groupe et inscrit son SID dans la ligne du
+service.
+.TP
+.B \-\-uninstall\-service (Windows seulement)
+Retire le service. Ne touche pas aux filtres deja poses.
+.TP
+.B \-\-with\-identity\-probe (Windows seulement)
+Installe un service de diagnostic au lieu du service normal.
+.TP
+.B \-\-telemetrie\-etat (Windows seulement)
+Dit ce que la couche 1 anti\-telemetrie ferait, sans rien ecrire.
+.TP
+.B \-\-telemetrie\-appliquer (Windows seulement)
+Applique la couche 1: registre, services, taches planifiees.
+.TP
+.B \-\-telemetrie\-restaurer (Windows seulement)
+Rend la machine a l'etat que le journal a garde, puis efface le journal.
+.TP
+.B \-\-telemetrie\-reseau\-etat (Windows seulement)
+Dit ce que la couche 2 anti\-telemetrie ferait, sans rien poser.
+.TP
+.B \-\-telemetrie\-reseau\-appliquer (Windows seulement)
+Pose la couche 2: blocage WFP par SID de service et par chemin.
+.TP
+.B \-\-telemetrie\-reseau\-retirer (Windows seulement)
+Retire tous les filtres de la couche 2.
+.TP
+.B \-\-telemetrie\-sonde\-sid \fISID\fR (Windows seulement)
+Sonde de diagnostic: un seul blocage de la couche 2, sur ce SID de service.
+.TP
+.B \-\-telemetrie\-sonde\-binaire \fICHEMIN\fR (Windows seulement)
+Sonde de diagnostic: un seul blocage de la couche 2, sur ce chemin de binaire.
+.TP
+.B \-\-telemetrie\-profil \fIPROFIL\fR (Windows seulement)
+aucun, equilibre ou strict.
+.TP
+.B \-\-telemetrie\-journal \fICHEMIN\fR (Windows seulement)
+Ou vit le journal du retour en arriere.
+.TP
+.B \-\-wfp\-selftest (Windows seulement)
+Eprouve le cycle de vie des objets WFP sans couper de trafic reel.
+.TP
+.B \-\-wfp\-selftest\-blocking (Windows seulement)
+Le cycle de vie des objets WFP avec le vrai plan de blocage: coupe tout le
+reseau. Machine dediee uniquement.
+.TP
+.B \-\-wfp\-selftest\-lan (Windows seulement)
+Laisse le reseau local ouvert pendant l'auto\-test bloquant.
+.TP
+.B \-\-leak\-target \fIADDR:PORT\fR (Windows seulement)
+Cible de la mesure d'etancheite de l'auto\-test bloquant.
+.TP
+.B \-\-wfp\-veille\-selftest (Windows seulement)
+Eprouve le kill switch a travers une mise en veille: coupe tout le reseau puis
+endort la machine. Machine dediee uniquement.
+.TP
+.B \-\-veille\-secondes \fISECONDES\fR (Windows seulement)
+Duree de sommeil de l'auto\-test de veille.
+.TP
+.B \-\-veille\-tunnel \fIINTERFACE\fR (Windows seulement)
+Interface WireGuard deja montee dont le permis doit etre eprouve.
+.TP
+.B \-\-veille\-monter\-tunnel \fIINTERFACE\fR (Windows seulement)
+Monte un adaptateur WireGuardNT de ce nom pour la mesure, puis le retire.
+.TP
+.B \-\-wgnt\-selftest (Windows seulement)
+Eprouve le transport WireGuardNT sans echanger de trafic.
+.TP
+.B \-\-wgnt\-e2e \fIPROFIL.TOML\fR (Windows seulement)
+Monte un vrai tunnel vers un pair distant, verifie le handshake et le trafic,
+puis demonte, sans armer le kill switch.
+.TP
+.B \-\-wgnt\-e2e\-target \fIADDR:PORT\fR (Windows seulement)
+Adresse a sonder a travers le tunnel.
+.TP
+.B \-\-wgnt\-e2e\-route\-par\-defaut (Windows seulement)
+Accepte un profil a route par defaut. Machine dediee uniquement.
+.TP
+.B \-\-wgnt\-e2e\-bouclage (Windows seulement)
+Provoque la condition de bouclage: une route hote vers le pair posee sur le
+tunnel.
+.TP
+.B \-\-exit\-ip\-selftest \fIPROFIL.TOML\fR (Windows seulement)
+Mesure le vecteur exit\-ip contre un vrai pair distant.
+.TP
+.B \-\-exit\-ip\-cible \fIADDR:PORT\fR (Windows seulement)
+Cible du vecteur exit\-ip, joignable seulement par le tunnel.
+.TP
+.B \-\-exit\-ip\-temoin \fIADDR:PORT\fR (Windows seulement)
+Destination publique tentee pendant la mesure exit\-ip.
+.TP
+.B \-\-demarrage \fIACTION\fR (Windows seulement)
+Filtre de demarrage: montrer, poser ou retirer.
+.TP
+.B \-\-demarrage\-reseau\-local (Windows seulement)
+Ouvre les plages du reseau local.
+.TP
+.B \-\-demarrage\-sans\-overlay (Windows seulement)
+Ferme la plage CGNAT des reseaux overlay, ouverte par defaut.
+.TP
+.B \-\-demarrage\-ipv6 (Windows seulement)
+Laisse passer DHCPv6 et NDP.
+.TP
+.B \-\-startup\-window \fIarmer|constater\fR (Windows seulement)
+Mesure le vecteur startup\-window, de part et d'autre d'un redemarrage.
+.TP
+.B \-\-startup\-window\-cible \fIADDR:PORT\fR (Windows seulement)
+Destination que le filtre de demarrage doit refuser apres le redemarrage.
+.TP
+.B \-\-dns\-leak\-selftest (Windows seulement)
+Mesure le vecteur dns\-leak; coupe le reseau pendant l'armement.
+.TP
+.B \-\-dns\-leak\-resolveur \fIADDR:53\fR (Windows seulement)
+Resolveur externe vers lequel sonder.
+.TP
+.B \-\-coeur\-exemption\-selftest (Windows seulement)
+Mesure le vecteur coeur\-exemption; coupe le reseau pendant l'armement.
+.TP
+.B \-\-coeur\-exemption\-cible \fIADDR:PORT\fR (Windows seulement)
+Destination ordinaire que le coeur doit joindre sous armement.
+.TP
+.B \-\-coeur\-exemption\-resolveur \fIADDR:53\fR (Windows seulement)
+Resolveur externe que le coeur ne doit pas joindre.
+.TP
+.B \-\-resolveur\-exemption\-selftest (Windows seulement)
+Mesure le vecteur resolveur\-exemption; coupe le reseau pendant l'armement.
+.TP
+.B \-\-resolveur\-exemption\-cible \fIADDR:PORT\fR (Windows seulement)
+Destination ordinaire que le resolveur ne doit pas joindre.
+.TP
+.B \-\-resolveur\-exemption\-resolveur \fIADDR:53\fR (Windows seulement)
+Resolveur externe que le resolveur declare doit pouvoir joindre.
+.TP
+.B \-\-ipv6\-leak\-selftest (Windows seulement)
+Mesure le vecteur ipv6\-leak; coupe le reseau pendant l'armement.
+.TP
+.B \-\-ipv6\-leak\-cible \fI[ADDR]:PORT\fR (Windows seulement)
+Destination IPv6 du vecteur ipv6\-leak.
+.TP
+.B \-\-chute\-tunnel\-selftest (Windows seulement)
+Mesure les vecteurs kill\-switch\-on\-drop et reconnect\-window.
+.TP
+.B \-\-chute\-tunnel\-cible \fIADDR:PORT\fR (Windows seulement)
+Destination des sondes de l'auto\-test de chute du tunnel.
+.TP
+.B \-\-temoin\-selftest (Windows seulement)
+Eprouve le temoin de blocage WFP sur une seule adresse.
+.TP
+.B \-\-temoin\-cible \fIIPV4\fR (Windows seulement)
+Adresse bloquee par l'auto\-test du temoin.
+.TP
+.B \-\-temoin\-libre \fIIPV4\fR (Windows seulement)
+Adresse temoin, qui doit rester joignable.
+.TP
+.B \-\-boot\-filtres \fIACTION\fR (Windows seulement)
+Filtres WFP de demarrage et persistants sur une seule adresse: poser,
+constater ou retirer.
+.TP
+.B \-\-boot\-cible \fIIPV4\fR (Windows seulement)
+Adresse que les filtres de demarrage bloquent.
+.TP
+.B \-\-boot\-temoin \fIIPV4\fR (Windows seulement)
+Adresse temoin, qui doit rester joignable.
+.TP
+.B \-\-boot\-orphelin \fIGUID\fR (Windows seulement)
+Cle d'un filtre a retirer en plus des notres.
+.TP
+.B \-\-boot\-service \fISERVICE\fR (Windows seulement)
+Nom de service a inscrire sur le fournisseur persistant.
+.TP
+.B \-\-reprise\-selftest (Windows seulement)
+Eprouve que le daemon est prevenu d'une reprise; endort la machine.
+.TP
+.B \-\-reprise\-secondes \fISECONDES\fR (Windows seulement)
+Duree de sommeil de l'auto\-test de reprise.
+.SH FICHIERS
+.TP
+.B /run/bifrost/daemon.sock
+Socket du daemon, en 0660 au groupe de pilotage.
+.TP
+.B /etc/bifrost/tunnel.toml
+Profil que le daemon detient par defaut.
+.TP
+.B /usr/lib/systemd/system/bifrost\-daemon.service
+Unite systemd du daemon, posee par le paquet (packaging/install\-linux.sh la
+pose sous /etc/systemd/system).
+.TP
+.B /usr/lib/sysusers.d/bifrost.conf
+Declaration des comptes: le groupe bifrost, les comptes bifrost\-coeur et
+bifrost\-resolveur.
+.TP
+.B /usr/lib/systemd/system\-sleep/bifrost\-reprise
+Hook de reprise apres veille: il previent le daemon au reveil.
+.TP
+.B /usr/lib/bifrost/dnscrypt\-proxy
+Resolveur chiffre tiers attendu par l'unite. Il n'est pas distribue et se
+recupere separement.
+.SH "CODES DE SORTIE"
+.TP
+.B 0
+Succes.
+.TP
+.B 1
+Pour \-\-run\-checks, au moins un vecteur en echec.
+.TP
+.B 3
+Auto\-test non concluant: le binaire tiers eprouve (coeur, resolveur) est
+absent.
+.PP
+Les autres codes non nuls signalent une erreur d'execution.
+.SH "VOIR AUSSI"
+.BR bifrost\-cli (1),
+.BR nft (8),
+.BR systemctl (1),
+.BR sysusers.d (5)

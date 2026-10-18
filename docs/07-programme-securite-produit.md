@@ -525,6 +525,39 @@ pose les politiques.
 - Le resolveur sous les politiques n'est mesure qu'a son lancement: sans pair vivant il ne repond
   pas, avec ou sans elles. Aucune chute sur une poignee invalide n'a ete provoquee.
 
+**2.5 Paquets (18/10/2026)** - Le daemon et la CLI ont un `.deb`, un `.rpm` et un MSI (WiX 5.0.2),
+fabriques par la CI et retenus 7 jours comme artefacts des runs: aucun depot ne les sert, aucune
+release ne les porte, et le MSI n'est construit que sur un lancement manuel `windows`. Ils ne sont
+**pas signes**: ni signature Authenticode du MSI ou de ses binaires, ni signature GPG des paquets
+Linux. Leur origine se reduit donc a celle du run qui les a construits (depot, revision, journal du
+job); l'empreinte SHA-256 publiee a cote du MSI ne prouve que l'integrite du telechargement depuis
+ce run, pas son auteur.
+
+Ce que les paquets executent avec les privileges de l'installation est borne et garde. Sous Linux,
+les scripts du mainteneur appliquent `sysusers.d`, refusent des comptes melanges comme
+`install-linux.sh` et rechargent systemd; ils n'activent ni ne demarrent l'unite, et le retrait
+arrete le service, le desactive et retire les filtres du kill switch. Sous Windows, les actions
+differees tournent sous LocalSystem: `icacls` pose sur `%ProgramData%\Bifrost` les droits que pose
+`install-windows.ps1` (propriete aux Administrateurs, heritage coupe, SYSTEM et Administrateurs
+seuls, lecture heritable de `resolveur` et ecriture heritable de `resolveur\etat` a LocalService,
+par leurs SID), `net localgroup` cree le groupe d'acces `Bifrost` s'il manque, et
+`bifrost-daemon --install-service --group Bifrost` enregistre le service, le daemon jugeant le
+groupe et inscrivant son SID; a la desinstallation, `--cleanup-firewall` puis
+`--uninstall-service`. `icacls` et `net` sont designes sous le repertoire systeme 64 bits, le daemon
+par le fichier que le MSI installe. Les recettes `paquets_linux.rs` et `paquets_windows.rs`
+comparent ces appels a ceux des scripts d'installation, et `audit_planifie.rs` borne les jobs (le
+MSI au seul lancement manuel `windows`, `BIFROST_RUNNER_JETABLE` a la seule etape qui installe,
+artefacts a 7 jours).
+
+Limites, lues dans le code:
+- Un retour arriere de l'installation du MSI retire le service, mais laisse le groupe `Bifrost` s'il
+  l'a cree. Une reparation ne rejoue pas les actions, qui ne tournent qu'a la premiere
+  installation. Une mise a niveau desinstalle l'ancienne version sans retirer les filtres, puis
+  installe la nouvelle sans demarrer le service.
+- Un utilisateur local nomme `Bifrost` fait echouer l'installation du MSI a `--install-service`, ou
+  le daemon refuse un compte; `install-windows.ps1` le refuse plus tot.
+- `dnscrypt-proxy` et `wireguard.dll` ne sont dans aucun paquet.
+
 ### PARTIE 3 - AUDIT EXTERNE
 
 **3.1 Marche des auditeurs**

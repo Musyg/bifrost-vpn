@@ -1,0 +1,38 @@
+#!/bin/sh
+# Script postrm du paquet Bifrost (Debian, Ubuntu).
+#
+# Lance APRES le retrait des fichiers du paquet: dpkg a deja retire ce que le
+# paquet possede (binaires, unite, hook, declaration des comptes, pages de
+# manuel). Ce script recharge systemd et, a la purge, dit ce qui reste.
+#
+# Purge:
+#   - /var/lib/bifrost (StateDirectory= de l'unite, cree par systemd au
+#     demarrage, pas un fichier du paquet) est retire s'il est vide. S'il ne
+#     l'est pas, il est garde et le message le nomme: il porte l'etat du daemon
+#     (sauvegarde du resolveur du systeme, carnet, cache du resolveur chiffre),
+#     que seul un administrateur peut juger perimable;
+#   - les comptes systeme (groupe bifrost, bifrost-coeur, bifrost-resolveur) sont
+#     conserves, comme le veut l'usage Debian: des fichiers peuvent encore leur
+#     appartenir, et un identifiant reattribue a un autre compte en heriterait.
+#
+# /run/bifrost est un tmpfs: il disparait au redemarrage, rien a retirer.
+set -e
+
+case "$1" in
+  purge)
+    if [ -d /var/lib/bifrost ]; then
+      rmdir --ignore-fail-on-non-empty /var/lib/bifrost
+    fi
+    if [ -d /var/lib/bifrost ]; then
+      echo "bifrost: /var/lib/bifrost n'est pas vide et reste en place (etat du daemon)"
+    fi
+    echo "bifrost: les comptes systeme bifrost, bifrost-coeur et bifrost-resolveur sont conserves"
+    ;;
+esac
+
+# Sur remove comme sur purge, oublier l'unite retiree.
+if [ -d /run/systemd/system ]; then
+  systemctl daemon-reload >/dev/null 2>&1 || true
+fi
+
+exit 0

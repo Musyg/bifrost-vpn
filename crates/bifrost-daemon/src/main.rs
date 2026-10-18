@@ -3518,4 +3518,183 @@ mod tests {
             "option(s) sans aide, probablement un commentaire capture par le voisin: {muettes:?}"
         );
     }
+
+    // --- La page de manuel face a la commande clap ---------------------------
+    //
+    // `packaging/man/bifrost-daemon.1` est ecrite a la main et part dans les
+    // paquets Linux. Elle doit dire VRAI sur le binaire: chaque option visible
+    // de `Args` y a son entree, aucune option masquee (banc, doublure) n'y
+    // figure, et toute option qu'elle nomme existe sur cette plateforme, sauf
+    // sur une ligne qui porte le marqueur de l'autre (les `cfg` font differer
+    // la commande d'un systeme a l'autre). La page se relit depuis
+    // CARGO_MANIFEST_DIR: la recette compte sur chaque hote, et chaque hote
+    // juge sa propre moitie.
+
+    /// Nom de chaque option `\-\-nom` de la page (tirets internes ecrits `\-`),
+    /// avec la ligne qui la porte, pour lire son marqueur.
+    fn options_de_la_page(page: &str) -> Vec<(String, String)> {
+        let o = page.as_bytes();
+        let mut sorties = Vec::new();
+        let mut i = 0usize;
+        while i + 3 < o.len() {
+            if o[i] == b'\\' && o[i + 1] == b'-' && o[i + 2] == b'\\' && o[i + 3] == b'-' {
+                let mut j = i + 4;
+                let mut nom = String::new();
+                loop {
+                    let debut = j;
+                    while j < o.len() && o[j].is_ascii_alphanumeric() {
+                        j += 1;
+                    }
+                    if j == debut {
+                        break;
+                    }
+                    nom.push_str(&page[debut..j]);
+                    // `\-` suivi d'un alphanumerique prolonge un nom compose.
+                    if j + 2 < o.len()
+                        && o[j] == b'\\'
+                        && o[j + 1] == b'-'
+                        && o[j + 2].is_ascii_alphanumeric()
+                    {
+                        nom.push('-');
+                        j += 2;
+                        continue;
+                    }
+                    break;
+                }
+                if !nom.is_empty() {
+                    let debut = page[..i].rfind('\n').map_or(0, |p| p + 1);
+                    let fin = page[i..].find('\n').map_or(page.len(), |p| i + p);
+                    sorties.push((nom, page[debut..fin].to_string()));
+                }
+                i = j.max(i + 4);
+            } else {
+                i += 1;
+            }
+        }
+        sorties
+    }
+
+    /// Les ecarts entre une page et une commande clap, pour la plateforme dont
+    /// `marqueur_autre` est le marqueur de l'AUTRE. Les noms se comparent
+    /// exacts, jamais en sous-chaine: `--veille-secondes` ne doit pas couvrir
+    /// `--veille-secondes-linux`.
+    fn ecarts_de_la_page(
+        page: &str,
+        commande: &clap::Command,
+        marqueur_autre: &str,
+    ) -> Vec<String> {
+        use std::collections::BTreeSet;
+        let mut commande = commande.clone();
+        commande.build();
+        let mut visibles = BTreeSet::new();
+        let mut masquees = BTreeSet::new();
+        let mut reelles = BTreeSet::new();
+        for a in commande.get_arguments() {
+            if let Some(l) = a.get_long() {
+                reelles.insert(l.to_string());
+                if a.is_hide_set() {
+                    masquees.insert(l.to_string());
+                } else {
+                    visibles.insert(l.to_string());
+                }
+            }
+        }
+        let options = options_de_la_page(page);
+        // Une entree OPTIONS (ligne `.B `) documente; un renvoi en prose non.
+        let documentees: BTreeSet<&str> = options
+            .iter()
+            .filter(|(_, ligne)| ligne.starts_with(".B "))
+            .map(|(nom, _)| nom.as_str())
+            .collect();
+        let mut ecarts = Vec::new();
+        for nom in &visibles {
+            if !documentees.contains(nom.as_str()) {
+                ecarts.push(format!(
+                    "option visible sans entree .B dans la page: --{nom}"
+                ));
+            }
+        }
+        for (nom, ligne) in &options {
+            if masquees.contains(nom) {
+                ecarts.push(format!(
+                    "option masquee nommee par la page: --{nom}: {ligne}"
+                ));
+            } else if !reelles.contains(nom) && !ligne.contains(marqueur_autre) {
+                ecarts.push(format!(
+                    "la page nomme --{nom}, absente sur cette plateforme et sans le \
+                     marqueur de l'autre: {ligne}"
+                ));
+            }
+        }
+        if commande.get_subcommands().next().is_some() {
+            ecarts.push("le daemon a des sous-commandes, que la page ne decrit pas".into());
+        }
+        ecarts
+    }
+
+    fn marqueur_de_l_autre() -> &'static str {
+        if cfg!(windows) {
+            "(Linux seulement)"
+        } else {
+            "(Windows seulement)"
+        }
+    }
+
+    #[test]
+    fn la_page_de_manuel_couvre_les_options_et_commandes_clap() {
+        let chemin = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../packaging/man/bifrost-daemon.1"
+        );
+        let page = std::fs::read_to_string(chemin)
+            .unwrap_or_else(|e| panic!("page de manuel illisible {chemin}: {e}"));
+        let ecarts = ecarts_de_la_page(&page, &Args::command(), marqueur_de_l_autre());
+        assert!(
+            ecarts.is_empty(),
+            "{} ecart(s) entre packaging/man/bifrost-daemon.1 et la commande clap:\n  {}",
+            ecarts.len(),
+            ecarts.join("\n  ")
+        );
+    }
+
+    /// La garde voit chaque forme d'ecart, sur une page fabriquee a partir de
+    /// la vraie commande: une option qui n'existe pas, une option visible
+    /// oubliee, une option masquee citee. Et le marqueur de l'autre plateforme
+    /// exempte bien sa ligne.
+    #[test]
+    fn la_garde_de_la_page_voit_chaque_ecart() {
+        let commande = Args::command();
+        let page = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../packaging/man/bifrost-daemon.1"
+        ))
+        .expect("page de manuel");
+        let autre = marqueur_de_l_autre();
+        let inventee = format!("{page}.TP\n.B \\-\\-option\\-inventee\nRien.\n");
+        assert!(
+            ecarts_de_la_page(&inventee, &commande, autre)
+                .iter()
+                .any(|e| e.contains("--option-inventee")),
+            "une option absente du binaire passe"
+        );
+        let marquee = format!("{page}.TP\n.B \\-\\-option\\-inventee {autre}\nRien.\n");
+        assert!(
+            ecarts_de_la_page(&marquee, &commande, autre).is_empty(),
+            "le marqueur de l'autre plateforme n'exempte pas sa ligne"
+        );
+        let sans_socket = page.replace(".B \\-\\-socket", ".B socket");
+        assert!(
+            ecarts_de_la_page(&sans_socket, &commande, autre)
+                .iter()
+                .any(|e| e.contains("sans entree .B dans la page: --socket")),
+            "une option visible oubliee passe"
+        );
+        let masquee = format!("{page}.PP\nVoir \\-\\-probe.\n");
+        assert!(
+            ecarts_de_la_page(&masquee, &commande, autre)
+                .iter()
+                .any(|e| e.contains("option masquee nommee par la page: --probe")),
+            "une option masquee citee passe"
+        );
+    }
 }

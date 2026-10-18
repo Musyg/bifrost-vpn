@@ -319,10 +319,10 @@ $groupe = Get-LocalGroup -Name $GroupeAcces -ErrorAction SilentlyContinue
 if ($groupe) {
     Info "groupe local $GroupeAcces existe deja, membres conserves"
 } else {
-    # New-LocalGroup refuse une description de plus de 48 caracteres, quand sa
-    # documentation en annonce 256: mesure le 18/10/2026 sous Windows Server
-    # 2025 (PowerShell 7.6.6). Celle-ci en fait 46, nom du service developpe;
-    # la borne est gardee par descriptions_des_comptes_windows.rs.
+    # New-LocalGroup refuse une description de plus de 48 caracteres et
+    # s'arrete avant de creer le groupe (mesure du 18/10/2026 sous Windows
+    # Server 2025, PowerShell 7.6.6); le MSI reprend ce texte exact
+    # (paquets_windows.rs tient les deux).
     New-LocalGroup -Name $GroupeAcces -Description "Acces sans elevation au canal de $NomService" | Out-Null
     Ok "groupe local $GroupeAcces cree, vide"
 }

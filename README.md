@@ -125,6 +125,23 @@ Armer le kill switch coupe tout trafic sortant qui ne passe pas par le tunnel, y
 
 C'est pourquoi la recette de bout en bout tourne dans des namespaces reseau.
 
+## Paquets
+
+Le daemon et la CLI ont des paquets: un `.deb` et un `.rpm` pour Linux (amd64), un MSI pour Windows (x64). Ils ne sont **pas signes**, et aucun depot ne les sert ni aucune release ne les porte : ce sont les artefacts des runs de la CI, retenus 7 jours (Actions > ci > le run > Artifacts). Le `.deb` et le `.rpm` (artefact `paquets-linux`) sortent de chaque push sur `main`, de chaque PR et d'un lancement manuel sans la case `windows` ; le MSI (artefact `paquets-windows`, avec son empreinte SHA-256) seulement d'un lancement manuel avec la case `windows`. Aucune version n'est promise : un paquet porte la version du `Cargo.toml` de la revision qui l'a construit.
+
+Un paquet installe ce qu'installent les scripts des deux sections suivantes, aux memes chemins et avec les memes droits : memes comptes, meme unite (sous `/usr/lib/systemd/system`, ou les paquets la posent, au lieu de `/etc/systemd/system`), meme ligne de service Windows, groupe d'acces `Bifrost` compris. Il **ne demarre pas** le service, pas plus que les scripts : sous Linux l'unite n'est ni activee ni demarree ; sous Windows le service est enregistre en demarrage automatique, comme par `install-windows.ps1`, et part au prochain redemarrage. `dnscrypt-proxy` et `wireguard.dll` ne sont dans aucun paquet : le MSI fait nommer le resolveur par la ligne du service s'il trouve `dnscrypt-proxy.exe` deja depose dans `%ProgramFiles%\Bifrost`, et `wireguard.dll` se depose a la main a cote du daemon.
+
+```bash
+sudo apt install ./bifrost_<version>_amd64.deb
+sudo systemctl enable --now bifrost-daemon   # decision explicite, comme apres le script
+```
+
+```powershell
+msiexec /i bifrost-<version>-x64.msi
+```
+
+Retirer le paquet arrete le service, retire les filtres du kill switch (`--cleanup-firewall`), puis le service et les binaires ; une mise a niveau ne retire pas les filtres. Comme avec les scripts, les comptes et le groupe d'acces restent (les sections de desinstallation ci-dessous disent comment les retirer), et les donnees aussi quand il y en a, sous `/var/lib/bifrost` ou `%ProgramData%\Bifrost`. La purge du `.deb` retire `/var/lib/bifrost` s'il est vide, et le garde sinon en le disant.
+
 ## Installer sur un systeme systemd
 
 ```bash
@@ -477,9 +494,11 @@ MATCH n'est pas une preuve d'etancheite du VPN. Voir
 ### Quota de CI et validation Windows
 
 Les PR et les push sur `main` lancent les controles Linux, la coquille
-graphique sous Linux (format, compilation, clippy, recettes), la suite de
-fuite, l'audit des dependances et le fuzzing des parseurs (graines rejouees,
-puis 30 secondes par cible). Chaque jour a 04:37 UTC, un run planifie ne lance
+graphique sous Linux (format, compilation, clippy, recettes), les paquets
+Linux (`.deb` et `.rpm` fabriques et verifies, le `.deb` installe puis retire
+sur le runner jetable), la suite de fuite, l'audit des dependances et le
+fuzzing des parseurs (graines rejouees, puis 30 secondes par cible). Chaque
+jour a 04:37 UTC, un run planifie ne lance
 que l'audit des dependances (`cargo audit`, `cargo deny`, `cargo vet`) sur le
 dernier commit de `main`, avec une base d'avis RustSec telechargee a chaque
 run: un avis publie contre une dependance d'un des verrous (racine, harnais de
@@ -496,9 +515,11 @@ revision a livrer (Actions > ci > Run workflow > cocher `windows`), ou:
 gh workflow run ci.yml --repo Musyg/bifrost-vpn --ref main -f windows=true
 ```
 
-Ce lancement ne fait tourner que les deux jobs Windows: lint et tests (limite
-de 30 minutes) et la coquille graphique (compilation, clippy et recettes,
-limite de 25 minutes), chacun avec un seul run actif a la fois. Sans la case
+Ce lancement ne fait tourner que les trois jobs Windows: lint et tests (limite
+de 30 minutes), la coquille graphique (compilation, clippy et recettes,
+limite de 25 minutes) et le MSI (construction, validation ICE, installation
+reelle, reparation et desinstallation, limite de 30 minutes), chacun avec un
+seul run actif a la fois. Sans la case
 `windows`, un lancement manuel execute les controles Linux habituels. Un job
 Windows `skipped` n'est pas une validation Windows; ne pas presenter le vert
 Linux comme tel. La derniere validation Windows doit nommer le SHA
@@ -519,10 +540,18 @@ runner est un compte predefini: ces recettes unitaires y rendent `SKIPPED`
 sous une seule raison, et le budget d'abstention Windows attend ces lignes
 exactement.
 
+Le job du MSI porte aussi `BIFROST_RUNNER_JETABLE`, a sa seule etape
+d'installation: le MSI y est installe pour de bon (service, groupe `Bifrost`,
+droits de `%ProgramData%\Bifrost`, ligne du service relue dans le registre),
+repare, puis desinstalle, avec et sans resolveur depose; les journaux de
+`msiexec` sont gardes 7 jours a cote du MSI. Le job `paquets-linux` le porte a
+l'etape qui installe le `.deb`, rejoue le refus des comptes melanges, puis le
+retire et le purge.
+
 Une PR qui touche `gui/`, `crates/bifrost-coquille`, `crates/bifrost-icone`,
 `crates/bifrost-ipc` ou `packaging/msi` attend, avant sa fusion, un run manuel
-`windows` vert sur sa revision: c'est le seul run ou la coquille se construit
-sous Windows.
+`windows` vert sur sa revision: c'est le seul run ou la coquille et le MSI se
+construisent sous Windows.
 
 ### Recettes locales
 
@@ -531,7 +560,8 @@ cargo test --workspace                 # tests unitaires et d'integration
 sudo ./scripts/e2e-linux.sh            # recette de bout en bout, en namespaces
 sudo ./scripts/e2e-linux.sh target/debug --unite packaging/systemd/bifrost-daemon.service  # sous les seules capacites de l'unite
 sudo ./scripts/check-strict.sh         # exige que les dix vecteurs soient PASSED
-sudo ./scripts/packaging-linux.sh      # empaquetage, dans une racine jetable
+sudo ./scripts/packaging-linux.sh      # l'installateur Linux, dans une racine jetable
+./scripts/paquets-linux.sh             # .deb et .rpm depuis target/release, verifies, rien d'installe
 ./scripts/resolveur-linux.sh           # configuration du resolveur chiffre et liste anti-telemetrie
 sudo ./scripts/resolveur-systemd-linux.sh   # le resolveur sous l'unite reelle
 sudo ./scripts/service-systemd-linux.sh     # connect complet par le service installe

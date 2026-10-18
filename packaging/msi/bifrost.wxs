@@ -1,0 +1,213 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Source WiX 5 du MSI de Bifrost: le daemon (bifrost-daemon.exe) et son client
+  (bifrost-cli.exe). Il fait ce que fait packaging/install-windows.ps1, avec les
+  memes repertoires, les memes droits, le meme groupe d'acces et la meme ligne de
+  service, et il ne demarre pas le service. crates/bifrost-evasion/tests/
+  paquets_windows.rs garde cette parite.
+
+  ASCII strict, LF. Un commentaire XML ne peut pas contenir deux tirets de suite:
+  les options du daemon y sont nommees sans leur prefixe; les attributs ExeCommand
+  plus bas portent le prefixe reel.
+
+  - Version="$(var.Version)": aucune version ecrite ici. scripts/paquets-windows.ps1
+    la lit dans Cargo.toml ([workspace.package]), comme @VERSION@ des paquets Linux.
+
+  - UpgradeCode fixe: il ne change jamais, c'est lui qui fait reconnaitre une
+    version precedente a la mise a niveau. ProductCode est engendre a chaque
+    construction (MajorUpgrade l'exige).
+
+  - Aucun ServiceInstall. Le compte LocalSystem, la dependance BFE, le SID propre,
+    les actions sur echec et la ligne de commande sont declares dans
+    crates/bifrost-daemon/src/service/spec.rs; un ServiceInstall les recopierait ici
+    et deriverait le jour ou spec.rs change. Le service est donc enregistre par le
+    daemon lui-meme, << bifrost-daemon.exe install-service group Bifrost >>, comme
+    le fait install-windows.ps1. Le daemon juge le groupe (groupe local cree par un
+    administrateur, jamais un groupe predefini ni un compte) et ecrit son SID en fin
+    de ligne: group "<SID>". Le SID d'un groupe local est propre a chaque machine:
+    aucune construction ne peut l'ecrire d'avance.
+
+  - Le resolveur chiffre (dnscrypt-proxy.exe) n'est pas distribue. Comme le
+    script, le MSI ne le nomme dans la ligne du service que s'il est deja pose dans
+    le repertoire d'installation (AppSearch, propriete BIFROSTRESOLVEUR), avec le
+    compte LocalService. wireguard.dll n'est pas distribue non plus.
+
+  - Le service n'est pas demarre. Il est enregistre en demarrage automatique par
+    spec.rs, comme avec le script: il partira au prochain redemarrage.
+
+  - Les droits de %ProgramData%\Bifrost: les quatre invocations icacls du script,
+    memes SID et memes drapeaux, en actions differees. util:PermissionEx ecrit la
+    table MsiLockPermissionsEx, dont chaque ligne securise un objet, ici le dossier
+    lui-meme; le script reprend en plus la propriete de tout ce que l'arbre contient
+    deja (icacls setowner, recursif), et c'est ce qui retire a un compte ordinaire
+    qui y aurait pose un fichier avant l'installation la main sur sa liste. Rejouer
+    les memes appels laisse aussi paquets_windows.rs les comparer un a un.
+
+  - Le groupe local Bifrost: WiX 5.0.2 ne sait pas creer un groupe (util:Group n'y
+    porte que Id, Name et Domain; la creation arrive avec WiX 6). Il est donc cree
+    par une action differee, << net.exe localgroup Bifrost /add >>, avec le
+    commentaire que lui donne install-windows.ps1. Le code << existe deja >> est
+    ignore: un groupe existant garde ses membres. Un echec reel est rattrape par
+    install-service, que le daemon refuse si le groupe manque. Le groupe est
+    conserve a la desinstallation, comme les comptes systeme des paquets Linux.
+
+  - Desinstallation, avant RemoveFiles: ServiceControl arrete le service, puis
+    cleanup-firewall retire les filtres WFP (l'arret du service ne les retire pas,
+    c'est voulu), puis uninstall-service retire le service. Pendant une mise a
+    niveau, l'ancienne version est desinstallee sans cleanup-firewall: le script ne
+    retire pas les filtres quand il reinstalle, le MSI non plus.
+
+  - Ce que le daemon ecrit sous %ProgramData%\Bifrost a l'execution (profil,
+    journal, etat du resolveur) n'est pas retire: le MSI ne retire que ce qu'il a
+    pose, et un repertoire seulement s'il est vide.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+
+  <Package Name="Bifrost"
+           Manufacturer="Bifrost"
+           Version="$(var.Version)"
+           UpgradeCode="D2082E08-0166-4F9A-A300-5E3C7A967F42"
+           Scope="perMachine"
+           Language="1033">
+
+    <MajorUpgrade DowngradeErrorMessage="Une version plus recente de Bifrost est deja installee." />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- Entree Programmes et fonctionnalites. L'icone est ecrite par bifrost-icone
+         sous target/ (-d Icone=<ico>), jamais versionnee. -->
+    <Icon Id="bifrost.ico" SourceFile="$(var.Icone)" />
+    <Property Id="ARPPRODUCTICON" Value="bifrost.ico" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/Musyg/bifrost-vpn" />
+    <Property Id="ARPNOMODIFY" Value="1" />
+
+    <!-- Le resolveur deja pose par l'administrateur, que le script nommerait. -->
+    <Property Id="BIFROSTRESOLVEUR">
+      <DirectorySearch Id="RechercheInstallation" Path="[ProgramFiles64Folder]Bifrost" Depth="0">
+        <FileSearch Id="RechercheResolveur" Name="dnscrypt-proxy.exe" />
+      </DirectorySearch>
+    </Property>
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Bifrost" />
+    </StandardDirectory>
+    <StandardDirectory Id="CommonAppDataFolder">
+      <Directory Id="BIFROSTDATA" Name="Bifrost">
+        <Directory Id="BIFROSTRESOLVEURDIR" Name="resolveur">
+          <Directory Id="BIFROSTETAT" Name="etat" />
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+
+    <Component Id="DaemonExe" Directory="INSTALLFOLDER" Bitness="always64">
+      <File Id="bifrostdaemon.exe" Source="$(var.Binaires)\bifrost-daemon.exe" KeyPath="yes" />
+      <!-- Sans ServiceInstall en face: il agit par le nom du service. -->
+      <ServiceControl Id="ArretBifrostDaemon" Name="BifrostDaemon" Stop="uninstall" Wait="yes" />
+    </Component>
+
+    <Component Id="CliExe" Directory="INSTALLFOLDER" Bitness="always64">
+      <File Id="bifrostcli.exe" Source="$(var.Binaires)\bifrost-cli.exe" KeyPath="yes" />
+    </Component>
+
+    <!-- Les repertoires de donnees, crees vides et retires s'ils le sont restes. -->
+    <Component Id="DonneesRepertoires" Directory="BIFROSTDATA" Bitness="always64">
+      <RegistryValue Root="HKLM" Key="Software\Bifrost" Name="Installe" Type="integer" Value="1" KeyPath="yes" />
+      <CreateFolder Directory="BIFROSTDATA" />
+      <CreateFolder Directory="BIFROSTRESOLVEURDIR" />
+      <CreateFolder Directory="BIFROSTETAT" />
+      <RemoveFolder Id="RetraitEtat" Directory="BIFROSTETAT" On="uninstall" />
+      <RemoveFolder Id="RetraitResolveur" Directory="BIFROSTRESOLVEURDIR" On="uninstall" />
+      <RemoveFolder Id="RetraitDonnees" Directory="BIFROSTDATA" On="uninstall" />
+    </Component>
+
+    <Feature Id="Principal" Title="Bifrost" Level="1">
+      <ComponentRef Id="DaemonExe" />
+      <ComponentRef Id="CliExe" />
+      <ComponentRef Id="DonneesRepertoires" />
+    </Feature>
+
+    <!-- Actions differees, Impersonate="no": elles tournent en LocalSystem. -->
+
+    <!-- L'enregistrement du service, sous les deux formes du script. -->
+    <CustomAction Id="BifrostServiceInstall" FileRef="bifrostdaemon.exe"
+                  ExeCommand="--install-service --group Bifrost"
+                  Execute="deferred" Impersonate="no" Return="check" />
+    <CustomAction Id="BifrostServiceInstallResolveur" FileRef="bifrostdaemon.exe"
+                  ExeCommand="--install-service --resolveur-binaire &quot;[INSTALLFOLDER]dnscrypt-proxy.exe&quot; --resolveur-utilisateur LocalService --group Bifrost"
+                  Execute="deferred" Impersonate="no" Return="check" />
+    <!-- Retour arriere: si une action posterieure echoue, le service pose part. -->
+    <CustomAction Id="BifrostServiceRollback" FileRef="bifrostdaemon.exe"
+                  ExeCommand="--uninstall-service"
+                  Execute="rollback" Impersonate="no" Return="ignore" />
+    <!-- La seule commande qui retire les filtres WFP. Return="ignore": rien a
+         retirer ne doit pas bloquer la desinstallation; le journal /l*v porte le
+         code. -->
+    <CustomAction Id="BifrostCleanupFirewall" FileRef="bifrostdaemon.exe"
+                  ExeCommand="--cleanup-firewall"
+                  Execute="deferred" Impersonate="no" Return="ignore" />
+    <CustomAction Id="BifrostServiceUninstall" FileRef="bifrostdaemon.exe"
+                  ExeCommand="--uninstall-service"
+                  Execute="deferred" Impersonate="no" Return="check" />
+
+    <!-- icacls et net: une action differee ne lit que son CustomActionData. Une
+         SetProperty immediate de meme Id construit la ligne, chemins resolus, et
+         WixQuietExec64 l'execute. La ligne commence par le nom de l'application
+         entre guillemets, ce que WixQuietExec exige. Les repertoires restent sans
+         guillemets: un chemin de repertoire MSI finit par une contre-oblique, qui
+         echapperait un guillemet fermant, et ProgramData\Bifrost ne porte aucun
+         espace. Le commentaire du groupe porte des espaces: entre guillemets, sans
+         contre-oblique finale. Memes arguments que install-windows.ps1:
+           1. propriete reprise par les Administrateurs, recursive;
+           2. heritage coupe, SYSTEM et Administrateurs en controle total;
+           3. resolveur: lecture et traversee heritables pour LocalService;
+           4. etat du resolveur: modification heritable pour LocalService. -->
+    <SetProperty Id="BifrostAclProprietaire" Sequence="execute" Before="BifrostAclProprietaire"
+                 Condition="NOT Installed"
+                 Value="&quot;[System64Folder]icacls.exe&quot; [BIFROSTDATA] /setowner *S-1-5-32-544 /T /C" />
+    <CustomAction Id="BifrostAclProprietaire" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)"
+                  DllEntry="WixQuietExec64" Execute="deferred" Impersonate="no" Return="check" />
+
+    <SetProperty Id="BifrostAclDonnees" Sequence="execute" Before="BifrostAclDonnees"
+                 Condition="NOT Installed"
+                 Value="&quot;[System64Folder]icacls.exe&quot; [BIFROSTDATA] /inheritance:r /grant *S-1-5-18:(OI)(CI)F *S-1-5-32-544:(OI)(CI)F" />
+    <CustomAction Id="BifrostAclDonnees" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)"
+                  DllEntry="WixQuietExec64" Execute="deferred" Impersonate="no" Return="check" />
+
+    <SetProperty Id="BifrostAclResolveur" Sequence="execute" Before="BifrostAclResolveur"
+                 Condition="NOT Installed"
+                 Value="&quot;[System64Folder]icacls.exe&quot; [BIFROSTRESOLVEURDIR] /grant *S-1-5-19:(OI)(CI)RX" />
+    <CustomAction Id="BifrostAclResolveur" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)"
+                  DllEntry="WixQuietExec64" Execute="deferred" Impersonate="no" Return="check" />
+
+    <SetProperty Id="BifrostAclEtat" Sequence="execute" Before="BifrostAclEtat"
+                 Condition="NOT Installed"
+                 Value="&quot;[System64Folder]icacls.exe&quot; [BIFROSTETAT] /grant *S-1-5-19:(OI)(CI)M" />
+    <CustomAction Id="BifrostAclEtat" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)"
+                  DllEntry="WixQuietExec64" Execute="deferred" Impersonate="no" Return="check" />
+
+    <SetProperty Id="BifrostGroupe" Sequence="execute" Before="BifrostGroupe"
+                 Condition="NOT Installed"
+                 Value="&quot;[System64Folder]net.exe&quot; localgroup Bifrost /add /comment:&quot;Acces sans elevation au canal de BifrostDaemon&quot;" />
+    <CustomAction Id="BifrostGroupe" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)"
+                  DllEntry="WixQuietExec64" Execute="deferred" Impersonate="no" Return="ignore" />
+
+    <InstallExecuteSequence>
+      <!-- Installation: apres la pose des fichiers et des repertoires, le groupe
+           avant le service. -->
+      <Custom Action="BifrostAclProprietaire" After="InstallFiles" Condition="NOT Installed" />
+      <Custom Action="BifrostAclDonnees" After="BifrostAclProprietaire" Condition="NOT Installed" />
+      <Custom Action="BifrostAclResolveur" After="BifrostAclDonnees" Condition="NOT Installed" />
+      <Custom Action="BifrostAclEtat" After="BifrostAclResolveur" Condition="NOT Installed" />
+      <Custom Action="BifrostGroupe" After="BifrostAclEtat" Condition="NOT Installed" />
+      <Custom Action="BifrostServiceRollback" After="BifrostGroupe" Condition="NOT Installed" />
+      <Custom Action="BifrostServiceInstall" After="BifrostServiceRollback" Condition="NOT Installed AND NOT BIFROSTRESOLVEUR" />
+      <Custom Action="BifrostServiceInstallResolveur" After="BifrostServiceInstall" Condition="NOT Installed AND BIFROSTRESOLVEUR" />
+
+      <!-- Desinstallation: apres StopServices, avant RemoveFiles. -->
+      <Custom Action="BifrostCleanupFirewall" After="StopServices" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+      <Custom Action="BifrostServiceUninstall" After="BifrostCleanupFirewall" Condition="REMOVE=&quot;ALL&quot;" />
+    </InstallExecuteSequence>
+
+  </Package>
+</Wix>

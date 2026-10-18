@@ -1199,3 +1199,250 @@ mod tests {
         assert!(ferme.contains("droits d'administrateur"), "{ferme}");
     }
 }
+
+// --- La page de manuel face a la commande clap -------------------------------
+//
+// `packaging/man/bifrost-cli.1` est ecrite a la main et part dans les paquets
+// Linux. Elle doit dire VRAI sur le binaire: chaque commande et chaque option
+// visible y a son entree, aucune option masquee n'y figure, et tout ce qu'elle
+// nomme existe sur cette plateforme, sauf sur une ligne qui porte le marqueur
+// de l'autre (`reprise` et ses options n'existent que sous Linux). Meme
+// lecture que la recette jumelle du daemon.
+#[cfg(test)]
+mod page_de_manuel {
+    use super::Args;
+    use clap::CommandFactory;
+    use std::collections::BTreeSet;
+
+    /// Nom de chaque option `\-\-nom` de la page (tirets internes ecrits `\-`),
+    /// avec la ligne qui la porte, pour lire son marqueur.
+    fn options_de_la_page(page: &str) -> Vec<(String, String)> {
+        let o = page.as_bytes();
+        let mut sorties = Vec::new();
+        let mut i = 0usize;
+        while i + 3 < o.len() {
+            if o[i] == b'\\' && o[i + 1] == b'-' && o[i + 2] == b'\\' && o[i + 3] == b'-' {
+                let mut j = i + 4;
+                let mut nom = String::new();
+                loop {
+                    let debut = j;
+                    while j < o.len() && o[j].is_ascii_alphanumeric() {
+                        j += 1;
+                    }
+                    if j == debut {
+                        break;
+                    }
+                    nom.push_str(&page[debut..j]);
+                    if j + 2 < o.len()
+                        && o[j] == b'\\'
+                        && o[j + 1] == b'-'
+                        && o[j + 2].is_ascii_alphanumeric()
+                    {
+                        nom.push('-');
+                        j += 2;
+                        continue;
+                    }
+                    break;
+                }
+                if !nom.is_empty() {
+                    sorties.push((nom, ligne_de(page, i)));
+                }
+                i = j.max(i + 4);
+            } else {
+                i += 1;
+            }
+        }
+        sorties
+    }
+
+    fn ligne_de(page: &str, position: usize) -> String {
+        let debut = page[..position].rfind('\n').map_or(0, |p| p + 1);
+        let fin = page[position..]
+            .find('\n')
+            .map_or(page.len(), |p| position + p);
+        page[debut..fin].to_string()
+    }
+
+    /// Les commandes que declare la section COMMANDES: une ligne `.B <nom>` dont
+    /// le premier mot ne commence pas par `\` (une option `\-...` ou une police
+    /// `\f...`).
+    fn commandes_de_la_page(page: &str) -> Vec<(String, String)> {
+        let mut sorties = Vec::new();
+        let mut dedans = false;
+        for ligne in page.lines() {
+            if let Some(reste) = ligne.strip_prefix(".SH ") {
+                dedans = reste.starts_with("COMMANDES");
+                continue;
+            }
+            if !dedans {
+                continue;
+            }
+            if let Some(reste) = ligne.strip_prefix(".B ") {
+                let premier = reste.split_whitespace().next().unwrap_or("");
+                if premier.starts_with('\\') || premier.is_empty() {
+                    continue;
+                }
+                sorties.push((premier.replace("\\-", "-"), ligne.to_string()));
+            }
+        }
+        sorties
+    }
+
+    fn collecter(
+        commande: &clap::Command,
+        options: &mut Vec<(String, bool)>,
+        commandes: &mut Vec<String>,
+    ) {
+        for a in commande.get_arguments() {
+            if let Some(l) = a.get_long() {
+                options.push((l.to_string(), a.is_hide_set()));
+            }
+        }
+        for s in commande.get_subcommands() {
+            commandes.push(s.get_name().to_string());
+            collecter(s, options, commandes);
+        }
+    }
+
+    /// Les ecarts entre une page et la commande, pour la plateforme dont
+    /// `marqueur_autre` est le marqueur de l'AUTRE. Noms compares exacts.
+    fn ecarts_de_la_page(
+        page: &str,
+        commande: &clap::Command,
+        marqueur_autre: &str,
+    ) -> Vec<String> {
+        let mut commande = commande.clone();
+        commande.build();
+        let mut options = Vec::new();
+        let mut commandes = Vec::new();
+        collecter(&commande, &mut options, &mut commandes);
+        let visibles: BTreeSet<&str> = options
+            .iter()
+            .filter(|(_, masquee)| !*masquee)
+            .map(|(l, _)| l.as_str())
+            .collect();
+        let masquees: BTreeSet<&str> = options
+            .iter()
+            .filter(|(l, masquee)| *masquee && l != "help" && l != "version")
+            .map(|(l, _)| l.as_str())
+            .collect();
+        let reelles: BTreeSet<&str> = options.iter().map(|(l, _)| l.as_str()).collect();
+        // `help` est la sous-commande que clap engendre: rien a documenter.
+        let commandes_reelles: BTreeSet<&str> = commandes
+            .iter()
+            .map(String::as_str)
+            .filter(|c| *c != "help")
+            .collect();
+
+        let jetons = options_de_la_page(page);
+        let documentees: BTreeSet<&str> = jetons
+            .iter()
+            .filter(|(_, ligne)| ligne.starts_with(".B "))
+            .map(|(nom, _)| nom.as_str())
+            .collect();
+        let declarees = commandes_de_la_page(page);
+        let noms_declares: BTreeSet<&str> = declarees.iter().map(|(n, _)| n.as_str()).collect();
+
+        let mut ecarts = Vec::new();
+        for nom in &visibles {
+            if !documentees.contains(nom) {
+                ecarts.push(format!(
+                    "option visible sans entree .B dans la page: --{nom}"
+                ));
+            }
+        }
+        for nom in &commandes_reelles {
+            if !noms_declares.contains(nom) {
+                ecarts.push(format!("commande absente de la section COMMANDES: {nom}"));
+            }
+        }
+        for (nom, ligne) in &jetons {
+            if masquees.contains(nom.as_str()) {
+                ecarts.push(format!(
+                    "option masquee nommee par la page: --{nom}: {ligne}"
+                ));
+            } else if !reelles.contains(nom.as_str()) && !ligne.contains(marqueur_autre) {
+                ecarts.push(format!(
+                    "la page nomme --{nom}, absente sur cette plateforme et sans le \
+                     marqueur de l'autre: {ligne}"
+                ));
+            }
+        }
+        for (nom, ligne) in &declarees {
+            if !commandes_reelles.contains(nom.as_str()) && !ligne.contains(marqueur_autre) {
+                ecarts.push(format!(
+                    "la page declare la commande {nom}, absente sur cette plateforme: {ligne}"
+                ));
+            }
+        }
+        ecarts
+    }
+
+    fn marqueur_de_l_autre() -> &'static str {
+        if cfg!(windows) {
+            "(Linux seulement)"
+        } else {
+            "(Windows seulement)"
+        }
+    }
+
+    fn page() -> String {
+        let chemin = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../packaging/man/bifrost-cli.1"
+        );
+        std::fs::read_to_string(chemin)
+            .unwrap_or_else(|e| panic!("page de manuel illisible {chemin}: {e}"))
+    }
+
+    #[test]
+    fn la_page_de_manuel_couvre_les_options_et_commandes_clap() {
+        let ecarts = ecarts_de_la_page(&page(), &Args::command(), marqueur_de_l_autre());
+        assert!(
+            ecarts.is_empty(),
+            "{} ecart(s) entre packaging/man/bifrost-cli.1 et la commande clap:\n  {}",
+            ecarts.len(),
+            ecarts.join("\n  ")
+        );
+    }
+
+    /// La garde voit chaque forme d'ecart, sur une page fabriquee a partir de
+    /// la vraie: une option et une commande inventees, une option et une
+    /// commande oubliees. Le marqueur de l'autre plateforme exempte sa ligne.
+    #[test]
+    fn la_garde_de_la_page_voit_chaque_ecart() {
+        let commande = Args::command();
+        let page = page();
+        let autre = marqueur_de_l_autre();
+        let voit = |texte: &str, motif: &str| {
+            ecarts_de_la_page(texte, &commande, autre)
+                .iter()
+                .any(|e| e.contains(motif))
+        };
+        let inventee =
+            format!("{page}.SH COMMANDES\n.B inventee\n.TP\n.B \\-\\-option\\-inventee\n");
+        assert!(voit(&inventee, "--option-inventee"), "option inventee");
+        assert!(voit(&inventee, "commande inventee"), "commande inventee");
+        let marquee = format!(
+            "{page}.SH COMMANDES\n.B inventee {autre}\n.TP\n.B \\-\\-option\\-inventee {autre}\n"
+        );
+        assert!(
+            ecarts_de_la_page(&marquee, &commande, autre).is_empty(),
+            "le marqueur de l'autre plateforme n'exempte pas sa ligne"
+        );
+        assert!(
+            voit(
+                &page.replace(".B \\-\\-annoncer", ".B annoncer"),
+                "--annoncer"
+            ),
+            "option oubliee"
+        );
+        assert!(
+            voit(
+                &page.replace(".B binaire", ".B fichier"),
+                "absente de la section COMMANDES: binaire"
+            ),
+            "commande oubliee"
+        );
+    }
+}

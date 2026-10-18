@@ -142,6 +142,18 @@
 //!     manuel sans la case `windows`; `interface-windows` seulement sur un
 //!     lancement manuel avec elle; aucun des deux sur `schedule`, ce que la
 //!     regle 2 exige deja de tout job autre que `dependances`.
+//! 11. Les deux jobs des paquets suivent la meme politique: `paquets-linux`
+//!     (le .deb et le .rpm) comme `interface-linux`, `paquets-windows` (le
+//!     MSI) comme `interface-windows`. Decision du 17/10/2026: le MSI ne se
+//!     construit que sur un lancement manuel avec la case `windows`.
+//! 12. Leurs etapes: chaque commande de `ETAPES_DES_PAQUETS` est, a la
+//!     lettre, le corps entier d'une seule etape, dans cet ordre (WiX 5.0.2
+//!     et son extension util a la meme version, la construction, la
+//!     verification, l'installation reelle). `BIFROST_RUNNER_JETABLE` ne se
+//!     pose que sur l'installation reelle: dans sa commande pour le .deb,
+//!     dans l'`env:` de son etape pour le MSI, jamais au niveau du job ni
+//!     ailleurs. Chaque depot d'artefact (`actions/upload-artifact`) porte
+//!     `retention-days: 7`, et chaque job en a au moins un.
 //!
 //! # La grammaire qu'elle lit
 //!
@@ -203,7 +215,9 @@
 //! `defaults:`, `env:` (regle 8) et `jobs`; elle ne lit ni `permissions`, ni
 //! `run-name`, ni le contenu des autres evenements, ni `cancel-in-progress`.
 //! Des jobs autres que `dependances`, elle ne juge que l'identifiant, `if:`
-//! et `needs:` (le routage): ni leurs etapes, ni leurs autres cles. Du job
+//! et `needs:` (le routage): ni leurs etapes, ni leurs autres cles, sauf ce
+//! que la regle 12 lit des deux jobs des paquets (le corps `run:`, l'`env:`
+//! et le `with:` de leurs etapes, la presence d'un `env:` de job). Du job
 //! `dependances`, elle ferme les cles (regle 6) mais ne lit pas la valeur de
 //! `name`, `runs-on` et `timeout-minutes`.
 //!
@@ -359,6 +373,14 @@ const SECTION_DE_LA_COQUILLE: SectionFigee = SectionFigee {
 /// Les deux jobs de la coquille, et ou chacun tourne (regle 10).
 const JOB_COQUILLE_LINUX: &str = "interface-linux";
 const JOB_COQUILLE_WINDOWS: &str = "interface-windows";
+
+/// Les deux jobs des paquets (regles 11 et 12).
+const JOB_PAQUETS_LINUX: &str = "paquets-linux";
+const JOB_PAQUETS_WINDOWS: &str = "paquets-windows";
+/// La variable qui autorise une installation reelle, et l'action de depot
+/// des artefacts, epinglee comme dans les autres jobs.
+const JETABLE: &str = "BIFROST_RUNNER_JETABLE";
+const DEPOT_ARTEFACT: &str = "actions/upload-artifact@";
 
 /// L'`env:` du workflow tel que lu: sa ligne, et ses entrees (ligne, cle,
 /// valeur), ou `None` s'il n'est pas un mapping.
@@ -1040,6 +1062,9 @@ struct Etape {
     repertoire: Option<String>,
     /// (ligne, cle, valeur) de chaque cle de l'etape.
     cles: Vec<(usize, String, Noeud)>,
+    /// (cle, valeur) de chaque cle de son `env:` et de son `with:` (regle 12).
+    env: Vec<(String, Noeud)>,
+    avec: Vec<(String, Noeud)>,
 }
 
 #[derive(Debug, Default)]
@@ -1129,6 +1154,17 @@ fn lire_etapes(arbre: &[Entree], steps: &Entree) -> Result<Vec<Etape>, String> {
                 "if" => etape.si = Some(texte(c)?),
                 "working-directory" => {
                     etape.repertoire = Some(normaliser_repertoire(&texte(c)?));
+                }
+                "env" | "with" if c.noeud == Noeud::Bloc => {
+                    let sous: Vec<(String, Noeud)> = enfants(arbre, &c.chemin)
+                        .into_iter()
+                        .map(|s| (s.cle().to_string(), s.noeud.clone()))
+                        .collect();
+                    if c.cle() == "env" {
+                        etape.env = sous;
+                    } else {
+                        etape.avec = sous;
+                    }
                 }
                 // Le corps d'un `run: |` finit deja par une fin de ligne; une
                 // valeur sur la ligne en recoit une.
@@ -2584,6 +2620,265 @@ fn les_jobs_de_la_coquille_suivent_la_politique_de_lancement() {
         defauts.len(),
         defauts.join("\n  ")
     );
+}
+
+/// Les commandes de chaque job des paquets (regle 12): chacune est, a la
+/// lettre, le corps entier du `run:` d'une seule etape, et elles viennent
+/// dans cet ordre. D'autres etapes peuvent s'intercaler.
+const ETAPES_DES_PAQUETS: [(&str, &[&str]); 2] = [
+    (
+        JOB_PAQUETS_LINUX,
+        &[
+            "cargo build --release --locked -p bifrost-daemon -p bifrost-cli",
+            "./scripts/paquets-linux.sh",
+            "sudo BIFROST_RUNNER_JETABLE=1 ./scripts/paquets-linux-installer.sh",
+        ],
+    ),
+    (
+        JOB_PAQUETS_WINDOWS,
+        &[
+            "dotnet tool install --global wix --version 5.0.2",
+            "wix extension add -g WixToolset.Util.wixext/5.0.2",
+            "cargo build --release --locked -p bifrost-daemon -p bifrost-cli -p bifrost-icone",
+            "./scripts/paquets-windows.ps1",
+            "./scripts/paquets-windows-installer.ps1",
+        ],
+    ),
+];
+
+/// Regles 11 et 12, sur le texte d'un workflow: ou tournent les deux jobs des
+/// paquets, et ce que leurs etapes font. `Err`: un workflow que la grammaire
+/// refuse.
+fn defauts_des_jobs_de_paquets(texte_du_workflow: &str) -> Result<Vec<String>, String> {
+    let wf = lire_workflow(texte_du_workflow)?;
+    let nom = if wf.nom.is_empty() {
+        WORKFLOW
+    } else {
+        wf.nom.as_str()
+    };
+    let mut defauts = Vec::new();
+
+    // 11. Le routage: le .deb et le .rpm comme la coquille Linux, le MSI
+    // seulement sur un lancement manuel `windows`.
+    let mut table = Vec::new();
+    for s in &SCENARIOS {
+        let lance = routage(&wf.jobs, s, nom)?;
+        let ids: Vec<String> = wf
+            .jobs
+            .iter()
+            .zip(&lance)
+            .filter(|(_, l)| **l)
+            .map(|(j, _)| j.id.clone())
+            .collect();
+        table.push((s.nom, ids));
+    }
+    for (job, ou) in [
+        (
+            JOB_PAQUETS_LINUX,
+            ["push", "pull_request", "workflow_dispatch windows=false"].as_slice(),
+        ),
+        (
+            JOB_PAQUETS_WINDOWS,
+            ["workflow_dispatch windows=true"].as_slice(),
+        ),
+    ] {
+        let vus: Vec<&str> = table
+            .iter()
+            .filter(|(_, jobs)| jobs.iter().any(|j| j == job))
+            .map(|(s, _)| *s)
+            .collect();
+        if vus != ou {
+            defauts.push(format!(
+                "le job `{job}` tourne sur [{}], la politique de lancement du depot le veut \
+                 sur [{}]",
+                vus.join(", "),
+                ou.join(", ")
+            ));
+        }
+    }
+
+    // 12. Les etapes.
+    for (id, commandes) in ETAPES_DES_PAQUETS {
+        let Some(job) = wf.jobs.iter().find(|j| j.id == id) else {
+            defauts.push(format!("job `{id}` absent du workflow"));
+            continue;
+        };
+        let corps: Vec<String> = job
+            .etapes
+            .iter()
+            .map(|e| e.run.as_deref().unwrap_or("").trim().to_string())
+            .collect();
+        let mut apres = 0usize;
+        for c in commandes {
+            let rangs: Vec<usize> = corps
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| r.as_str() == *c)
+                .map(|(i, _)| i)
+                .collect();
+            match rangs.as_slice() {
+                [i] if *i >= apres => apres = *i + 1,
+                [_] => defauts.push(format!(
+                    "job `{id}`: l'etape `{c}` vient avant une etape qui doit la preceder"
+                )),
+                [] => defauts.push(format!(
+                    "job `{id}`: aucune etape n'a pour seul corps `{c}`"
+                )),
+                _ => defauts.push(format!(
+                    "job `{id}`: {} etapes ont pour corps `{c}`",
+                    rangs.len()
+                )),
+            }
+        }
+
+        // La variable de l'installation reelle: posee sur la seule commande
+        // ou la seule etape de l'installation, jamais au niveau du job.
+        if let Some((l, _)) = job.cles.iter().find(|(_, c)| c == "env") {
+            defauts.push(format!(
+                "job `{id}`, ligne {l}: `env:` au niveau du job: `{JETABLE}` ne se pose que sur \
+                 l'etape de l'installation reelle"
+            ));
+        }
+        let installateur = commandes.last().copied().unwrap_or("");
+        for e in &job.etapes {
+            let corps_e = e.run.as_deref().unwrap_or("").trim();
+            let dans_env: Vec<&Noeud> = e
+                .env
+                .iter()
+                .filter(|(k, _)| k == JETABLE)
+                .map(|(_, v)| v)
+                .collect();
+            let est_installateur = corps_e == installateur;
+            if corps_e.contains(JETABLE) && !(id == JOB_PAQUETS_LINUX && est_installateur) {
+                defauts.push(format!(
+                    "job `{id}`, etape ligne {}: `{JETABLE}` dans une commande qui n'est pas \
+                     l'installation reelle",
+                    e.ligne
+                ));
+            }
+            let attendu_ici = id == JOB_PAQUETS_WINDOWS && est_installateur;
+            match (attendu_ici, dans_env.as_slice()) {
+                (true, [Noeud::Feuille(Scalaire::Texte(v))]) if v == "1" => {}
+                (true, _) => defauts.push(format!(
+                    "job `{id}`, etape ligne {}: l'installation reelle ne porte pas \
+                     `{JETABLE}: '1'` dans son `env:`",
+                    e.ligne
+                )),
+                (false, []) => {}
+                (false, _) => defauts.push(format!(
+                    "job `{id}`, etape ligne {}: `{JETABLE}` dans l'`env:` d'une etape qui \
+                     n'est pas l'installation reelle",
+                    e.ligne
+                )),
+            }
+        }
+
+        // Les artefacts: au moins un depot, et chacun retenu 7 jours.
+        let depots: Vec<&Etape> = job
+            .etapes
+            .iter()
+            .filter(|e| {
+                e.cles.iter().any(|(_, k, v)| {
+                    k == "uses"
+                        && matches!(v, Noeud::Feuille(Scalaire::Texte(t)) if t.starts_with(DEPOT_ARTEFACT))
+                })
+            })
+            .collect();
+        if depots.is_empty() {
+            defauts.push(format!("job `{id}`: aucun depot d'artefact"));
+        }
+        for e in depots {
+            let retention = e.avec.iter().find(|(k, _)| k == "retention-days");
+            if !matches!(retention, Some((_, Noeud::Feuille(Scalaire::Entier(7))))) {
+                defauts.push(format!(
+                    "job `{id}`, etape ligne {}: depot d'artefact sans `retention-days: 7`",
+                    e.ligne
+                ));
+            }
+        }
+    }
+    Ok(defauts)
+}
+
+#[test]
+fn les_jobs_de_paquets_suivent_la_politique_de_lancement_et_leurs_etapes() {
+    let defauts = defauts_des_jobs_de_paquets(&lire(WORKFLOW))
+        .unwrap_or_else(|e| panic!("{WORKFLOW} illisible pour la recette: {e}"));
+    assert!(
+        defauts.is_empty(),
+        "{} defaut(s) des jobs de paquets dans {WORKFLOW}:\n  {}",
+        defauts.len(),
+        defauts.join("\n  ")
+    );
+}
+
+/// Chaque regle des jobs de paquets mord, sur le workflow reel mute. Chaque
+/// mutation part d'un texte unique du workflow, que la recette exige unique.
+#[test]
+fn chaque_mutation_des_jobs_de_paquets_rougit() {
+    let reel = lire(WORKFLOW);
+    let temoin = defauts_des_jobs_de_paquets(&reel).expect("workflow reel lisible");
+    assert!(temoin.is_empty(), "temoin rouge: {temoin:?}");
+    let condition_windows = "    if: github.event_name == 'workflow_dispatch' && inputs.windows\n    runs-on: windows-2025-vs2026\n    # Une borne pour un job bloque, pas une duree mesuree sur ce runner.";
+    let condition_linux = "    if: github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.windows)\n    runs-on: windows-2025-vs2026\n    # Une borne pour un job bloque, pas une duree mesuree sur ce runner.";
+    let mutations: [(&str, &str, &str, &str); 7] = [
+        (
+            "le MSI a chaque PR",
+            condition_windows,
+            condition_linux,
+            "le job `paquets-windows` tourne sur",
+        ),
+        (
+            "le .deb au run planifie",
+            "  paquets-linux:\n    name: paquets (Linux)\n    if: github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.windows)",
+            "  paquets-linux:\n    name: paquets (Linux)\n    if: github.event_name != 'workflow_dispatch' || !inputs.windows",
+            "le job `paquets-linux` tourne sur",
+        ),
+        (
+            "l'installation reelle retiree",
+            "        run: sudo BIFROST_RUNNER_JETABLE=1 ./scripts/paquets-linux-installer.sh\n",
+            "        run: ./scripts/paquets-linux.sh --version\n",
+            "aucune etape n'a pour seul corps `sudo BIFROST_RUNNER_JETABLE=1",
+        ),
+        (
+            "WiX 6",
+            "        run: dotnet tool install --global wix --version 5.0.2\n",
+            "        run: dotnet tool install --global wix --version 6.0.0\n",
+            "aucune etape n'a pour seul corps `dotnet tool install --global wix --version 5.0.2`",
+        ),
+        (
+            "la variable au niveau du job",
+            "      cancel-in-progress: false\n    # Une commande par etape",
+            "      cancel-in-progress: false\n    env:\n      BIFROST_RUNNER_JETABLE: '1'\n    # Une commande par etape",
+            "`env:` au niveau du job",
+        ),
+        (
+            "la variable retiree de l'installation Windows",
+            "        run: ./scripts/paquets-windows-installer.ps1\n        env:\n          BIFROST_RUNNER_JETABLE: '1'\n",
+            "        run: ./scripts/paquets-windows-installer.ps1\n",
+            "ne porte pas `BIFROST_RUNNER_JETABLE: '1'`",
+        ),
+        (
+            "un artefact retenu 30 jours",
+            "          path: target/paquets/bifrost*\n          if-no-files-found: error\n          retention-days: 7\n",
+            "          path: target/paquets/bifrost*\n          if-no-files-found: error\n          retention-days: 30\n",
+            "depot d'artefact sans `retention-days: 7`",
+        ),
+    ];
+    for (quoi, avant, apres, motif) in mutations {
+        assert_eq!(
+            reel.matches(avant).count(),
+            1,
+            "{quoi}: le texte a muter n'est pas unique dans {WORKFLOW}"
+        );
+        let mute = reel.replacen(avant, apres, 1);
+        let defauts = defauts_des_jobs_de_paquets(&mute)
+            .unwrap_or_else(|e| panic!("{quoi}: workflow mute illisible: {e}"));
+        assert!(
+            defauts.iter().any(|d| d.contains(motif)),
+            "{quoi}: aucun defaut ne contient `{motif}`: {defauts:?}"
+        );
+    }
 }
 
 /// Un workflow de la forme de celui du depot, sain. Les falsifications plus

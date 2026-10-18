@@ -1,0 +1,289 @@
+.\" Manuel de bifrost-cli. Page ecrite a la main, ASCII strict, tirets \-.
+.\" Elle decrit les commandes et les options reelles du binaire, reprises de
+.\" son aide (crates/bifrost-cli/src/main.rs). La recette
+.\" la_page_de_manuel_couvre_les_options_et_commandes_clap, dans les tests du
+.\" binaire, exige que chaque commande et chaque option visible y figure, et
+.\" qu'elle ne nomme rien qui n'existe pas sur la plateforme de la recette.
+.TH BIFROST\-CLI 1 "2026-10-17" "Bifrost" "Manuel Bifrost"
+.SH NAME
+bifrost\-cli \- client Bifrost: pilote le daemon, ne modifie rien lui\-meme
+.SH SYNOPSIS
+.B bifrost\-cli
+[\fIOPTIONS GLOBALES\fR]
+.I COMMANDE
+[\fIOPTIONS\fR]
+.SH DESCRIPTION
+bifrost\-cli est le client non privilegie de Bifrost. Il parle au daemon par
+son socket Unix et verifie l'identite de celui qui le sert avant d'y ecrire
+quoi que ce soit: sous Linux, le socket doit etre tenu par root. Les
+operations qui exigent un privilege (monter le tunnel, armer le kill switch)
+sont demandees au daemon. Ranger un profil, recuperer un lien signe et les
+verifications locales de prove ne demandent rien au daemon, sauf la ou une
+option le dit.
+.PP
+Le daemon juge chaque commande. root a tout le canal. Un membre du groupe
+de pilotage bifrost n'a que trois commandes: status, connect sans
+\-\-config (le profil que le daemon detient) et disconnect. Toute autre
+commande (connect avec \-\-config, check, reprise, les declarations que lit
+prove, l'annonce de inspection\-tls) lui est refusee par un message qui la
+nomme. C'est l'administrateur qui ajoute un compte au groupe:
+.PP
+.RS
+usermod \-aG bifrost <utilisateur>
+.RE
+.PP
+Les deux options globales peuvent preceder la commande ou la suivre.
+.SH "OPTIONS GLOBALES"
+.TP
+.B \-\-socket \fICHEMIN\fR
+Chemin du socket Unix (ou du named pipe sous Windows) du daemon. Par defaut
+/run/bifrost/daemon.sock.
+.TP
+.B \-\-json
+Sortie au format JSON, pour un script ou une CI.
+.TP
+.B \-h, \-\-help
+Affiche l'aide et sort.
+.TP
+.B \-V, \-\-version
+Affiche la version et sort.
+.SH COMMANDES
+.TP
+.B status
+Etat courant du tunnel et du kill switch.
+.TP
+.B connect [\fIOPTIONS\fR]
+Monte le tunnel. Sans \-\-config, c'est le daemon qui ouvre son propre profil,
+qui peut etre scelle: un membre du groupe peut se connecter sans pouvoir lire
+la cle.
+.RS
+.TP
+.B \-c, \-\-config \fICHEMIN\fR
+Envoyer ce profil\-la, lu par le client, au lieu de laisser le daemon ouvrir le
+sien. Reserve a root.
+.RE
+.TP
+.B disconnect
+Demonte le tunnel et desarme le kill switch.
+.TP
+.B check
+Execute la suite des tests de fuite par le service et affiche un verdict par
+vecteur. Le service tourne sans les capacites du harnais: les vecteurs qui en
+ont besoin rendent SKIPPED et nomment la commande a lancer hors du service.
+.TP
+.B emergency\-disarm [\fIOPTIONS\fR]
+URGENCE: retire les filtres du kill switch sans passer par le daemon, pour la
+machine sans reseau dont le daemon est mort ou fige. Elle lance le binaire du
+daemon dans son mode de retrait des filtres, ouvre le trafic en clair et
+demande les droits d'administrateur.
+.RS
+.TP
+.B \-\-je\-sais\-ce\-que\-je\-fais
+Exigee. Sans elle, la commande refuse et dit quoi taper.
+.RE
+.TP
+.B prove \fISOUS\-COMMANDE\fR
+Verifications locales, avec un perimetre explicite et un rapport exportable.
+Chaque rapport rend MATCH, MISMATCH ou UNMEASURED.
+.RS
+.TP
+.B nft [\fIOPTIONS\fR]
+Compare une reference nft JSON a une capture, ou au noyau.
+.RS
+.TP
+.B \-\-attendu \fIFICHIER\fR
+La reference: une capture nft JSON.
+.TP
+.B \-\-politique \fIFICHIER\fR
+Une intention nft Bifrost v1, au lieu d'une capture de reference.
+.TP
+.B \-\-politique\-daemon
+L'intention est la politique que le daemon declare avoir posee en dernier,
+relue avant et apres la collecte. Exige \-\-actif.
+.TP
+.B \-\-observe \fIFICHIER\fR
+La capture a comparer, quand le noyau n'est pas lu.
+.TP
+.B \-\-actif
+Lit le noyau, en lecture seule, sans elevation ni changement de regles.
+.RE
+.TP
+.B wfp [\fIOPTIONS\fR]
+Sous Windows, compare le moteur WFP a la politique que le daemon declare avoir
+posee. Ailleurs, rend UNMEASURED.
+.RS
+.TP
+.B \-\-politique\-daemon
+L'attendu est la declaration du daemon. Exigee.
+.TP
+.B \-\-actif
+Lecture seule du moteur courant. Exigee.
+.RE
+.TP
+.B routes [\fIOPTIONS\fR]
+Compare le routage du systeme a un plan: celui d'une intention, ou celui que le
+daemon declare avoir pose. Sous Linux, les regles et les routes de l'espace de
+noms courant. Lecture seule, deux fois, sans elevation ni changement.
+.RS
+.TP
+.B \-\-intention \fIFICHIER\fR
+Une intention de routage v1. Absente avec \-\-politique\-daemon.
+.TP
+.B \-\-politique\-daemon
+L'attendu est le plan de routage que le daemon declare avoir pose.
+.TP
+.B \-\-actif
+Lecture seule du systeme courant. Exigee.
+.RE
+.TP
+.B dns [\fIOPTIONS\fR]
+Sous Linux, compare le resolveur du systeme a un plan DNS: celui d'une
+intention, ou celui que le daemon declare avoir pose. systemd\-resolved est lu
+sur le bus systeme, ou /etc/resolv.conf et nsswitch.conf. Ailleurs, rend
+UNMEASURED.
+.RS
+.TP
+.B \-\-intention \fIFICHIER\fR
+Une intention DNS v1. Absente avec \-\-politique\-daemon.
+.TP
+.B \-\-politique\-daemon
+L'attendu est le plan DNS que le daemon declare avoir pose.
+.TP
+.B \-\-actif
+Lecture seule du systeme courant. Exigee.
+.RE
+.TP
+.B binaire [\fIOPTIONS\fR]
+Compare un fichier a un SHA\-256 fourni. N'authentifie pas son editeur, ne
+contacte ni le daemon ni le reseau, ne modifie aucun fichier.
+.RS
+.TP
+.B \-\-fichier \fIFICHIER\fR
+Le fichier a mesurer.
+.TP
+.B \-\-sha256 \fIEMPREINTE\fR
+L'empreinte attendue, en hexadecimal.
+.RE
+.RE
+.TP
+.B profil \fISOUS\-COMMANDE\fR
+Range un profil: le sceller, ou dire sous quelle forme il est.
+.RS
+.TP
+.B partager \fISOURCE\fR [\fIOPTIONS\fR]
+Fabrique un lien a transmettre, a partir d'un profil signe (SOURCE, avec sa
+signature a cote).
+.RS
+.TP
+.B \-x, \-\-chiffrer
+Chiffre le lien et engendre la phrase de passe qui l'ouvre, a transmettre par
+un autre chemin que le lien.
+.RE
+.TP
+.B sceller [\fIOPTIONS\fR]
+Chiffre le profil au repos, avec la cle de cette machine. Le clair n'est pas
+supprime: la commande dit quoi faire.
+.RS
+.TP
+.B \-c, \-\-config \fICHEMIN\fR
+Le profil a sceller. Par defaut /etc/bifrost/tunnel.toml.
+.RE
+.TP
+.B recuperer [\fIOPTIONS\fR]
+Va chercher un profil signe par plusieurs canaux a la fois; la serie la plus
+haute gagne, un canal qui sert une signature non reconnue est ecarte. N'ecrit
+rien en place.
+.RS
+.TP
+.B \-d, \-\-depuis \fICANAL\fR
+Un canal: une adresse http:// ou https://, un chemin de fichier, ou un lien
+bifrost1. colle depuis une messagerie. Repeter l'option pour en donner
+plusieurs. Exigee.
+.TP
+.B \-k, \-\-cle \fICHEMIN\fR
+La cle publique qui authentifie les profils.
+.TP
+.B \-p, \-\-phrase \fIPHRASE\fR
+La phrase de passe d'un lien chiffre.
+.TP
+.B \-v, \-\-vers \fICHEMIN\fR
+Ou deposer ce qui aura ete recupere. Par defaut profil\-recu.toml.
+.RE
+.TP
+.B installer \fISOURCE\fR [\fIOPTIONS\fR]
+Verifie la signature d'un profil recu (SOURCE, avec SOURCE.minisig a cote),
+puis le met en place.
+.RS
+.TP
+.B \-c, \-\-config \fICHEMIN\fR
+Ou le mettre. Par defaut /etc/bifrost/tunnel.toml.
+.RE
+.RE
+.TP
+.B pilote \fISOUS\-COMMANDE\fR
+Le pilote TUN de Windows (wintun.dll), que le depot ne distribue pas.
+.RS
+.TP
+.B recuperer [\fIOPTIONS\fR]
+Telecharge wintun.dll, verifie son empreinte epinglee, et le met en place.
+.RS
+.TP
+.B \-v, \-\-vers \fICHEMIN\fR
+Ou poser la DLL. Par defaut, a cote de ce binaire, la ou le daemon la cherche.
+.RE
+.RE
+.TP
+.B inspection\-tls [\fIOPTIONS\fR]
+Dit si quelqu'un dechiffre le TLS qui sort d'ici, en validant la chaine de
+serveurs publics contre le jeu de racines embarque, jamais contre le magasin du
+systeme.
+.RS
+.TP
+.B \-\-annoncer
+Transmet le verdict au daemon, qui en tiendra compte a la prochaine selection
+de protocole. Explicite, jamais automatique. Reserve a root.
+.RE
+.TP
+.B reprise [\fIOPTIONS\fR] (Linux seulement)
+Previent le daemon qu'une veille vient de se terminer. Appelee par le hook
+/usr/lib/systemd/system\-sleep/bifrost\-reprise.
+.RS
+.TP
+.B \-\-phase \fIPHASE\fR (Linux seulement)
+pre avant l'endormissement, post apres le reveil; seul post previent le daemon.
+.TP
+.B \-\-operation \fIOPERATION\fR (Linux seulement)
+L'operation de veille telle que systemd la nomme: suspend, hibernate,
+hybrid\-sleep ou suspend\-then\-hibernate.
+.RE
+.SH "CODES DE SORTIE"
+.TP
+.B 0
+Succes; pour prove, MATCH.
+.TP
+.B 1
+Erreur; pour prove, MISMATCH; pour check, au moins un vecteur en echec; pour
+inspection\-tls, une interception vue.
+.TP
+.B 2
+Pour prove, UNMEASURED; emergency\-disarm a refuse, faute de
+\-\-je\-sais\-ce\-que\-je\-fais; pour reprise, une invocation hors du contrat de
+systemd\-sleep.
+.TP
+.B 3
+Pour inspection\-tls, rien de concluant.
+.TP
+.B 4
+Le serveur du socket n'a pas l'identite attendue du daemon; rien ne lui a ete
+envoye.
+.SH FICHIERS
+.TP
+.B /run/bifrost/daemon.sock
+Socket du daemon.
+.TP
+.B /etc/bifrost/tunnel.toml
+Profil par defaut de profil sceller et profil installer.
+.SH "VOIR AUSSI"
+.BR bifrost\-daemon (1),
+.BR nft (8),
+.BR systemctl (1)
