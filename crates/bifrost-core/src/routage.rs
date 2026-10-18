@@ -666,7 +666,7 @@ impl Plan {
             Chemin::Coeur { .. } => format!(
                 "montage refuse: la table {TABLE_COEUR} du chemin par coeur est deja \
                  employee par un tiers ({detail}). Aucune regle, aucune route, aucune \
-                 interface n'est posee. Cette table est fixee par le produit: retirer ce \
+                 interface n'est posee. Cette table est fixee par Bifrost: retirer ce \
                  qui l'occupe, ou arreter le tiers qui s'y est pose"
             ),
         }
@@ -1256,7 +1256,7 @@ mod tests {
         }
         let m = Plan::coeur("bftun0", None).refus_d_occupation(&o[..1]);
         assert!(
-            m.contains("table 2847") && m.contains("fixee par le produit"),
+            m.contains("table 2847") && m.contains("fixee par Bifrost"),
             "{m}"
         );
     }

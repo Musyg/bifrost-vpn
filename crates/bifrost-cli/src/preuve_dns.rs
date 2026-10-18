@@ -263,7 +263,7 @@ pub fn intention_dns(v: Value) -> Result<Intention, &'static str> {
     };
     politique
         .validate()
-        .map_err(|_| "intention DNS refusee par la regle du produit")?;
+        .map_err(|_| "intention DNS refusee par la regle de Bifrost")?;
     Ok(Intention {
         backend,
         plan: PlanDns::nouveau(interface, &politique),
@@ -1113,7 +1113,7 @@ where
         Ok(())
     })();
     r.reason = match resultat {
-        Ok(()) => "etat du resolveur systeme compare au plan DNS du produit",
+        Ok(()) => "etat du resolveur systeme compare au plan DNS de Bifrost",
         Err(raison) => raison,
     };
     r.completed_at_unix_ms = heure();

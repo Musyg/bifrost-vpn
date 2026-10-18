@@ -455,7 +455,7 @@ fn chaque_alteration_est_un_ecart_de_sa_categorie() {
             json!(["tables", "counters"]),
         ),
         (
-            "objet tiers dans la table du produit",
+            "objet tiers dans la table de Bifrost",
             |o| {
                 entrees(o).insert(
                     2,

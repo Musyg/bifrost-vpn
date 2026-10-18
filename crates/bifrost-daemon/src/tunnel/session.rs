@@ -396,7 +396,7 @@ pub(crate) fn attribuer(
             .collect();
         if candidates.len() > groupe.len() {
             a.ambigus.push(format!(
-                "{}: {} regle(s) `{}` a l'etiquette du produit pour {} posee(s) sans priorite relevee",
+                "{}: {} regle(s) `{}` a l'etiquette de Bifrost pour {} posee(s) sans priorite relevee",
                 modele.famille.nom(),
                 candidates.len(),
                 forme_ip(modele.selecteur, modele.consultation),
@@ -518,7 +518,7 @@ pub(crate) trait Monde {
 
 fn refus_vivante(s: &Inscrite) -> Error {
     Error::Tunnel(format!(
-        "montage refuse: une autre session du produit tient deja le routage de \
+        "montage refuse: une autre session de Bifrost tient deja le routage de \
          ce namespace reseau (processus {pid}, interface {interface}). Rien \
          n'est retire ni pose. Demonter d'abord cette session, ou arreter le \
          processus qui la tient: ce qu'elle a pose sera retire au montage \
@@ -534,10 +534,10 @@ fn refus_inexpliques(a: &Attribution, journal: &str) -> Error {
         detail.push_str(&format!(" (indiscernables: {})", a.ambigus.join("; ")));
     }
     Error::Tunnel(format!(
-        "montage refuse: {n} regle(s) ou route(s) portent l'etiquette du \
-         produit (protocole {PROTOCOLE_PRODUIT}) sans qu'aucune session inscrite \
+        "montage refuse: {n} regle(s) ou route(s) portent l'etiquette de \
+         Bifrost (protocole {PROTOCOLE_PRODUIT}) sans qu'aucune session inscrite \
          au journal ({journal}) ne les ait posees: {detail}. Rien n'est retire \
-         ni pose. Si ce sont les restes d'une session du produit dont le journal \
+         ni pose. Si ce sont les restes d'une session de Bifrost dont le journal \
          a disparu, les retirer a la main{exemple}; sinon, un autre programme \
          emploie cette etiquette: l'arreter, ou lui en faire employer une autre",
         n = a.inexpliques.len(),
@@ -575,7 +575,7 @@ pub(crate) fn preparer_avec(plan: &Plan, m: &mut impl Monde) -> Result<()> {
                 pid = s.entree.pid,
                 interface = %s.entree.interface,
                 present = %p.decrire(),
-                "session morte du produit: retrait de ce qu'elle a pose"
+                "session morte de Bifrost: retrait de ce qu'elle a pose"
             );
             m.retirer(s, p)?;
         }
@@ -605,8 +605,8 @@ pub(crate) fn preparer_avec(plan: &Plan, m: &mut impl Monde) -> Result<()> {
         reste.extend(b.inexpliques.iter().cloned());
         if !reste.is_empty() {
             return Err(Error::Tunnel(format!(
-                "montage refuse: le retrait de ce que des sessions mortes du \
-                 produit ont pose n'a pas abouti ({}). Rien n'est pose; leurs \
+                "montage refuse: le retrait de ce que des sessions mortes de \
+                 Bifrost ont pose n'a pas abouti ({}). Rien n'est pose; leurs \
                  entrees restent au journal ({}), et le montage suivant \
                  reessaiera",
                 reste.join("; "),
@@ -843,7 +843,7 @@ mod systeme {
             let illisible = |raison: String| {
                 Error::Tunnel(format!(
                     "montage refuse: entree illisible au journal des sessions de \
-                     routage ({}): {raison}. Rien n'est retire ni pose: le produit \
+                     routage ({}): {raison}. Rien n'est retire ni pose: Bifrost \
                      ne sait plus ce que cette session a pose",
                     rep.join(&nom).display()
                 ))
@@ -1743,7 +1743,7 @@ mod tests {
         };
         let e = preparer_avec(&wg_defaut(), &mut m).unwrap_err().to_string();
         assert!(
-            e.contains("autre session du produit") && e.contains("bfwg1"),
+            e.contains("autre session de Bifrost") && e.contains("bfwg1"),
             "{e}"
         );
         assert!(m.retraits.is_empty() && m.effaces.is_empty());

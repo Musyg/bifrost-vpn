@@ -374,7 +374,7 @@ mod tests {
                 assert!(!l.contains("flush"), "{l}");
                 assert!(
                     l.ends_with(" protocol 177") || l.ends_with(" proto 177"),
-                    "retrait sans l'etiquette du produit: {l}"
+                    "retrait sans l'etiquette de Bifrost: {l}"
                 );
                 if l.contains(" rule ") {
                     assert!(l.contains(" pref 1"), "regle retiree sans sa priorite: {l}");

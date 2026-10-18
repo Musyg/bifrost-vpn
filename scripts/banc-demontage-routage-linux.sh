@@ -243,7 +243,7 @@ exiger_etiquetes() {
   local n
   n=$(grep -cE '^(r4|r6|t4|t6) .* proto 177( |$)' "$1" || true)
   if [ "$n" != "$2" ]; then
-    ecart "$3: $n objets a l'etiquette du produit au lieu de $2"
+    ecart "$3: $n objets a l'etiquette de Bifrost au lieu de $2"
     grep -E '^(r4|r6|t4|t6) .* proto 177( |$)' "$1" | sed 's/^/    etiquete: /' >&2 || true
   fi
 }
@@ -251,7 +251,7 @@ exiger_etiquetes() {
 # `compter_etiquetes <etat> <quoi>`: le nombre de regles et de routes a
 # l'etiquette du produit, releve pour le rapport.
 compter_etiquetes() {
-  echo "  objets a l'etiquette du produit $2: $(grep -cE '^(r4|r6|t4|t6) .* proto 177( |$)' "$1" || true)"
+  echo "  objets a l'etiquette de Bifrost $2: $(grep -cE '^(r4|r6|t4|t6) .* proto 177( |$)' "$1" || true)"
 }
 
 nouveau_ns() {
@@ -601,7 +601,7 @@ case $CAS in
     grep -E '^(r4|r6) ' "$BAC/pose" > "$BAC/pose-regles" || true
     test -s "$BAC/pose-regles" || ecart "aucune regle posee"
     if grep -vE ' proto 177' "$BAC/pose-regles" > "$BAC/sans-etiquette"; then
-      ecart "regle posee sans l'etiquette du produit: $(cat "$BAC/sans-etiquette")"
+      ecart "regle posee sans l'etiquette de Bifrost: $(cat "$BAC/sans-etiquette")"
     fi
     finir A
     ;;
@@ -615,7 +615,7 @@ case $CAS in
     exiger_egal "$BAC/s1" "$BAC/s2" "le montage refuse a change l'etat"
     exiger_demonte A
     releve "$BAC/s3"
-    exiger_egal "$BAC/s1" "$BAC/s3" "le demontage apres un refus a retire ce qui n'est pas au produit"
+    exiger_egal "$BAC/s1" "$BAC/s3" "le demontage apres un refus a retire ce qui n'est pas a Bifrost"
     finir A
     exiger_refus A2 "table $t" "${PROFIL[@]}"
     releve "$BAC/s4"
@@ -634,7 +634,7 @@ case $CAS in
     exiger_demonte A
     releve "$BAC/s3"
     moins "$BAC/s2" "$BAC/pose" > "$BAC/attendu"
-    exiger_egal "$BAC/attendu" "$BAC/s3" "le demontage n'a pas retire exactement ce que le produit a pose"
+    exiger_egal "$BAC/attendu" "$BAC/s3" "le demontage n'a pas retire exactement ce que Bifrost a pose"
     finir A
     ;;
   wg-avant-autre | coeur-avant-autre)
@@ -658,7 +658,7 @@ case $CAS in
     exiger_egal "$BAC/s1" "$BAC/s2" "le montage refuse a change l'etat"
     exiger_demonte A
     releve "$BAC/s3"
-    exiger_egal "$BAC/s1" "$BAC/s3" "le demontage apres un refus a retire ce qui n'est pas au produit"
+    exiger_egal "$BAC/s1" "$BAC/s3" "le demontage apres un refus a retire ce qui n'est pas a Bifrost"
     finir A
     ;;
   wg-reste-lien)
@@ -706,10 +706,10 @@ case $CAS in
     releve "$BAC/s1"
     exiger_refus A "177" "${PROFIL[@]}"
     releve "$BAC/s2"
-    exiger_egal "$BAC/s1" "$BAC/s2" "le montage devant des objets a l'etiquette du produit a change l'etat"
+    exiger_egal "$BAC/s1" "$BAC/s2" "le montage devant des objets a l'etiquette de Bifrost a change l'etat"
     exiger_demonte A
     releve "$BAC/s3"
-    exiger_egal "$BAC/s1" "$BAC/s3" "le demontage apres un refus a retire ce qui n'est pas au produit"
+    exiger_egal "$BAC/s1" "$BAC/s3" "le demontage apres un refus a retire ce qui n'est pas a Bifrost"
     finir A
     ;;
   wg-etiquete-apres)
@@ -722,7 +722,7 @@ case $CAS in
     exiger_demonte A
     releve "$BAC/s3"
     moins "$BAC/s2" "$BAC/pose" > "$BAC/attendu"
-    exiger_egal "$BAC/attendu" "$BAC/s3" "le demontage n'a pas retire exactement ce que le produit a pose"
+    exiger_egal "$BAC/attendu" "$BAC/s3" "le demontage n'a pas retire exactement ce que Bifrost a pose"
     finir A
     ;;
   wg-reste-sans-journal | coeur-reste-sans-journal)
@@ -743,7 +743,7 @@ case $CAS in
     exiger_egal "$BAC/s1b" "$BAC/s2" "le montage devant le reste d'une session inconnue a change l'etat"
     exiger_demonte A2
     releve "$BAC/s3"
-    exiger_egal "$BAC/s1b" "$BAC/s3" "le demontage apres un refus a retire ce qui n'est pas au produit"
+    exiger_egal "$BAC/s1b" "$BAC/s3" "le demontage apres un refus a retire ce qui n'est pas a Bifrost"
     finir A2
     ;;
   wg-deux-sessions | coeur-deux-sessions)
@@ -751,8 +751,8 @@ case $CAS in
     exiger_monte A "${PROFIL[@]}"
     releve "$BAC/s1"
     case $CAS in
-      wg-*) exiger_refus B "autre session du produit" "${WG_B[@]}" ;;
-      coeur-*) exiger_refus B "autre session du produit" "${COEUR_B[@]}" ;;
+      wg-*) exiger_refus B "autre session de Bifrost" "${WG_B[@]}" ;;
+      coeur-*) exiger_refus B "autre session de Bifrost" "${COEUR_B[@]}" ;;
     esac
     releve "$BAC/s2"
     exiger_egal "$BAC/s1" "$BAC/s2" "le montage d'une seconde session a change l'etat de la premiere"
@@ -833,7 +833,7 @@ case $CAS in
         exiger_egal "$BAC/s1b" "$BAC/s2" "le montage devant le reste d'une session inconnue a change l'etat"
         exiger_demonte A2
         releve "$BAC/s3"
-        exiger_egal "$BAC/s1b" "$BAC/s3" "le demontage apres un refus a retire ce qui n'est pas au produit"
+        exiger_egal "$BAC/s1b" "$BAC/s3" "le demontage apres un refus a retire ce qui n'est pas a Bifrost"
         ;;
       *)
         exiger_monte A2 "${PROFIL[@]}"
@@ -881,7 +881,7 @@ case $CAS in
     # Apres un echec, le superviseur demonte le peripherique, puis reessaie.
     exiger_ordre P "coeur demonter"
     releve "$BAC/s3"
-    exiger_egal "$BAC/s1" "$BAC/s3" "le demontage apres un refus a retire ce qui n'est pas au produit"
+    exiger_egal "$BAC/s1" "$BAC/s3" "le demontage apres un refus a retire ce qui n'est pas a Bifrost"
     retirer_tiers_coeur_meme
     releve "$BAC/s4"
     exiger_egal "$BAC/s0" "$BAC/s4" "le banc n'a pas retire exactement son tiers"
@@ -903,7 +903,7 @@ case $CAS in
     exiger_ordre P "coeur demonter"
     releve "$BAC/s2"
     exiger_egal "$BAC/s1" "$BAC/s2" "le demontage d'un peripherique qui n'a rien monte a change l'etat"
-    exiger_ordre_refuse P "autre session du produit" "coeur monter ${COEUR_A[*]:1}"
+    exiger_ordre_refuse P "autre session de Bifrost" "coeur monter ${COEUR_A[*]:1}"
     releve "$BAC/s3"
     exiger_egal "$BAC/s1" "$BAC/s3" "le montage par coeur a change l'etat de la session WireGuard tenue"
     exiger_ordre P "wireguard demonter"

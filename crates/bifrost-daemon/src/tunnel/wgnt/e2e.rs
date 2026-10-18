@@ -289,7 +289,7 @@ pub(crate) fn refus_route_par_defaut(par_defaut: bool, accepte: bool) -> Option<
         return None;
     }
     Some(
-        "le profil contient une route par defaut. Refus: la recette detournerait tout le trafic de cette machine vers le pair, et lui ferait perdre son acces reseau le temps de la mesure. C'est pourtant la configuration du produit en usage reel. Sur une machine dediee, l'accepter avec `--wgnt-e2e-route-par-defaut`; sinon restreindre `allowed_ips`."
+        "le profil contient une route par defaut. Refus: la recette detournerait tout le trafic de cette machine vers le pair, et lui ferait perdre son acces reseau le temps de la mesure. C'est pourtant la configuration de Bifrost en usage reel. Sur une machine dediee, l'accepter avec `--wgnt-e2e-route-par-defaut`; sinon restreindre `allowed_ips`."
             .to_owned(),
     )
 }

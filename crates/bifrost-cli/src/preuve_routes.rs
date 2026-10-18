@@ -837,7 +837,7 @@ where
     })();
     r.reason = match resultat {
         Ok(()) => {
-            "regles et routes des deux familles comparees au plan du produit; seuls l'originateur des regles et les valeurs d'etat des routes sont ignores"
+            "regles et routes des deux familles comparees au plan de Bifrost; seuls l'originateur des regles et les valeurs d'etat des routes sont ignores"
         }
         Err(raison) => raison,
     };
@@ -1033,7 +1033,7 @@ where
     };
     r.reason = match resultat {
         Ok(()) => {
-            "regles et routes des deux familles comparees au plan declare par le peripherique; l'etiquette du produit exigee sur les objets du plan"
+            "regles et routes des deux familles comparees au plan declare par le peripherique; l'etiquette de Bifrost exigee sur les objets du plan"
         }
         Err(raison) => raison,
     };

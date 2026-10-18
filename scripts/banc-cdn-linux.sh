@@ -611,7 +611,7 @@ dire "== 6. la mesure: les deux transports par le CDN =="
 if essayer_transport cdn-ws ws "$CHEMIN_WS" "$DOMAINE" 443 oui; then
 	passe "CDN + ws: la banniere traverse un vrai edge"
 else
-	casse "CDN + ws: le repli CDN du produit ne passe plus"
+	casse "CDN + ws: le repli CDN de Bifrost ne passe plus"
 	derniere_erreur cdn-ws
 fi
 
@@ -643,14 +643,14 @@ fi
 # 7. Le chemin PRODUIT, si le binaire est la
 # ---------------------------------------------------------------------------
 dire
-dire "== 7. le chemin du produit =="
+dire "== 7. le chemin de Bifrost =="
 if [ -z "$DAEMON" ]; then
-	saute "produit: --daemon non fourni. Les cellules ci-dessus mesurent le
+	saute "Bifrost: --daemon non fourni. Les cellules ci-dessus mesurent le
         transport avec un client sing-box nu, pas la configuration que Bifrost
         engendre: profil, generateur, superviseur et bascule ne sont pas
         eprouves."
 elif [ "$NETNS" != 1 ]; then
-	saute "produit: --coeur-e2e ouvre par un temoin negatif sur la banniere, et
+	saute "Bifrost: --coeur-e2e ouvre par un temoin negatif sur la banniere, et
         sans espace de noms le client la joint sans tunnel. La recette echouerait
         pour une raison qui ne dit rien du transport."
 else
@@ -691,9 +691,9 @@ PY
 	chmod 600 "$PROFIL"
 	if "${DANS_NS[@]}" "$DAEMON" --coeur-e2e "$PROFIL" \
 		--coeurs-dans "$(dirname "$COEUR")" > "$BASE/produit.log" 2>&1; then
-		passe "produit: --coeur-e2e complet a travers le CDN"
+		passe "Bifrost: --coeur-e2e complet a travers le CDN"
 	else
-		casse "produit: --coeur-e2e a echoue"
+		casse "Bifrost: --coeur-e2e a echoue"
 	fi
 	sed 's/\x1b\[[0-9;]*m//g' "$BASE/produit.log" |
 		grep -E "^(PASSED|FAILED|SKIPPED)" | sed 's/^/        /'

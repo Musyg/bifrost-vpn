@@ -1198,6 +1198,50 @@ mod tests {
         assert!(ferme.contains("ce compte ne peut pas ouvrir"), "{ferme}");
         assert!(ferme.contains("droits d'administrateur"), "{ferme}");
     }
+
+    /// L'aide que clap affiche nomme Bifrost, jamais << produit >> pour le
+    /// designer (decision du 18/10/2026). Lue sur le texte RENDU de chaque
+    /// commande et sous-commande: les doc-comments des options visibles y
+    /// passent, que la garde de source `textes_affiches_nomment_bifrost.rs`
+    /// lit comme des commentaires. Une option masquee ne s'affiche pas et
+    /// n'est pas lue. Recette jumelle de celle du daemon.
+    #[test]
+    fn l_aide_ne_nomme_pas_le_produit() {
+        use clap::CommandFactory;
+        const MOT: &str = "produit";
+        fn fautes(texte: &str, ou: &str, sortie: &mut Vec<String>) {
+            let bas = texte.to_ascii_lowercase();
+            let o = bas.as_bytes();
+            let ident = |b: u8| b == b'_' || b.is_ascii_alphanumeric();
+            for (p, _) in bas.match_indices(MOT) {
+                if (p == 0 || !ident(o[p - 1])) && o.get(p + MOT.len()).is_none_or(|&b| !ident(b)) {
+                    let ligne = bas[..p].matches('\n').count();
+                    let lue = texte.lines().nth(ligne).unwrap_or_default();
+                    sortie.push(format!("{ou}: {}", lue.trim()));
+                }
+            }
+        }
+        fn parcourir(c: &clap::Command, ou: &str, sortie: &mut Vec<String>) {
+            fautes(&c.clone().render_long_help().to_string(), ou, sortie);
+            for s in c.get_subcommands() {
+                parcourir(s, &format!("{ou} {}", s.get_name()), sortie);
+            }
+        }
+        // Temoin: la lecture voit le mot entier, et lui seul.
+        let mut temoin = Vec::new();
+        fautes(
+            &format!("la table du {MOT}.\nre{MOT} {MOT}s"),
+            "temoin",
+            &mut temoin,
+        );
+        assert_eq!(temoin.len(), 1, "{temoin:?}");
+
+        let mut racine = Args::command();
+        racine.build();
+        let mut sortie = Vec::new();
+        parcourir(&racine, "bifrost-cli", &mut sortie);
+        assert!(sortie.is_empty(), "aide qui porte le mot: {sortie:?}");
+    }
 }
 
 // --- La page de manuel face a la commande clap -------------------------------

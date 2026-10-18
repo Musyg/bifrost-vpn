@@ -307,7 +307,7 @@ coeur_pose() {
 # --- Chemin WireGuard -----------------------------------------------------
 
 wg_pose
-echo 'Regles posees par le produit, priorites choisies par le noyau:'
+echo 'Regles posees par Bifrost, priorites choisies par le noyau:'
 ip -n "$NS" -4 rule show
 prouver wg-pose "$BAC/wg.json"
 attendre wg-pose 0 MATCH '[]'
@@ -333,7 +333,7 @@ temoin 192.0.2.255 lien
 temoin 2001:db8:1::7 lien
 temoin 239.1.2.3 tunnel
 temoin ff0e::1 lien
-echo 'LIMITE mesuree: multidiffusion IPv6 emise sur le lien avec la seule pose du produit'
+echo 'LIMITE mesuree: multidiffusion IPv6 emise sur le lien avec la seule pose de Bifrost'
 prouver wg-pose-sans-privilege "$BAC/wg.json" sans-privilege
 attendre wg-pose-sans-privilege 0 MATCH '[]'
 jq -e -n --slurpfile a "$BAC/wg-pose.json" --slurpfile b "$BAC/wg-pose-sans-privilege.json" \

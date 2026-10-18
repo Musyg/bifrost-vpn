@@ -100,9 +100,9 @@ use crate::preuve_nft::{Unique, heure};
 #[cfg(test)]
 mod recettes;
 
-const LIMITE: &str = "Intention declaree, pas le profil actif atteste. Tables IP Helper (routes, lignes d'interface, adresses) des deux familles, lues deux fois de suite: un changement qui s'annule entre deux lectures echappe, et ce qui est pose apres la collecte n'est pas vu. Une route identique a celle du plan, posee par un tiers, passe pour celle du produit: Windows ne porte aucune etiquette de proprietaire sur une route. Deux limites de la regle de legitimite: une route connectee est admise quelle que soit la largeur du reseau de son adresse, et la multidiffusion et la diffusion limitee partent sur le lien. L'ordre de liaison qui departage deux metriques effectives egales n'est pas lu: une egalite rend UNMEASURED. Ne sont pas compares: la MTU et la detection d'adresse dupliquee des lignes, l'etat de connexion de l'interface, la duree de vie des routes, les adresses du tunnel. Ni les routes deja en cache, ni les connexions ouvertes, ni une source liee a une interface (modele d'hote fort), ni le pare-feu, ni le DNS ne sont prouves ici. Pas une preuve d'etancheite du VPN.";
+const LIMITE: &str = "Intention declaree, pas le profil actif atteste. Tables IP Helper (routes, lignes d'interface, adresses) des deux familles, lues deux fois de suite: un changement qui s'annule entre deux lectures echappe, et ce qui est pose apres la collecte n'est pas vu. Une route identique a celle du plan, posee par un tiers, passe pour celle de Bifrost: Windows ne porte aucune etiquette de proprietaire sur une route. Deux limites de la regle de legitimite: une route connectee est admise quelle que soit la largeur du reseau de son adresse, et la multidiffusion et la diffusion limitee partent sur le lien. L'ordre de liaison qui departage deux metriques effectives egales n'est pas lu: une egalite rend UNMEASURED. Ne sont pas compares: la MTU et la detection d'adresse dupliquee des lignes, l'etat de connexion de l'interface, la duree de vie des routes, les adresses du tunnel. Ni les routes deja en cache, ni les connexions ouvertes, ni une source liee a une interface (modele d'hote fort), ni le pare-feu, ni le DNS ne sont prouves ici. Pas une preuve d'etancheite du VPN.";
 
-const LIMITE_DAEMON: &str = "Plan declare par le peripherique du tunnel, relu avant et apres la collecte, pas observe: une correspondance dit que la table IP Helper porte le plan que le peripherique dit avoir pose. Tables lues deux fois de suite: un changement qui s'annule entre deux lectures echappe, et ce qui est pose apres la collecte n'est pas vu. Une route identique a celle du plan, posee par un tiers, passe pour celle du produit: Windows ne porte aucune etiquette de proprietaire sur une route. Deux limites de la regle de legitimite: une route connectee est admise quelle que soit la largeur du reseau de son adresse, et la multidiffusion et la diffusion limitee partent sur le lien. L'ordre de liaison qui departage deux metriques effectives egales n'est pas lu: une egalite rend UNMEASURED. Ne sont pas compares: la MTU et la detection d'adresse dupliquee des lignes, l'etat de connexion de l'interface, la duree de vie des routes, les adresses du tunnel. Ni les routes deja en cache, ni les connexions ouvertes, ni une source liee a une interface, ni le pare-feu, ni le DNS ne sont prouves ici. Pas une preuve d'etancheite du VPN.";
+const LIMITE_DAEMON: &str = "Plan declare par le peripherique du tunnel, relu avant et apres la collecte, pas observe: une correspondance dit que la table IP Helper porte le plan que le peripherique dit avoir pose. Tables lues deux fois de suite: un changement qui s'annule entre deux lectures echappe, et ce qui est pose apres la collecte n'est pas vu. Une route identique a celle du plan, posee par un tiers, passe pour celle de Bifrost: Windows ne porte aucune etiquette de proprietaire sur une route. Deux limites de la regle de legitimite: une route connectee est admise quelle que soit la largeur du reseau de son adresse, et la multidiffusion et la diffusion limitee partent sur le lien. L'ordre de liaison qui departage deux metriques effectives egales n'est pas lu: une egalite rend UNMEASURED. Ne sont pas compares: la MTU et la detection d'adresse dupliquee des lignes, l'etat de connexion de l'interface, la duree de vie des routes, les adresses du tunnel. Ni les routes deja en cache, ni les connexions ouvertes, ni une source liee a une interface, ni le pare-feu, ni le DNS ne sont prouves ici. Pas une preuve d'etancheite du VPN.";
 
 pub(crate) const INSTABLE: &str =
     "collecte instable: deux lectures consecutives des tables IP Helper different";
@@ -179,7 +179,7 @@ pub(crate) fn plan_windows(
         return Err("interface du plan de routage invalide");
     }
     if !(576..=9000).contains(&mtu) {
-        return Err("MTU du plan de routage hors de la plage du produit");
+        return Err("MTU du plan de routage hors de la plage de Bifrost");
     }
     if familles.is_empty() || !familles.windows(2).all(|p| p[0] < p[1]) {
         return Err("familles du plan de routage vides, en double ou hors d'ordre");
@@ -777,7 +777,7 @@ where
     })();
     r.reason = match resultat {
         Ok(()) => {
-            "routes et lignes d'interface des deux familles comparees au plan du produit; seules les valeurs d'etat des routes sont ignorees"
+            "routes et lignes d'interface des deux familles comparees au plan de Bifrost; seules les valeurs d'etat des routes sont ignorees"
         }
         Err(raison) => raison,
     };

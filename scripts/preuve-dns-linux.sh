@@ -438,7 +438,7 @@ interieur() {
   demarrer_resolved
   echo "version: $("$RESOLVED" --version | sed -n 1p)"
 
-  echo "== pose du produit =="
+  echo "== pose de Bifrost =="
   resolvectl dns "$PHY" "$DHCP"
   poser non
   printf 'dns %s %s %s\ndomain %s ~.\n' "$TUN" "$AMONT" "$AMONT6" "$TUN" | cmp - "$BAC/pose-non.txt"

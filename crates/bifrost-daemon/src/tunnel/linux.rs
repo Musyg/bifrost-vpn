@@ -307,9 +307,9 @@ impl LinuxTunnel {
             Occupant::Produit => {
                 return Err(Error::Tunnel(format!(
                     "montage refuse: l'interface {nom} existe deja et porte la cle \
-                     du profil, mais aucune session du produit inscrite au journal \
+                     du profil, mais aucune session de Bifrost inscrite au journal \
                      ne permet de la retirer. Rien n'est retire ni pose. Si elle \
-                     reste d'une session du produit dont le journal a disparu, la \
+                     reste d'une session de Bifrost dont le journal a disparu, la \
                      retirer a la main (ip link del dev {nom})",
                     nom = cfg.interface,
                 )));
@@ -317,7 +317,7 @@ impl LinuxTunnel {
             Occupant::Tiers(quoi) => {
                 return Err(Error::Tunnel(format!(
                     "montage refuse: l'interface {nom} existe deja et n'est pas \
-                     celle du produit ({quoi}). Rien n'est retire ni pose. \
+                     celle de Bifrost ({quoi}). Rien n'est retire ni pose. \
                      Choisir dans le profil un autre nom d'interface: wg-quick \
                      nomme la sienne d'apres son fichier de configuration, wg0 \
                      le plus souvent",

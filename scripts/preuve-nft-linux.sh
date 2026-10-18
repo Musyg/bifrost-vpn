@@ -132,7 +132,7 @@ for ((cas=0; cas<64; cas++)); do
   ip netns exec "$NS" nft -f "$BAC/produit.nft"
   ip netns exec "$NS" nft --json --numeric list ruleset > "$BAC/produit.json"
   if ! "$CLI" --json prove nft --politique "$BAC/intention.json" --observe "$BAC/produit.json" > "$BAC/politique.json"; then
-    echo "reference produit en ecart, cas synthetique $cas"
+    echo "reference de Bifrost en ecart, cas synthetique $cas"
     # Pas de donnees utilisateur dans ce banc: montrer les deux formes utiles.
     "$RENDU" "$BAC/intention.json" json | jq .
     jq . "$BAC/produit.json"
@@ -144,7 +144,7 @@ for ((cas=0; cas<64; cas++)); do
   ip netns exec "$NS" nft --json --numeric list ruleset > "$BAC/apres.json"
   cmp "$BAC/produit.json" "$BAC/apres.json"
 done
-echo 'PASSED: 64 politiques produit, reference hors ligne et collecte reelle, sans mutation'
+echo 'PASSED: 64 politiques de Bifrost, reference hors ligne et collecte reelle, sans mutation'
 
 # Une politique tierce ne doit pas disparaitre de la comparaison.
 ip netns exec "$NS" nft add table inet tiers
@@ -160,7 +160,7 @@ CODE=0
 ip netns exec "$NS" "$CLI" --json prove nft --politique "$BAC/intention.json" --actif > "$BAC/politique.json" || CODE=$?
 test "$CODE" = 1
 jq -e '.verdict == "MISMATCH" and (.differences | index("rules") != null)' "$BAC/politique.json" >/dev/null
-echo 'PASSED: table tierce et permis ajoute detectes contre le plan produit'
+echo 'PASSED: table tierce et permis ajoute detectes contre le plan de Bifrost'
 
 # --- D1b.3c: les objets nft nommes sont compares, plus refuses ---
 #
@@ -705,7 +705,7 @@ ip netns exec "$NSD" nft add counter inet bifrost ajoute
 objet_tiers counters '["counters"]'
 ip netns exec "$NSD" nft delete counter inet bifrost ajoute
 correspond
-echo 'PASSED: objet nomme tiers, dans une table tierce ou celle du produit -> ecart de sa categorie'
+echo 'PASSED: objet nomme tiers, dans une table tierce ou celle de Bifrost -> ecart de sa categorie'
 
 # Interface remplacee: le tunnel accepte vers une autre interface.
 H=$(handle '.expr[0].match.left.meta.key? == "oifname" and .expr[0].match.right == "bfdecl0"')

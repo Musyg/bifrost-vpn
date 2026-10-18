@@ -880,7 +880,7 @@ function Main {
         Write-Host '           l hebergement dans svchost.exe est le discriminant. Le nom du filtre'
         Write-Host '           gagnant de chaque autorisation est imprime ci-dessus.'
         Write-Host '           Ce n est PAS un echec du banc: c est un echec du BLOCAGE, et c est'
-        Write-Host '           le resultat le plus lourd de consequence pour le produit.'
+        Write-Host '           le resultat le plus lourd de consequence pour Bifrost.'
         Write-Host '           Reserve: ce temoin tourne sans le drapeau -p des deux cibles, donc il'
         Write-Host '           etablit que -p n est PAS necessaire a l echappement, pas qu il n y'
         Write-Host '           contribue pas.'

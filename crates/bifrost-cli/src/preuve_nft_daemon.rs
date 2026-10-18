@@ -589,7 +589,7 @@ mod tests {
                 json!(["tables", "sets"]),
             ),
             (
-                "counter dans la table du produit",
+                "counter dans la table de Bifrost",
                 avec(vec![counter_produit]),
                 "MISMATCH",
                 json!(["counters"]),

@@ -267,7 +267,7 @@ pub fn juger(m: Mesures, cible: SocketAddr, resolveur: SocketAddr) -> Issue {
     if m.coeur == Verdict::Bloque {
         return Issue::Echec(format!(
             "l'exemption ne matche pas: le coeur declare a ete refuse vers \
-             {cible} sous armement. Le produit ne pourrait pas se connecter. \
+             {cible} sous armement. Bifrost ne pourrait pas se connecter. \
              Les deux blocages constates ne prouvent alors rien de la largeur \
              de l'exemption, puisqu'ils s'expliquent par un plan qui bloque tout"
         ));

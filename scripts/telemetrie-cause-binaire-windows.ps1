@@ -616,7 +616,7 @@ function Main {
         Write-Host ("  ECHEC    {0} connexion(s) AUTORISEE(S) alors que la sonde etait posee, verifiee" -f ($a.Permis + $c.Permis))
         Write-Host '           presente, et verifiee porteuse du chemin vise.'
         Write-Host '           Le mecanisme ALE_APP_ID ne mord pas. Les cinq cibles de binaire du'
-        Write-Host '           catalogue ne protegent alors rien, et le produit ne doit pas les'
+        Write-Host '           catalogue ne protegent alors rien, et Bifrost ne doit pas les'
         Write-Host '           annoncer. Le nom du filtre gagnant est imprime ci-dessus.'
         return 1
     }

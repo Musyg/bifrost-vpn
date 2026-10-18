@@ -116,7 +116,7 @@ struct Args {
     /// Adresse d'ecoute de la facade: l'adresse locale STABLE derriere
     /// laquelle les coeurs se remplacent (document 04 partie 4).
     ///
-    /// Absente par defaut. Un produit de securite n'ouvre pas une ecoute locale
+    /// Absente par defaut. Un logiciel de securite n'ouvre pas une ecoute locale
     /// sans qu'on le lui demande, et tant que rien ne route le systeme vers
     /// elle, elle n'aurait aucun usage.
     #[arg(long, value_name = "ADRESSE")]
@@ -187,7 +187,7 @@ struct Args {
     ///
     /// Un repertoire d'execution, efface au redemarrage de la machine comme
     /// les regles et les routes qu'il decrit. Le montage ne retire un objet a
-    /// l'etiquette du produit que s'il est a une session morte de ce journal,
+    /// l'etiquette de Bifrost que s'il est a une session morte de ce journal,
     /// et refuse devant tout autre: un daemon lance sur un autre journal ne
     /// reconnait pas les sessions de celui-ci.
     #[cfg(target_os = "linux")]
@@ -544,7 +544,7 @@ struct Args {
     ///
     /// Ne depend d'aucune connaissance de ce qui a ete pose: rejoue la suite de
     /// cles et supprime chacune. A executer AVANT toute desinstallation, parce
-    /// que les filtres WFP survivent au produit qui les a poses - sans ca, on
+    /// que les filtres WFP survivent au logiciel qui les a poses - sans ca, on
     /// laisse une machine filtree par un logiciel absent.
     #[cfg(windows)]
     #[arg(long, conflicts_with_all = ["telemetrie_reseau_etat", "telemetrie_reseau_appliquer"])]
@@ -671,8 +671,8 @@ struct Args {
 
     /// Accepte un profil a ROUTE PAR DEFAUT. Sans ce drapeau, les recettes le
     /// refusent: un `/0` detourne tout le trafic de la machine vers le pair et
-    /// lui fait perdre son acces reseau. C'est pourtant la configuration du
-    /// produit en usage reel. Machine dediee uniquement. Tuer le processus
+    /// lui fait perdre son acces reseau. C'est pourtant la configuration de
+    /// Bifrost en usage reel. Machine dediee uniquement. Tuer le processus
     /// retablit le reseau: l'adaptateur lui appartient.
     #[cfg(windows)]
     #[arg(long)]
@@ -3520,6 +3520,48 @@ mod tests {
             muettes.is_empty(),
             "option(s) sans aide, probablement un commentaire capture par le voisin: {muettes:?}"
         );
+    }
+
+    /// L'aide que clap affiche nomme Bifrost, jamais << produit >> pour le
+    /// designer (decision du 18/10/2026). Lue sur le texte RENDU de chaque
+    /// commande: les doc-comments des options visibles y passent, que la garde
+    /// de source `textes_affiches_nomment_bifrost.rs` lit comme des
+    /// commentaires. Une option masquee ne s'affiche pas et n'est pas lue.
+    #[test]
+    fn l_aide_ne_nomme_pas_le_produit() {
+        const MOT: &str = "produit";
+        fn fautes(texte: &str, ou: &str, sortie: &mut Vec<String>) {
+            let bas = texte.to_ascii_lowercase();
+            let o = bas.as_bytes();
+            let ident = |b: u8| b == b'_' || b.is_ascii_alphanumeric();
+            for (p, _) in bas.match_indices(MOT) {
+                if (p == 0 || !ident(o[p - 1])) && o.get(p + MOT.len()).is_none_or(|&b| !ident(b)) {
+                    let ligne = bas[..p].matches('\n').count();
+                    let lue = texte.lines().nth(ligne).unwrap_or_default();
+                    sortie.push(format!("{ou}: {}", lue.trim()));
+                }
+            }
+        }
+        fn parcourir(c: &clap::Command, ou: &str, sortie: &mut Vec<String>) {
+            fautes(&c.clone().render_long_help().to_string(), ou, sortie);
+            for s in c.get_subcommands() {
+                parcourir(s, &format!("{ou} {}", s.get_name()), sortie);
+            }
+        }
+        // Temoin: la lecture voit le mot entier, et lui seul.
+        let mut temoin = Vec::new();
+        fautes(
+            &format!("la table du {MOT}.\nre{MOT} {MOT}s"),
+            "temoin",
+            &mut temoin,
+        );
+        assert_eq!(temoin.len(), 1, "{temoin:?}");
+
+        let mut racine = Args::command();
+        racine.build();
+        let mut sortie = Vec::new();
+        parcourir(&racine, "bifrost-daemon", &mut sortie);
+        assert!(sortie.is_empty(), "aide qui porte le mot: {sortie:?}");
     }
 
     // --- La page de manuel face a la commande clap ---------------------------
