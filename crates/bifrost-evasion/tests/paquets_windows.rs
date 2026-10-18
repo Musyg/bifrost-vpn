@@ -79,6 +79,15 @@
 //!    valeur HKCU (ICE43, ICE57). La WebView2 exigee a la premiere
 //!    installation seulement. Des identifiants WiX legaux dans les deux
 //!    sources (pas de tiret: WIX0014).
+//! 15. La mise a niveau, dans la grammaire FERMEE de l'exigence 10: le meme
+//!     `MajorUpgrade` que le daemon (`AllowSameVersionUpgrades="yes"`,
+//!     `Schedule="afterInstallInitialize"`, `DowngradeErrorMessage`). Mesure
+//!     du 18/10/2026 dans une VM Windows Server 2025: deux MSI de la coquille
+//!     de la meme version etaient deux installations distinctes (deux
+//!     entrees de programmes, composants a deux clients, executable du
+//!     second non copie, dossier d'icone laisse apres les deux retraits), et
+//!     un echec de la nouvelle version laissait la machine sans coquille.
+//!     Les exigences 11 a 14 visent le service: sans objet ici.
 //!
 //! # L'editeur
 //!
@@ -975,12 +984,12 @@ const SEQUENCE: [(&str, &str, &str); 10] = [
     ),
 ];
 
-fn ecarts_de_la_mise_a_niveau(wxs: &str, script: &str) -> Vec<String> {
-    let xml = sans_commentaires_xml(wxs);
-    let tout = balises(&xml);
+/// 10 et 15. `MajorUpgrade`, en grammaire fermee: un seul element, vide,
+/// qui porte exactement `AllowSameVersionUpgrades="yes"`,
+/// `Schedule="afterInstallInitialize"` et un `DowngradeErrorMessage` non vide.
+/// La meme grammaire pour les deux MSI: c'est leur parite.
+fn ecarts_du_major_upgrade(tout: &[(String, String, bool)]) -> Vec<String> {
     let mut ecarts = Vec::new();
-
-    // 10. MajorUpgrade.
     let majeures: Vec<&(String, String, bool)> = tout
         .iter()
         .filter(|(n, _, _)| n == "MajorUpgrade")
@@ -1015,6 +1024,16 @@ fn ecarts_de_la_mise_a_niveau(wxs: &str, script: &str) -> Vec<String> {
             autre.len()
         )),
     }
+    ecarts
+}
+
+fn ecarts_de_la_mise_a_niveau(wxs: &str, script: &str) -> Vec<String> {
+    let xml = sans_commentaires_xml(wxs);
+    let tout = balises(&xml);
+    let mut ecarts = Vec::new();
+
+    // 10. MajorUpgrade.
+    ecarts.extend(ecarts_du_major_upgrade(&tout));
 
     // 11. La propriete qui dit si le service existait avant l'installation.
     let nom_service = variables_ps(&lignes_ps(script))
@@ -1845,6 +1864,112 @@ fn chaque_exigence_du_msi_de_la_coquille_mord() {
     );
     assert!(identifiant_wix_legal("bifrostgui.exe"));
     assert!(!identifiant_wix_legal("bifrost-gui.exe"));
+}
+
+/// Exigence 15: le `MajorUpgrade` de la coquille, dans la grammaire de celui
+/// du daemon.
+fn ecarts_de_la_mise_a_niveau_de_la_coquille(gui: &str) -> Vec<String> {
+    ecarts_du_major_upgrade(&balises(&sans_commentaires_xml(gui)))
+        .into_iter()
+        .map(|e| format!("{WXS_GUI}: {e}"))
+        .collect()
+}
+
+#[test]
+fn la_meme_version_de_la_coquille_est_une_mise_a_niveau() {
+    let ecarts = ecarts_de_la_mise_a_niveau_de_la_coquille(&lire(WXS_GUI));
+    assert!(
+        ecarts.is_empty(),
+        "{} ecart(s):\n  {}",
+        ecarts.len(),
+        ecarts.join("\n  ")
+    );
+}
+
+/// Chaque exigence de la mise a niveau de la coquille mord sur une mutation
+/// du texte reel.
+#[test]
+fn chaque_exigence_de_la_mise_a_niveau_de_la_coquille_mord() {
+    let gui = lire(WXS_GUI);
+    assert!(ecarts_de_la_mise_a_niveau_de_la_coquille(&gui).is_empty());
+    let remplacer = |texte: &str, avant: &str, apres: &str| -> String {
+        assert_eq!(
+            texte.matches(avant).count(),
+            1,
+            "`{avant}` doit etre unique"
+        );
+        texte.replacen(avant, apres, 1)
+    };
+    let mord = |e: Vec<String>, motif: &str| {
+        assert!(
+            e.iter().any(|x| x.contains(motif)),
+            "`{motif}` attendu dans {e:?}"
+        );
+    };
+    let element =
+        "<MajorUpgrade AllowSameVersionUpgrades=\"yes\" Schedule=\"afterInstallInitialize\"";
+    for (avant, apres, motif) in [
+        // Le MajorUpgrade de la base: ni l'un ni l'autre attribut.
+        (
+            element,
+            "<MajorUpgrade",
+            "MajorUpgrade sans AllowSameVersionUpgrades",
+        ),
+        (element, "<MajorUpgrade", "MajorUpgrade sans Schedule"),
+        (
+            element,
+            "<MajorUpgrade Schedule=\"afterInstallInitialize\"",
+            "MajorUpgrade sans AllowSameVersionUpgrades",
+        ),
+        (
+            element,
+            "<MajorUpgrade AllowSameVersionUpgrades=\"yes\"",
+            "MajorUpgrade sans Schedule",
+        ),
+        (
+            element,
+            "<MajorUpgrade AllowSameVersionUpgrades=\"yes\" Schedule=\"afterInstallValidate\"",
+            "hors de la grammaire",
+        ),
+        (
+            element,
+            "<MajorUpgrade AllowSameVersionUpgrades=\"no\" Schedule=\"afterInstallInitialize\"",
+            "hors de la grammaire",
+        ),
+        (
+            element,
+            "<MajorUpgrade AllowDowngrades=\"yes\" AllowSameVersionUpgrades=\"yes\" Schedule=\"afterInstallInitialize\"",
+            "hors de la grammaire",
+        ),
+        (
+            element,
+            "<MajorUpgrade AllowSameVersionUpgrades='yes' Schedule=\"afterInstallInitialize\"",
+            "MajorUpgrade illisible",
+        ),
+        (
+            "DowngradeErrorMessage=\"Une version plus recente de Bifrost GUI est deja installee.\"",
+            "DowngradeErrorMessage=\" \"",
+            "hors de la grammaire",
+        ),
+        (
+            "    <MediaTemplate ",
+            "    <MajorUpgrade AllowSameVersionUpgrades=\"yes\" Schedule=\"afterInstallInitialize\" DowngradeErrorMessage=\"x\" />\n    <MediaTemplate ",
+            "2 element(s) MajorUpgrade",
+        ),
+        (element, "<!-- <MajorUpgrade", "0 element(s) MajorUpgrade"),
+    ] {
+        let texte = if apres.starts_with("<!--") {
+            // L'element entier mis en commentaire: il ne compte plus.
+            remplacer(
+                &remplacer(&gui, avant, apres),
+                " installee.\" />",
+                " installee.\" /> -->",
+            )
+        } else {
+            remplacer(&gui, avant, apres)
+        };
+        mord(ecarts_de_la_mise_a_niveau_de_la_coquille(&texte), motif);
+    }
 }
 
 // ================================================ l'editeur du logiciel

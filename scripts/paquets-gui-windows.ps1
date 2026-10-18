@@ -29,7 +29,11 @@ Dans l'ordre:
      marqueur HKCU du raccourci), aucune action personnalisee, aucun service,
      aucun dossier Demarrage ni Bureau, ni %ProgramData%, et la condition sur
      la WebView2 (a cote de celle que WiX engendre pour MajorUpgrade);
-  8. ecrit l'empreinte SHA256 du MSI a cote.
+  8. lit aussi ce qui regit la mise a niveau, comme scripts/paquets-windows.ps1
+     pour le MSI du daemon: la table Upgrade (meme version comprise, plus
+     recente refusee) et RemoveExistingProducts dans la transaction de la
+     nouvelle version;
+  9. ecrit l'empreinte SHA256 du MSI a cote.
 
 Le MSI n'est pas signe: aucun certificat n'existe, et l'installation de
 l'etape suivante (scripts/paquets-gui-windows-installer.ps1) verifie qu'il ne
@@ -298,6 +302,43 @@ else { Fail "conditions sur la WebView2: $($webview.Count) au lieu de 1" }
 $inattendues = @($autres | Where-Object { -not $_.Contains('WIX_DOWNGRADE_DETECTED') })
 if ($inattendues.Count -eq 0) { Ok "aucune autre condition que celle de MajorUpgrade ($($autres.Count))" }
 else { Fail ("condition(s) inattendue(s): {0}" -f ($inattendues -join ' ; ')) }
+
+Etape 'Mise a niveau: meme version comprise'
+# Ce que WiX a ecrit, pas ce que le .wxs demande, comme pour le MSI du daemon.
+# Deux lignes Upgrade et pas d'autre: la premiere retire toute version
+# anterieure OU EGALE (Attributes 513 = VersionMaxInclusive 0x200 +
+# MigrateFeatures 0x1, que l'ICE61 signale en avertissement), la seconde
+# detecte une version plus recente, que la condition de lancement refuse.
+# Sans la borne inclusive, deux MSI de la meme version seraient deux
+# installations distinctes.
+$attenduesUpgrade = @(
+    ('{{{0}}}||{1}|513|WIX_UPGRADE_DETECTED' -f $Upgrade, $Version).ToUpperInvariant(),
+    ('{{{0}}}|{1}||2|WIX_DOWNGRADE_DETECTED' -f $Upgrade, $Version).ToUpperInvariant()
+) | Sort-Object
+$luesUpgrade = @()
+foreach ($l in (Lignes-Msi $Msi 'SELECT `UpgradeCode`, `VersionMin`, `VersionMax`, `Attributes`, `ActionProperty` FROM `Upgrade`' 5)) {
+    $luesUpgrade += ($l -join '|').ToUpperInvariant()
+}
+$luesUpgrade = @($luesUpgrade | Sort-Object)
+if (($luesUpgrade -join ';') -ceq ($attenduesUpgrade -join ';')) {
+    Ok 'table Upgrade: version anterieure ou egale retiree (513), plus recente refusee (2)'
+} else {
+    Fail "table Upgrade: [$($luesUpgrade -join '; ')] au lieu de [$($attenduesUpgrade -join '; ')]"
+}
+# L'ancienne version est retiree dans la transaction de la nouvelle
+# (afterInstallInitialize): un echec de la nouvelle la restaure.
+$sequence = @{}
+foreach ($l in (Lignes-Msi $Msi 'SELECT `Action`, `Sequence`, `Condition` FROM `InstallExecuteSequence`' 3)) {
+    $sequence[$l[0]] = $l
+}
+$rep = $sequence['RemoveExistingProducts']
+if ($null -ne $rep -and
+    [int]$sequence['InstallInitialize'][1] -lt [int]$rep[1] -and
+    [int]$rep[1] -lt [int]$sequence['ProcessComponents'][1]) {
+    Ok "RemoveExistingProducts ($($rep[1])) entre InstallInitialize et ProcessComponents"
+} else {
+    Fail "RemoveExistingProducts hors de la transaction de la nouvelle version: $($rep -join ' | ')"
+}
 
 Etape 'Empreinte SHA256 du MSI'
 $hash = (Get-FileHash -LiteralPath $Msi -Algorithm SHA256).Hash.ToLowerInvariant()

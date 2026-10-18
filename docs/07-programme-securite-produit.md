@@ -558,8 +558,10 @@ artefacts a 7 jours).
 Les paquets de la coquille n'executent rien avec les privileges de l'installation: ni script du
 mainteneur, ni action personnalisee du MSI, ni entree de demarrage de session. Le MSI de la
 coquille ne pose que son executable, dans le dossier du daemon, et un raccourci du menu, sous un
-code de mise a niveau distinct de celui du daemon; `paquets_linux.rs` et `paquets_windows.rs` le
-gardent, et `audit_planifie.rs` borne leurs jobs comme ceux du daemon.
+code de mise a niveau distinct de celui du daemon; comme celui du daemon, il tient un second MSI
+de la meme version pour une mise a niveau et retire l'ancienne version dans la transaction de la
+nouvelle. `paquets_linux.rs` et `paquets_windows.rs` le gardent, et `audit_planifie.rs` borne
+leurs jobs comme ceux du daemon.
 
 Limites, lues dans le code:
 - Un retour arriere de l'installation du MSI retire le service s'il ne l'a pas trouve en place,

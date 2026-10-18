@@ -20,6 +20,24 @@
     qui serait retire. Le script de construction refuse les deux egaux.
     ProductCode est engendre a chaque construction (MajorUpgrade l'exige).
 
+  - AllowSameVersionUpgrades, comme le MSI du daemon: deux constructions de la
+    meme version (deux runs de la CI tirent la meme version du workspace) ont
+    deux ProductCode. Sans cet attribut, Windows Installer les tenait pour deux
+    installations distinctes: deux entrees << Bifrost GUI >> dans Programmes et
+    fonctionnalites, des composants a deux clients, l'executable du second MSI
+    non copie sur celui de meme version deja pose, et un dossier d'icone laisse
+    apres les deux retraits (mesure du 18/10/2026). Avec lui, la meme version
+    est une mise a niveau: une seule installation inscrite. L'ICE61 le signale
+    en avertissement, c'est son objet. Une version plus recente reste refusee
+    (DowngradeErrorMessage).
+
+  - Schedule="afterInstallInitialize", comme le MSI du daemon: l'ancienne
+    version est retiree en entier avant la pose de la nouvelle, comme au
+    defaut de WiX, mais dans la meme transaction. Au defaut (apres
+    InstallValidate), un echec de la nouvelle laissait la machine sans
+    coquille; ici le retour arriere remet l'ancienne (mesure du 18/10/2026,
+    echec provoque en fin d'installation).
+
   - Le meme dossier que le daemon, %ProgramFiles%\Bifrost (INSTALLFOLDER). Chaque
     MSI ne retire que ses composants, et le dossier ne part que vide. Rien sous
     %ProgramData%: ce qui s'y trouve est au daemon.
@@ -62,7 +80,8 @@
            Scope="perMachine"
            Language="1033">
 
-    <MajorUpgrade DowngradeErrorMessage="Une version plus recente de Bifrost GUI est deja installee." />
+    <MajorUpgrade AllowSameVersionUpgrades="yes" Schedule="afterInstallInitialize"
+                  DowngradeErrorMessage="Une version plus recente de Bifrost GUI est deja installee." />
 
     <MediaTemplate EmbedCab="yes" />
 

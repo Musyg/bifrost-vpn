@@ -300,7 +300,15 @@ cette page`), jamais comme un autre.
   meme revision, installation silencieuse, coquille fermee): une seule
   entree de programmes, a la nouvelle version, l'executable neuf et le
   raccourci du menu; la reparation les garde; poser l'ancienne version
-  par-dessus est refuse (code 1603). La mise a niveau avec la coquille
+  par-dessus est refuse (code 1603). Dans une machine de meme sorte, un
+  second MSI de la meme version (autre ProductCode, executable d'autre
+  empreinte) est une mise a niveau, pas une seconde installation, dans
+  les deux ordres: une seule entree, l'executable de ce MSI pose, le
+  raccourci du menu present, et rien ne reste a la desinstallation; un
+  echec provoque en fin de mise a niveau remet l'ancienne version. Un MSI
+  construit avant ce reglage (`AllowSameVersionUpgrades`) reste une
+  seconde installation s'il est pose par-dessus un MSI de la meme version
+  construit apres. La mise a niveau avec la coquille
   ouverte n'est pas mesuree.
 - Sous Windows, le bout en bout du groupe d'acces (un membre commande le
   daemon par la coquille et recoit un refus nomme pour toute autre
