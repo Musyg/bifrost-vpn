@@ -165,7 +165,6 @@ async fn handle(
     tx: Sender<Cmd>,
     profil: std::path::PathBuf,
 ) -> Result<(), IpcError> {
-    let peer = conn.peer().to_string();
     loop {
         let request = match conn.recv().await {
             Ok(r) => r,
@@ -186,9 +185,14 @@ async fn handle(
         // dit si c'etait un administrateur (root sous Linux; SYSTEM ou
         // Administrateurs actifs sous Windows) ou un membre du groupe (le
         // groupe `bifrost` sous Linux, le groupe d'acces sous Windows).
+        // L'appelant est lu APRES la requete: sous Linux, le `SO_PEERCRED` de
+        // l'acceptation (uid, gid, pid); sous Windows, le SID du jeton sur
+        // lequel le transport vient de juger cette requete, et le PID du
+        // client (`bifrost_ipc::transport::ClientDuPipe`), jamais un uid ni un
+        // gid.
         if request.command.is_mutating() {
             tracing::info!(
-                peer = %peer,
+                peer = %conn.peer(),
                 niveau = conn.niveau().nom(),
                 command = request.command.name(),
                 "commande privilegiee"
@@ -340,8 +344,12 @@ pub fn auth_policy(group: Option<&str>, proprietaire: ProprietaireDuPipe) -> Pol
             ..AuthPolicy::default()
         },
         proprietaire,
+        // Sans journal: `run` a deja juge `--group` avant le superviseur
+        // (`groupe_d_acces`), et c'est ce jugement qui annonce le groupe
+        // retenu, une fois par demarrage. L'ecoute pose le groupe resolu ici,
+        // par la meme regle.
         #[cfg(windows)]
-        groupe: groupe_d_acces(group),
+        groupe: resoudre_le_groupe(group),
     }
 }
 
@@ -366,18 +374,28 @@ pub fn proprietaire_du_pipe(service: bool) -> ProprietaireDuPipe {
 /// administrateur, jamais un compte ou un groupe predefini). Sans `--group`,
 /// aucun: le pipe n'admet que SYSTEM et les Administrateurs. Un groupe
 /// introuvable ou refuse rend son erreur, qui arrete le daemon.
+///
+/// Le jugement de `run`, avant le superviseur: il annonce au journal le groupe
+/// retenu, et lui seul ([`auth_policy`] resout sans rien ecrire).
 #[cfg(windows)]
 pub fn groupe_d_acces(group: Option<&str>) -> Result<Option<GroupeDAcces>, ErreurGroupe> {
-    let Some(nom) = group else {
-        return Ok(None);
-    };
-    let groupe = GroupeDAcces::resoudre(nom)?;
-    tracing::info!(
-        group = nom,
-        sid = groupe.sid(),
-        "groupe d'acces du canal retenu"
-    );
-    Ok(Some(groupe))
+    let retenu = resoudre_le_groupe(group)?;
+    if let (Some(nom), Some(groupe)) = (group, &retenu) {
+        tracing::info!(
+            group = nom,
+            sid = groupe.sid(),
+            "groupe d'acces du canal retenu"
+        );
+    }
+    Ok(retenu)
+}
+
+/// La resolution et le jugement de `--group`, sans journal: commune au
+/// jugement de `run` ([`groupe_d_acces`]) et a la politique de l'ecoute
+/// ([`auth_policy`]).
+#[cfg(windows)]
+fn resoudre_le_groupe(group: Option<&str>) -> Result<Option<GroupeDAcces>, ErreurGroupe> {
+    group.map(GroupeDAcces::resoudre).transpose()
 }
 
 #[cfg(unix)]
@@ -405,6 +423,14 @@ fn resolve_gid(_group: Option<&str>) -> Option<u32> {
     None
 }
 
+/// Le lexeur partage des gardes de source (commentaires et litteraux separes
+/// du code), pour la garde de `handle`. Declare hors du module des recettes:
+/// un chemin relatif s'y resoudrait sous `src/server/tests/`, qui n'existe pas.
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../../bifrost-evasion/tests/commun/lexeur_rust.rs"]
+mod lexeur_rust;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -423,6 +449,62 @@ allowed_ips = ["0.0.0.0/0"]
 local_resolver = "127.0.0.1"
 upstream = ["10.2.0.1"]
 "#;
+
+    /// Le journal d'une commande qui change l'etat lit l'appelant APRES la
+    /// requete, dans l'appel meme qui l'ecrit: sous Windows, le transport ne
+    /// connait le compte du client qu'apres avoir juge sa requete
+    /// (`bifrost_ipc::transport::ClientDuPipe`), et un texte pris avant la
+    /// boucle n'aurait que son PID. La recette du transport
+    /// (`le_journal_nomme_le_client_par_son_sid_et_son_pid`) mesure le texte;
+    /// celle-ci garde l'endroit ou `handle` le prend, faute de pouvoir ouvrir
+    /// ici le pipe du daemon (SYSTEM et Administrateurs) sans elevation.
+    ///
+    /// Garde de source par le lexeur partage, commentaires et litteraux
+    /// retires du code: dans `handle`, `conn.peer()` une seule fois, apres
+    /// `conn.recv()`, dans l'appel de `tracing::info!` dont le message est
+    /// << commande privilegiee >>, sans fin d'instruction entre les deux.
+    #[test]
+    fn le_journal_d_une_commande_lit_l_appelant_apres_sa_requete() {
+        let source = include_str!("server.rs");
+        let decoupe = lexeur_rust::decouper(source).expect("lexeur");
+        let mut code = source.as_bytes().to_vec();
+        for &(debut, fin) in &decoupe.neutres {
+            for octet in &mut code[debut..fin] {
+                if *octet != b'\n' {
+                    *octet = b' ';
+                }
+            }
+        }
+        let code = String::from_utf8(code).expect("source ASCII");
+        let une_fois = |dans: &str, motif: &str| {
+            let positions: Vec<usize> = dans.match_indices(motif).map(|(p, _)| p).collect();
+            assert_eq!(positions.len(), 1, "`{motif}` dans handle: {positions:?}");
+            positions[0]
+        };
+        let debut = une_fois(&code, "\nasync fn handle(");
+        let fin = debut + code[debut..].find("\n}\n").expect("fin de handle");
+        let corps = &code[debut..fin];
+        let recv = une_fois(corps, "conn.recv()");
+        let peer = une_fois(corps, "conn.peer()");
+        let info = une_fois(corps, "tracing::info!(");
+        let message: Vec<usize> = decoupe
+            .litteraux
+            .iter()
+            .filter(|l| l.corps == "commande privilegiee" && (debut..fin).contains(&l.debut))
+            .map(|l| l.debut - debut)
+            .collect();
+        assert_eq!(message.len(), 1, "le message dans handle: {message:?}");
+        assert!(
+            recv < info && info < peer,
+            "recv {recv}, info {info}, peer {peer}"
+        );
+        assert!(peer < message[0], "peer {peer}, message {}", message[0]);
+        assert!(
+            !corps[info..message[0]].contains(';'),
+            "l'appelant est pris hors de l'appel qui l'ecrit: {}",
+            &corps[info..message[0]]
+        );
+    }
 
     /// Le verdict d'inspection TLS arrive REELLEMENT au superviseur.
     ///
@@ -867,6 +949,158 @@ upstream = ["10.2.0.1"]
                 auth_policy(None, proprietaire_du_pipe(false)).proprietaire,
                 ProprietaireDuPipe::Administrateurs
             );
+        }
+
+        /// Le nom de la recette du groupe annonce, tel que son abstention
+        /// l'imprime.
+        #[cfg(windows)]
+        const RECETTE_GROUPE_ANNONCE: &str = "un_demarrage_n_annonce_le_groupe_retenu_qu_une_fois";
+
+        /// Le SID du compte de cette recette, sous sa forme canonique, lu dans
+        /// le jeton du processus (`TokenUser`) et converti par le systeme.
+        #[cfg(windows)]
+        fn sid_du_compte_de_la_recette() -> String {
+            use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LocalFree};
+            use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
+            use windows_sys::Win32::Security::{
+                GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser,
+            };
+            use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+            let mut jeton: HANDLE = std::ptr::null_mut();
+            // SAFETY: GetCurrentProcess rend une pseudo-poignee toujours
+            // valide; `jeton` recoit une poignee fermee ci-dessous.
+            let ouvert = unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut jeton) };
+            assert!(
+                ouvert != 0,
+                "OpenProcessToken: {}",
+                std::io::Error::last_os_error()
+            );
+            let mut taille = 0u32;
+            // SAFETY: sonde de taille, tampon nul de longueur zero.
+            unsafe { GetTokenInformation(jeton, TokenUser, std::ptr::null_mut(), 0, &mut taille) };
+            let mut tampon = vec![0u64; (taille as usize).div_ceil(8)];
+            // SAFETY: le tampon, aligne sur 8 octets, fait au moins `taille`
+            // octets, taille passee.
+            let lu = unsafe {
+                GetTokenInformation(
+                    jeton,
+                    TokenUser,
+                    tampon.as_mut_ptr().cast(),
+                    taille,
+                    &mut taille,
+                )
+            };
+            let erreur = std::io::Error::last_os_error();
+            // SAFETY: la poignee vient d'un OpenProcessToken reussi, fermee une
+            // seule fois.
+            unsafe { CloseHandle(jeton) };
+            assert!(lu != 0, "GetTokenInformation(TokenUser): {erreur}");
+            // SAFETY: le tampon commence par un TOKEN_USER dont le SID pointe
+            // dans ce meme tampon, vivant jusqu'a la conversion.
+            let sid = unsafe { (*tampon.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+            let mut texte: windows_sys::core::PWSTR = std::ptr::null_mut();
+            // SAFETY: SID valide dans le tampon vivant; `texte` recoit une
+            // allocation du systeme, liberee apres copie.
+            let converti = unsafe { ConvertSidToStringSidW(sid, &mut texte) };
+            assert!(
+                converti != 0 && !texte.is_null(),
+                "ConvertSidToStringSidW: {}",
+                std::io::Error::last_os_error()
+            );
+            let mut longueur = 0usize;
+            // SAFETY: chaine terminee par un zero rendue par le systeme.
+            while unsafe { *texte.add(longueur) } != 0 {
+                longueur += 1;
+            }
+            // SAFETY: les `longueur` unites avant le zero sont lisibles.
+            let canonique =
+                String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(texte, longueur) });
+            // SAFETY: allocation de ConvertSidToStringSidW, plus jamais lue.
+            unsafe { LocalFree(texte.cast()) };
+            canonique
+        }
+
+        /// Un groupe local que la machine porte deja et que le daemon
+        /// retiendrait: le premier SID `<domaine>-<RID>` que
+        /// `GroupeDAcces::resoudre` admet, le domaine etant celui du compte de
+        /// la recette et le RID parcouru a partir du premier RID d'un compte
+        /// cree. Aucun groupe n'est cree: `None` si la machine n'en porte
+        /// aucun.
+        #[cfg(windows)]
+        fn un_groupe_admissible_de_la_machine() -> Option<String> {
+            let compte = sid_du_compte_de_la_recette();
+            let (domaine, _) = compte.rsplit_once('-')?;
+            if !domaine.starts_with("S-1-5-21-") {
+                return None;
+            }
+            let premier = bifrost_ipc::groupe::PREMIER_RID_CREE;
+            (premier..premier + 1000)
+                .map(|rid| format!("{domaine}-{rid}"))
+                .find(|sid| GroupeDAcces::resoudre(sid).is_ok())
+        }
+
+        /// Un demarrage n'annonce qu'une fois le groupe d'acces retenu.
+        ///
+        /// `run` juge `--group` avant le superviseur
+        /// (`run_juge_le_groupe_d_acces_avant_le_superviseur`), puis
+        /// `auth_policy` le juge une seconde fois pour l'ecoute
+        /// (`run_finit_par_l_arret_ordonne_et_par_lui_seul`). La recette
+        /// rejoue ces deux appels, dans cet ordre, sur un groupe que la
+        /// machine porte, et compte les lignes << groupe d'acces du canal
+        /// retenu >>: une, qui nomme le groupe et son SID. Premisse: la
+        /// machine porte un groupe local cree par un administrateur, que le
+        /// daemon admettrait (`un_groupe_admissible_de_la_machine`); sinon
+        /// abstention nommee, sans rien creer.
+        #[cfg(windows)]
+        #[test]
+        fn un_demarrage_n_annonce_le_groupe_retenu_qu_une_fois() {
+            use std::io::Write;
+
+            #[derive(Clone, Default)]
+            struct Tampon(Arc<Mutex<Vec<u8>>>);
+            impl Write for Tampon {
+                fn write(&mut self, octets: &[u8]) -> std::io::Result<usize> {
+                    self.0.lock().unwrap().extend_from_slice(octets);
+                    Ok(octets.len())
+                }
+                fn flush(&mut self) -> std::io::Result<()> {
+                    Ok(())
+                }
+            }
+
+            let Some(groupe) = un_groupe_admissible_de_la_machine() else {
+                println!(
+                    "SKIPPED {RECETTE_GROUPE_ANNONCE}: la machine ne porte, dans le domaine du \
+                     compte des recettes, aucun groupe que le daemon retiendrait, et la recette \
+                     n'en cree pas"
+                );
+                return;
+            };
+            let tampon = Tampon::default();
+            let ecrivain = tampon.clone();
+            let abonne = tracing_subscriber::fmt()
+                .with_writer(move || ecrivain.clone())
+                .with_ansi(false)
+                .with_max_level(tracing::Level::INFO)
+                .finish();
+            tracing::subscriber::with_default(abonne, || {
+                groupe_d_acces(Some(&groupe)).expect("le groupe de la machine est retenu");
+                let politique = auth_policy(Some(&groupe), proprietaire_du_pipe(true));
+                assert!(
+                    matches!(politique.groupe, Ok(Some(_))),
+                    "{:?}",
+                    politique.groupe
+                );
+            });
+            let journal = String::from_utf8(tampon.0.lock().unwrap().clone()).expect("journal");
+            let lignes: Vec<&str> = journal
+                .lines()
+                .filter(|l| l.contains("groupe d'acces du canal retenu"))
+                .collect();
+            println!("RELEVE {RECETTE_GROUPE_ANNONCE}: groupe {groupe}, lignes {lignes:?}");
+            assert_eq!(lignes.len(), 1, "{journal}");
+            assert!(lignes[0].contains(&groupe), "{journal}");
         }
 
         /// Un fichier de recette, retire a la fin.

@@ -12,7 +12,13 @@
 
 use std::fmt;
 
-/// Identite du processus a l'autre bout du canal.
+/// Identite du processus a l'autre bout du canal, telle que `SO_PEERCRED` la
+/// donne: l'entree de [`authorize`], et le texte du journal sous Linux.
+///
+/// Le transport Windows n'en construit aucune: un uid et un gid n'y ont pas de
+/// sens. Il nomme son client par le SID du jeton et le numero de processus
+/// (`transport::ClientDuPipe`), et sa decision est celle de
+/// `appelant::identifier`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerIdentity {
     pub uid: u32,

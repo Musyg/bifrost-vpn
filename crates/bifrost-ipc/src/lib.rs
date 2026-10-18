@@ -42,7 +42,7 @@ pub mod transport;
 
 pub use appelant::{CommandeReservee, NiveauDAppelant, decider};
 #[cfg(windows)]
-pub use appelant::{EtapeDIdentification, Identification};
+pub use appelant::{CompteDuClient, EtapeDIdentification, Identification};
 pub use auth::{Admission, AuthError, AuthPolicy, PeerIdentity, SupplementaryGroups};
 #[cfg(windows)]
 pub use groupe::{ErreurGroupe, GroupeDAcces};

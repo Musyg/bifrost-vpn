@@ -11,7 +11,9 @@
 
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
-use crate::auth::{AuthPolicy, PeerIdentity, SupplementaryGroups};
+use crate::auth::AuthPolicy;
+#[cfg(unix)]
+use crate::auth::{PeerIdentity, SupplementaryGroups};
 use crate::protocol::{MAX_FRAME_BYTES, PROTOCOL_VERSION, Request, Response};
 
 #[derive(Debug, thiserror::Error)]
@@ -1219,7 +1221,7 @@ mod imp {
 #[cfg(windows)]
 mod imp {
     use super::*;
-    use crate::appelant::{self, Identification, NiveauDAppelant};
+    use crate::appelant::{self, CompteDuClient, Identification, NiveauDAppelant};
     use crate::groupe::GroupeDAcces;
     use std::ffi::c_void;
     use std::os::windows::io::{AsRawHandle, RawHandle};
@@ -1475,9 +1477,9 @@ mod imp {
             self.next.connect().await?;
             let suivante = self.instance_suivante().await?;
             let connectee = std::mem::replace(&mut self.next, suivante);
-            let peer = peer_identity(&connectee);
-            tracing::debug!(%peer, "client accepte");
-            Ok(Connection::new(connectee, peer, self.delai_requete))
+            let connexion = Connection::new(connectee, self.delai_requete);
+            tracing::debug!(client = %connexion.peer(), "client accepte");
+            Ok(connexion)
         }
 
         /// L'instance qui attendra le client suivant, creee pendant que
@@ -1561,23 +1563,68 @@ mod imp {
         Ok(result?)
     }
 
-    /// Sur Windows, l'autorisation est portee par la DACL du pipe: seuls SYSTEM,
-    /// les Administrateurs et les membres du groupe d'acces, s'il y en a un,
-    /// peuvent l'ouvrir. L'identite retournee sert a la journalisation, pas a
-    /// la decision.
-    fn peer_identity(_server: &NamedPipeServer) -> PeerIdentity {
-        PeerIdentity {
-            uid: 0,
-            gid: 0,
-            pid: None,
-            supplementary_groups: SupplementaryGroups::Known(Vec::new()),
+    /// Le client d'une instance du pipe, tel que le journal le nomme: le
+    /// compte de sa derniere requete lue, et le numero de son processus.
+    ///
+    /// Sous Windows, l'autorisation est portee par la DACL du pipe (seuls
+    /// SYSTEM, les Administrateurs et les membres du groupe d'acces, s'il y en
+    /// a un, peuvent l'ouvrir), puis par la decision par requete
+    /// (`appelant::identifier`). Ce client ne sert qu'au journal, a aucune des
+    /// deux: il n'a ni uid ni gid, qui n'ont pas de sens ici, et dit chaque
+    /// champ qu'il n'a pas pu lire au lieu d'y mettre une valeur.
+    ///
+    /// - le compte est le SID du jeton sur lequel `recv` a juge la derniere
+    ///   requete: celui de la decision, lu sur le meme jeton, et rien avant la
+    ///   premiere requete;
+    /// - le processus est celui que le systeme rattache a l'instance a
+    ///   l'acceptation (`GetNamedPipeClientProcessId`). Un numero de processus
+    ///   se reutilise: il situe l'appelant dans le journal, il ne decide rien.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ClientDuPipe {
+        compte: Option<CompteDuClient>,
+        processus: std::result::Result<u32, u32>,
+    }
+
+    impl ClientDuPipe {
+        /// Le client de l'instance `pipe`, a l'acceptation: son processus, et
+        /// aucun compte tant qu'aucune requete n'a ete lue.
+        fn accepte(pipe: &NamedPipeServer) -> Self {
+            use windows_sys::Win32::Foundation::GetLastError;
+            use windows_sys::Win32::System::Pipes::GetNamedPipeClientProcessId;
+            let mut pid = 0u32;
+            // SAFETY: la poignee de l'instance est vivante, tenue par `pipe`;
+            // `pid` est une variable locale.
+            let lu = unsafe { GetNamedPipeClientProcessId(pipe.as_raw_handle() as _, &mut pid) };
+            let processus = if lu == 0 {
+                // SAFETY: GetLastError ne lit que l'etat du fil courant.
+                Err(unsafe { GetLastError() })
+            } else {
+                Ok(pid)
+            };
+            Self {
+                compte: None,
+                processus,
+            }
+        }
+    }
+
+    impl std::fmt::Display for ClientDuPipe {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match &self.compte {
+                Some(compte) => write!(f, "sid={compte}")?,
+                None => f.write_str("sid=non lu (aucune requete lue)")?,
+            }
+            match self.processus {
+                Ok(pid) => write!(f, " pid={pid}"),
+                Err(code) => write!(f, " pid=non lu (GetNamedPipeClientProcessId, code {code})"),
+            }
         }
     }
 
     pub struct Connection {
         reader: BufReader<tokio::io::ReadHalf<NamedPipeServer>>,
         writer: tokio::io::WriteHalf<NamedPipeServer>,
-        peer: PeerIdentity,
+        client: ClientDuPipe,
         delai: std::time::Duration,
         /// La poignee de l'instance, pour identifier le client: `reader` et
         /// `writer` la tiennent ouverte aussi longtemps que la connexion.
@@ -1590,21 +1637,25 @@ mod imp {
     }
 
     impl Connection {
-        fn new(pipe: NamedPipeServer, peer: PeerIdentity, delai: std::time::Duration) -> Self {
+        fn new(pipe: NamedPipeServer, delai: std::time::Duration) -> Self {
+            let client = ClientDuPipe::accepte(&pipe);
             let poignee = pipe.as_raw_handle() as isize;
             let (r, w) = tokio::io::split(pipe);
             Self {
                 reader: BufReader::new(r),
                 writer: w,
-                peer,
+                client,
                 delai,
                 poignee,
                 identification: None,
             }
         }
 
-        pub fn peer(&self) -> &PeerIdentity {
-            &self.peer
+        /// Le client, pour le journal: le compte de la derniere requete lue
+        /// et le processus ([`ClientDuPipe`]). La version Unix rend le
+        /// `PeerIdentity` du `SO_PEERCRED`.
+        pub fn peer(&self) -> &ClientDuPipe {
+            &self.client
         }
 
         /// L'identification de l'appelant de la derniere requete lue par
@@ -1642,8 +1693,9 @@ mod imp {
                 if req.version != PROTOCOL_VERSION {
                     return Err(IpcError::VersionMismatch { got: req.version });
                 }
-                let identification = appelant::identifier(self.poignee as RawHandle);
+                let (identification, compte) = appelant::identifier(self.poignee as RawHandle);
                 self.identification = Some(identification);
+                self.client.compte = Some(compte);
                 if let Identification::Impossible { etape, code } = identification {
                     tracing::warn!(
                         etape = etape.nom(),
@@ -2616,8 +2668,8 @@ mod imp {
 
     /// La DACL du pipe est le SEUL controle d'acces sous Windows.
     ///
-    /// [`peer_identity`] rend `uid: 0` en dur, et le dit: l'identite du pair ne
-    /// sert qu'au journal, la decision appartient a la DACL. Sur Linux,
+    /// Le client du pipe ([`ClientDuPipe`]) ne sert qu'au journal, la decision
+    /// d'ouvrir le canal appartient a la DACL. Sur Linux,
     /// `SO_PEERCRED` alimente [`crate::auth::authorize`], et cette fonction-la
     /// a sept recettes. Cote Windows, [`PIPE_SDDL`] n'en avait AUCUNE.
     ///
@@ -3135,8 +3187,7 @@ mod imp {
                 let requete = Request::new(Command::Status);
                 let cote_serveur = async move {
                     next.connect().await?;
-                    let peer = peer_identity(&next);
-                    let mut connexion = Connection::new(next, peer, delai_requete);
+                    let mut connexion = Connection::new(next, delai_requete);
                     let requete = connexion.recv().await?;
                     let status = matches!(requete.command, Command::Status);
                     connexion.send(&Response::Ok).await?;
@@ -3639,7 +3690,7 @@ mod imp {
             let _client_lu = client(&nom_lu, SECURITY_IDENTIFICATION);
             let connexion = serveur_lu.accept().await.expect("acceptation");
             assert_eq!(
-                appelant::identifier(connexion.poignee as RawHandle),
+                appelant::identifier(connexion.poignee as RawHandle).0,
                 Identification::Lue {
                     systeme: false,
                     administrateurs: actifs
@@ -3653,17 +3704,23 @@ mod imp {
             let connexion = serveur_anonyme.accept().await.expect("acceptation");
             assert_eq!(
                 appelant::identifier(connexion.poignee as RawHandle),
-                Identification::Impossible {
-                    etape: EtapeDIdentification::Jeton,
-                    code: ANONYME
-                }
+                (
+                    Identification::Impossible {
+                        etape: EtapeDIdentification::Jeton,
+                        code: ANONYME
+                    },
+                    CompteDuClient::NonLu {
+                        etape: "OpenThreadToken",
+                        code: ANONYME
+                    }
+                )
             );
             assert_eq!(jeton_du_fil(), Err(SANS_JETON), "apres un jeton illisible");
 
             let nom_client = nom("chemin-client");
             let _serveur_client = serveur(&nom_client);
             let brut = ouvrir_brut(&nom_client, SECURITY_IDENTIFICATION);
-            let issue = appelant::identifier(brut as RawHandle);
+            let (issue, _) = appelant::identifier(brut as RawHandle);
             // SAFETY: poignee ouverte ci-dessus, fermee une fois.
             unsafe { CloseHandle(brut) };
             println!("RELEVE appelant: identification sur une poignee cliente: {issue:?}");
@@ -3682,6 +3739,160 @@ mod imp {
                 Err(SANS_JETON),
                 "apres une imitation impossible"
             );
+        }
+
+        /// Le nom complet de la recette du journal, pour que l'enfant ne lance
+        /// qu'elle.
+        const RECETTE_JOURNAL: &str =
+            "transport::imp::tests_appelant::le_journal_nomme_le_client_par_son_sid_et_son_pid";
+
+        /// Present dans l'environnement de l'enfant, et la seulement: le nom
+        /// du pipe qu'il ouvre.
+        const ROLE_CLIENT_DU_JOURNAL: &str = "BIFROST_RECETTE_JOURNAL_CLIENT";
+
+        /// Le role de l'enfant: ouvrir le pipe comme le client du depot
+        /// (`SECURITY_IDENTIFICATION`), demander `disconnect`, attendre la
+        /// reponse, sortir. Un enfant que personne n'arreterait sort seul.
+        fn client_du_journal(nom: &str) {
+            std::thread::spawn(|| {
+                std::thread::sleep(Duration::from_secs(30));
+                std::process::exit(4);
+            });
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime de l'enfant");
+            rt.block_on(async {
+                let mut client = client(nom, SECURITY_IDENTIFICATION);
+                let reponse = client.request(&Request::new(Command::Disconnect)).await;
+                println!("REPONSE {reponse:?}");
+            });
+        }
+
+        /// Ce que le daemon journalise d'une commande qui change l'etat: le
+        /// client par son SID et son PID, jamais un uid ni un gid, qui n'ont
+        /// pas de sens sous Windows.
+        ///
+        /// Le client est un AUTRE processus, ce binaire relance pour cette
+        /// seule recette: son PID n'est pas celui du serveur, et seul le PID
+        /// du processus qui a ouvert le canal peut passer. Il ouvre le pipe
+        /// comme le client du depot et demande `disconnect`. Le texte est
+        /// celui de `Connection::peer`, que `bifrost-daemon` ecrit apres
+        /// chaque requete qui change l'etat (`server::handle`): avant la
+        /// premiere requete, le PID et un SID dit non lu; apres, le SID de
+        /// l'utilisateur du jeton que la requete a presente, ici le compte de
+        /// la recette, sous la forme canonique que le systeme rend. La
+        /// decision est inchangee: le jeton est lu, sans SYSTEM, et les
+        /// Administrateurs actifs exactement quand ils le sont ici.
+        #[test]
+        fn le_journal_nomme_le_client_par_son_sid_et_son_pid() {
+            if let Some(nom) = std::env::var_os(ROLE_CLIENT_DU_JOURNAL) {
+                return client_du_journal(&nom.to_string_lossy());
+            }
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .expect("runtime");
+            let nom = nom("journal");
+            let mut serveur = {
+                let _dans = rt.enter();
+                serveur(&nom)
+            };
+            let enfant =
+                std::process::Command::new(std::env::current_exe().expect("binaire de la recette"))
+                    .args([
+                        "--exact",
+                        RECETTE_JOURNAL,
+                        "--nocapture",
+                        "--test-threads=1",
+                    ])
+                    .env(ROLE_CLIENT_DU_JOURNAL, &nom)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                    .expect("lancement de l'enfant");
+            let pid_enfant = enfant.id();
+            let issue = rt.block_on(async {
+                tokio::time::timeout(Duration::from_secs(20), async {
+                    let mut connexion = serveur.accept().await?;
+                    let avant = connexion.peer().to_string();
+                    let requete = connexion.recv().await?;
+                    let apres = connexion.peer().to_string();
+                    let identification = connexion.identification();
+                    connexion.send(&Response::Ok).await?;
+                    Ok::<_, IpcError>((avant, requete.command.name(), apres, identification))
+                })
+                .await
+            });
+            // Servi, l'enfant sort de lui-meme apres la reponse; sinon il est
+            // arrete par sa poignee, celle du processus lance ici.
+            let (tx, rx) = std::sync::mpsc::channel();
+            let attente = std::thread::spawn(move || {
+                let mut enfant = enfant;
+                if rx.recv_timeout(Duration::from_secs(25)).is_err() {
+                    let _ = enfant.kill();
+                }
+                enfant.wait_with_output()
+            });
+            let issue = issue.unwrap_or(Err(IpcError::RequestTimeout));
+            if issue.is_ok() {
+                let _ = tx.send(());
+            } else {
+                drop(tx);
+            }
+            let sortie = attente
+                .join()
+                .expect("attente de l'enfant")
+                .expect("sortie de l'enfant");
+            let compte = crate::groupe::sid_du_compte_courant()
+                .unwrap_or_else(|e| panic!("utilisateur du jeton de ce processus: {e}"));
+            // SAFETY: SID valide rendu par le systeme et copie dans `compte`,
+            // vivant pendant l'appel.
+            let sid = unsafe { crate::groupe::forme_canonique(compte.as_ptr() as PSID) }
+                .unwrap_or_else(|code| panic!("ConvertSidToStringSidW: erreur Win32 {code}"));
+            // La sortie de l'enfant est imprimee echappee (`{:?}`), sur la
+            // ligne du releve: elle porte sa propre ligne `test result:`, qui,
+            // rendue en debut de ligne, serait comptee par
+            // `scripts/recettes-strict.sh` comme un binaire de plus.
+            println!(
+                "RELEVE journal: issue={issue:?}, pid enfant={pid_enfant}, pid recette={}, \
+                 enfant: {:?} / {:?}",
+                std::process::id(),
+                String::from_utf8_lossy(&sortie.stdout).trim(),
+                String::from_utf8_lossy(&sortie.stderr).trim()
+            );
+            let (avant, commande, apres, identification) = issue.expect("le serveur");
+            assert_ne!(
+                pid_enfant,
+                std::process::id(),
+                "le client est un autre processus"
+            );
+            assert_eq!(commande, "disconnect");
+            assert_eq!(
+                identification,
+                Some(Identification::Lue {
+                    systeme: false,
+                    administrateurs: administrateurs_actifs()
+                })
+            );
+            assert_eq!(
+                apres,
+                format!("sid={sid} pid={pid_enfant}"),
+                "apres la requete"
+            );
+            assert_eq!(
+                avant,
+                format!("sid=non lu (aucune requete lue) pid={pid_enfant}"),
+                "avant la premiere requete"
+            );
+            for texte in [&avant, &apres] {
+                assert!(
+                    !texte.contains("uid=") && !texte.contains("gid="),
+                    "{texte}"
+                );
+            }
         }
 
         /// Le nom de la recette SYSTEM, tel que son abstention l'imprime et
@@ -3936,9 +4147,9 @@ mod imp {
     }
 }
 
-pub use imp::{Connection, IpcClient, IpcServer};
 #[cfg(windows)]
-pub use imp::{PipeOwner, decide_pipe_owner};
+pub use imp::{ClientDuPipe, PipeOwner, decide_pipe_owner};
+pub use imp::{Connection, IpcClient, IpcServer};
 
 /// Plusieurs clients a la fois, et un client qui se tait: ce qu'en font le
 /// serveur et le client, par le chemin de production. Linux: `bind`, dans un

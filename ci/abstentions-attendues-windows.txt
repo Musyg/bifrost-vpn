@@ -86,6 +86,11 @@ SKIPPED miroir_le_compte_du_groupe_echange_sans_pouvoir_ajouter_d_instance: le c
 # pipe, mesure sur le runner (Administrateurs actifs) et n'a pas de ligne ici.
 SKIPPED sous_system_le_pipe_du_service_sert_le_client_au_niveau_complet: l'utilisateur du jeton des recettes n'est pas LocalSystem: le pipe du daemon en service et un appelant SYSTEM ne se mesurent pas sous ce jeton
 SKIPPED un_chemin_etroit_est_vu_comme_tel: BIFROST_CHEMIN_ETROIT absent, aucune interface a MTU reduit a viser
+# La recette du groupe retenu annonce une fois (bifrost-daemon, server.rs)
+# rejoue le demarrage sur un groupe local que la machine porte deja, et n'en
+# cree aucun. Premisse NON RELEVEE sur le runner: si l'image en porte un, la
+# recette y mesure et le budget signale cette ligne comme un progres a retirer.
+SKIPPED un_demarrage_n_annonce_le_groupe_retenu_qu_une_fois: la machine ne porte, dans le domaine du compte des recettes, aucun groupe que le daemon retiendrait, et la recette n'en cree pas
 SKIPPED un_rid_predefini_de_la_machine_est_refuse: le compte des recettes est un compte predefini de la machine, pas un compte cree par un administrateur: la recette miroir ne le mesure pas
 SKIPPED une_forme_equivalente_est_jugee_et_rendue_sous_sa_forme_canonique: le compte des recettes est un compte predefini de la machine, pas un compte cree par un administrateur: la recette miroir ne le mesure pas
 SKIPPED: <CHEMIN> absente: le depot ne distribue aucun binaire tiers, la recuperer avec 'bifrost pilote recuperer'

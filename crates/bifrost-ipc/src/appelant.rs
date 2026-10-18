@@ -186,6 +186,31 @@ pub enum Identification {
     },
 }
 
+/// Le compte sous lequel l'appelant a ouvert le canal, pour le journal et
+/// pour lui seul: son SID, lu sur le jeton meme que l'identification
+/// (`GetTokenInformation(TokenUser)`), ou l'etape qui ne l'a pas rendu.
+/// Aucune decision ne le lit; la decision reste [`niveau_lu`] de
+/// l'[`Identification`].
+#[cfg(windows)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompteDuClient {
+    /// La forme canonique du SID (`S-1-5-...`), rendue par le systeme
+    /// (`ConvertSidToStringSidW`).
+    Lu(String),
+    /// Le SID n'a pas ete lu: l'etape qui a echoue, et le code du systeme.
+    NonLu { etape: &'static str, code: u32 },
+}
+
+#[cfg(windows)]
+impl std::fmt::Display for CompteDuClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CompteDuClient::Lu(sid) => f.write_str(sid),
+            CompteDuClient::NonLu { etape, code } => write!(f, "non lu ({etape}, code {code})"),
+        }
+    }
+}
+
 /// Le niveau que vaut une identification. Sure par defaut: seul un jeton LU,
 /// ou SYSTEM est present ou les Administrateurs actifs, vaut le niveau
 /// complet; une identification impossible vaut le niveau restreint.
@@ -251,12 +276,13 @@ mod imp {
     //! Le daemon s'arrete avec son kill switch dans l'etat ou il est, comme
     //! sur toute mort du processus.
 
-    use super::{EtapeDIdentification, Identification};
+    use super::{CompteDuClient, EtapeDIdentification, Identification};
     use std::os::windows::io::RawHandle;
     use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE};
     use windows_sys::Win32::Security::{
-        CheckTokenMembership, CreateWellKnownSid, PSID, RevertToSelf, SECURITY_MAX_SID_SIZE,
-        TOKEN_QUERY, WELL_KNOWN_SID_TYPE, WinBuiltinAdministratorsSid, WinLocalSystemSid,
+        CheckTokenMembership, CreateWellKnownSid, GetTokenInformation, PSID, RevertToSelf,
+        SECURITY_MAX_SID_SIZE, TOKEN_QUERY, TOKEN_USER, TokenUser, WELL_KNOWN_SID_TYPE,
+        WinBuiltinAdministratorsSid, WinLocalSystemSid,
     };
     use windows_sys::Win32::System::Pipes::ImpersonateNamedPipeClient;
     use windows_sys::Win32::System::Threading::{GetCurrentThread, OpenThreadToken};
@@ -322,11 +348,65 @@ mod imp {
         Ok(est != 0)
     }
 
+    /// Le SID du compte du jeton, sous sa forme canonique: `TokenUser`, puis
+    /// la conversion du systeme. Pour le journal: rien ne le compare a quoi
+    /// que ce soit.
+    fn compte(jeton: &Jeton) -> CompteDuClient {
+        const ETAPE: &str = "GetTokenInformation(TokenUser)";
+        let mut taille = 0u32;
+        // SAFETY: sonde de taille, tampon nul de longueur zero; le systeme
+        // n'ecrit que `taille`, une variable locale.
+        unsafe { GetTokenInformation(jeton.0, TokenUser, std::ptr::null_mut(), 0, &mut taille) };
+        if taille == 0 {
+            return CompteDuClient::NonLu {
+                etape: ETAPE,
+                code: derniere_erreur(),
+            };
+        }
+        // Aligne sur 8 octets: un TOKEN_USER commence par un pointeur.
+        let mut tampon = vec![0u64; (taille as usize).div_ceil(8)];
+        // SAFETY: `jeton.0` est un jeton ouvert en TOKEN_QUERY et vivant; le
+        // tampon, vivant, fait au moins `taille` octets, et sa taille est
+        // passee.
+        let lu = unsafe {
+            GetTokenInformation(
+                jeton.0,
+                TokenUser,
+                tampon.as_mut_ptr().cast(),
+                taille,
+                &mut taille,
+            )
+        };
+        if lu == 0 {
+            return CompteDuClient::NonLu {
+                etape: ETAPE,
+                code: derniere_erreur(),
+            };
+        }
+        // SAFETY: le tampon commence par le TOKEN_USER que le systeme vient
+        // d'y ecrire, et son SID pointe dans ce meme tampon.
+        let sid = unsafe { (*tampon.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+        // SAFETY: SID valide, dans le tampon vivant jusqu'a la fin de l'appel.
+        match unsafe { crate::groupe::forme_canonique(sid) } {
+            Ok(texte) => CompteDuClient::Lu(texte),
+            Err(code) => CompteDuClient::NonLu {
+                etape: "ConvertSidToStringSidW",
+                code,
+            },
+        }
+    }
+
     /// Identifie le client de l'instance `pipe`: le jeton sous lequel il a
     /// ouvert le canal, lu par le systeme. Ne panique pas; toute etape qui
     /// echoue rend [`Identification::Impossible`]. Le fil courant est rendu a
     /// son jeton avant le retour, quel que soit le chemin.
-    pub(crate) fn identifier(pipe: RawHandle) -> Identification {
+    ///
+    /// Rend aussi le compte de ce jeton ([`CompteDuClient`]), pour le
+    /// journal: lu sur le jeton deja ouvert, apres l'imitation, et sans effet
+    /// sur l'identification. Un compte illisible laisse l'identification
+    /// telle quelle; une identification impossible avant l'ouverture du jeton
+    /// rend un compte non lu, a la meme etape et au meme code.
+    pub(crate) fn identifier(pipe: RawHandle) -> (Identification, CompteDuClient) {
         let emprunt = Emprunt;
         // SAFETY: `pipe` est la poignee d'une instance serveur que l'appelant
         // tient pendant l'appel; la fonction ne lit ni n'ecrit la memoire de
@@ -335,10 +415,7 @@ mod imp {
         if unsafe { ImpersonateNamedPipeClient(pipe as HANDLE) } == 0 {
             let code = derniere_erreur();
             drop(emprunt);
-            return Identification::Impossible {
-                etape: EtapeDIdentification::Imitation,
-                code,
-            };
+            return impossible(EtapeDIdentification::Imitation, code);
         }
         let mut poignee: HANDLE = std::ptr::null_mut();
         // SAFETY: pseudo-poignee du fil courant, toujours valide; `poignee`
@@ -349,34 +426,53 @@ mod imp {
         let code = if ouvert == 0 { derniere_erreur() } else { 0 };
         drop(emprunt);
         if ouvert == 0 {
-            return Identification::Impossible {
-                etape: EtapeDIdentification::Jeton,
-                code,
-            };
+            return impossible(EtapeDIdentification::Jeton, code);
         }
         let jeton = Jeton(poignee);
+        let compte = compte(&jeton);
         let systeme = match present(&jeton, WinLocalSystemSid) {
             Ok(oui) => oui,
             Err(code) => {
-                return Identification::Impossible {
-                    etape: EtapeDIdentification::Systeme,
-                    code,
-                };
+                return (
+                    Identification::Impossible {
+                        etape: EtapeDIdentification::Systeme,
+                        code,
+                    },
+                    compte,
+                );
             }
         };
         let administrateurs = match present(&jeton, WinBuiltinAdministratorsSid) {
             Ok(oui) => oui,
             Err(code) => {
-                return Identification::Impossible {
-                    etape: EtapeDIdentification::Administrateurs,
-                    code,
-                };
+                return (
+                    Identification::Impossible {
+                        etape: EtapeDIdentification::Administrateurs,
+                        code,
+                    },
+                    compte,
+                );
             }
         };
-        Identification::Lue {
-            systeme,
-            administrateurs,
-        }
+        (
+            Identification::Lue {
+                systeme,
+                administrateurs,
+            },
+            compte,
+        )
+    }
+
+    /// Une identification impossible avant que le jeton soit ouvert: aucun
+    /// compte a lire, et le compte dit pourquoi, par la meme etape.
+    fn impossible(etape: EtapeDIdentification, code: u32) -> (Identification, CompteDuClient) {
+        (
+            Identification::Impossible { etape, code },
+            CompteDuClient::NonLu {
+                etape: etape.nom(),
+                code,
+            },
+        )
     }
 }
 

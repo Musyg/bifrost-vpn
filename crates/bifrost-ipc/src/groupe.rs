@@ -238,17 +238,27 @@ unsafe fn copier_texte(texte: *const u16) -> String {
 
 /// La forme textuelle canonique d'un SID binaire, rendue par le systeme.
 fn texte_du_sid(designation: &str, sid: &[u8]) -> Result<String, ErreurGroupe> {
-    let mut texte: windows_sys::core::PWSTR = std::ptr::null_mut();
     // SAFETY: `sid` est un SID valide (rendu par le systeme et verifie par
-    // IsValidSid a sa copie); `texte` recoit une allocation du systeme,
-    // liberee par LocalFree apres copie.
-    let ok = unsafe { ConvertSidToStringSidW(sid.as_ptr() as PSID, &mut texte) };
+    // IsValidSid a sa copie), vivant pendant l'appel.
+    unsafe { forme_canonique(sid.as_ptr() as PSID) }
+        .map_err(|code| erreur_systeme(designation, "ConvertSidToStringSidW", code))
+}
+
+/// La forme textuelle canonique d'un SID, telle que `ConvertSidToStringSidW`
+/// la rend, ou le code d'erreur du systeme. Une seule conversion pour le
+/// jugement du groupe d'acces et pour le journal du transport, qui nomme le
+/// client d'une requete par le SID de son jeton (`appelant::identifier`).
+///
+/// # Safety
+///
+/// `sid` pointe sur un SID valide, vivant pendant l'appel.
+pub(crate) unsafe fn forme_canonique(sid: PSID) -> Result<String, u32> {
+    let mut texte: windows_sys::core::PWSTR = std::ptr::null_mut();
+    // SAFETY: `sid` est un SID valide (contrat de l'appelant); `texte` recoit
+    // une allocation du systeme, liberee par LocalFree apres copie.
+    let ok = unsafe { ConvertSidToStringSidW(sid, &mut texte) };
     if ok == 0 || texte.is_null() {
-        return Err(erreur_systeme(
-            designation,
-            "ConvertSidToStringSidW",
-            derniere_erreur(),
-        ));
+        return Err(derniere_erreur());
     }
     // SAFETY: le systeme a rendu une chaine terminee par un zero, libree
     // juste apres la copie et plus jamais lue.
