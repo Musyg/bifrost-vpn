@@ -7,7 +7,9 @@
 //! profil fourni par l'appelant, `Check` et le reste ne sont pas ici: la
 //! coquille n'a aucune raison de les offrir, et une surface qu'on n'ouvre pas
 //! est une surface qu'on n'a pas a defendre. Ce sont aussi les trois
-//! commandes que le daemon ouvre, sous Windows, aux membres du groupe d'acces
+//! commandes que le daemon ouvre, sur les deux plateformes, aux membres du
+//! groupe qui admet sur le canal des comptes non administrateurs, le groupe
+//! d'acces sous Windows et le groupe `bifrost` sous Linux
 //! (`bifrost_ipc::appelant`): un membre a tout ce que la coquille offre.
 //!
 //! # Le serveur du canal, verifie avant le premier octet
@@ -255,8 +257,10 @@ mod tests {
     }
 
     /// La coquille n'envoie au daemon que `status`, `connect-stored` et
-    /// `disconnect`, les trois commandes que le daemon ouvre, sous Windows,
-    /// aux membres du groupe d'acces: le texte de production de ce module ne
+    /// `disconnect`, les trois commandes que le daemon ouvre, sur les deux
+    /// plateformes, aux membres du groupe qui admet sur le canal des comptes
+    /// non administrateurs (le groupe d'acces sous Windows, le groupe
+    /// `bifrost` sous Linux): le texte de production de ce module ne
     /// nomme aucune autre variante de `Command`, la page graphique
     /// (`gui/src/main.rs`) n'en nomme aucune, et la decision du daemon admet
     /// chacune des trois au niveau restreint.

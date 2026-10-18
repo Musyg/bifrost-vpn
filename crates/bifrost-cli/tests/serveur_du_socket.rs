@@ -438,6 +438,139 @@ async fn la_sonde_d_emergency_disarm_n_ecrit_rien_et_ne_prend_pas_un_autre_pour_
     );
 }
 
+/// Un canal qui existe, et dont la seule place est tenue par un premier
+/// client que personne n'accepte: le canal de la recette
+/// `un_canal_occupe_n_est_pas_dit_arrete` (`src/serveur.rs`), refait ici a
+/// l'identique parce qu'une recette d'integration ne voit pas le module des
+/// recettes du binaire. Windows: un pipe a une seule instance, prise par ce
+/// client. Linux: un socket d'ecoute dont la file d'attente a une longueur de
+/// zero, remplie par ce client.
+struct Occupe {
+    socket: String,
+    #[cfg(windows)]
+    _tenu: (
+        tokio::net::windows::named_pipe::NamedPipeServer,
+        tokio::net::windows::named_pipe::NamedPipeClient,
+    ),
+    #[cfg(unix)]
+    _tenu: (tokio::net::UnixListener, std::os::unix::net::UnixStream),
+    #[cfg(unix)]
+    dossier: PathBuf,
+}
+
+impl Occupe {
+    #[cfg(windows)]
+    fn demarrer(nom: &str) -> Self {
+        use tokio::net::windows::named_pipe::{ClientOptions, ServerOptions};
+        let socket = format!(r"\\.\pipe\{}", etiquette_unique(nom));
+        let serveur = ServerOptions::new()
+            .first_pipe_instance(true)
+            .reject_remote_clients(true)
+            .create(&socket)
+            .expect("pipe de recette");
+        let premier = ClientOptions::new().open(&socket).expect("premier client");
+        Self {
+            socket,
+            _tenu: (serveur, premier),
+        }
+    }
+
+    #[cfg(unix)]
+    fn demarrer(nom: &str) -> Self {
+        let dossier = std::env::temp_dir().join(etiquette_unique(nom));
+        std::fs::create_dir_all(&dossier).expect("repertoire de la recette");
+        let chemin = dossier.join("d.sock");
+        let prise = tokio::net::UnixSocket::new_stream().expect("socket de recette");
+        prise.bind(&chemin).expect("bind");
+        let ecoute = prise.listen(0).expect("listen");
+        let premier = std::os::unix::net::UnixStream::connect(&chemin).expect("premier client");
+        Self {
+            socket: chemin.to_string_lossy().into_owned(),
+            _tenu: (ecoute, premier),
+            dossier,
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for Occupe {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dossier);
+    }
+}
+
+/// `emergency-disarm` face a un canal occupe: il le dit, et desarme quand
+/// meme. Un daemon fige tient son canal sans prendre de connexion de plus,
+/// et c'est le cas que la commande de secours sert: un refus d'agir la
+/// rendrait inutile la ou elle est attendue. La table pure
+/// (`avertissement_d_urgence`) ne juge que le texte; ici, par le binaire
+/// construit, l'avertissement de ce cas et lui seul est sur stderr, et le
+/// desarmement a ete TENTE: le leurre de la recette precedente a ete lance,
+/// et le client sort avec son code. Les codes, lus dans
+/// `desarmer_en_urgence`: 0 filtres retires, 2 refus d'agir (faute du drapeau
+/// redondant), sinon le code du binaire privilegie; une erreur (binaire
+/// introuvable, tue par un signal) sort en 1 par `main`.
+#[tokio::test(flavor = "multi_thread")]
+async fn emergency_disarm_avertit_d_un_canal_occupe_et_desarme_quand_meme() {
+    let atelier = Atelier::nouveau("urgence-occupe");
+    let suffixe = std::env::consts::EXE_SUFFIX;
+    let copie = atelier.0.join(format!("bifrost-cli{suffixe}"));
+    std::fs::copy(cli(), &copie).expect("copie du client");
+    let leurre = atelier.0.join(format!("bifrost-daemon{suffixe}"));
+    std::fs::copy(std::env::current_exe().expect("ce binaire"), &leurre).expect("leurre");
+
+    // Le code du leurre, mesure: il doit differer du refus d'agir, sans quoi
+    // le code de sortie du client ne departagerait rien.
+    let leurre_seul = std::process::Command::new(&leurre)
+        .arg("--cleanup-firewall")
+        .output()
+        .expect("le leurre doit s'executer");
+    let code_du_leurre = leurre_seul.status.code();
+    assert!(
+        code_du_leurre.is_some_and(|c| c != 0 && c != 2),
+        "le leurre doit sortir en erreur, sur un autre code que le refus d'agir: {code_du_leurre:?}"
+    );
+
+    let canal = Occupe::demarrer("urgence-occupe");
+    let arguments = vec![
+        "emergency-disarm".to_owned(),
+        "--je-sais-ce-que-je-fais".to_owned(),
+    ];
+    let s = lancer(&copie, &canal.socket, &arguments).await;
+    println!(
+        "mesure canal occupe: emergency-disarm code {:?} (leurre seul: {code_du_leurre:?}), \
+         stderr {:?}",
+        s.code, s.erreur
+    );
+
+    assert!(
+        s.erreur.contains("sans prendre de connexion de plus"),
+        "aucun avertissement pour un canal occupe: {}",
+        s.erreur
+    );
+    for autre in [
+        "repond encore",
+        "n'a pas l'identite attendue",
+        "ce compte ne peut pas ouvrir",
+        "REFUS",
+    ] {
+        assert!(!s.erreur.contains(autre), "{autre}: {}", s.erreur);
+    }
+    assert_ne!(
+        s.code,
+        Some(2),
+        "emergency-disarm a refuse d'agir sur un canal occupe: {}",
+        s.erreur
+    );
+    let code = code_du_leurre.expect("code du leurre");
+    assert!(
+        s.code == Some(code) && s.erreur.contains(&format!("a echoue (code {code})")),
+        "le desarmement n'a pas ete tente (code {:?}, attendu {code}): {}",
+        s.code,
+        s.erreur
+    );
+}
+
 /// Un canal qui existe, et que le systeme refuse d'ouvrir a ce compte.
 /// Linux: un socket d'ecoute de la recette dont le fichier n'a plus aucun
 /// droit (mode 0): `connect(2)` rend `EACCES` a tout compte sauf root.

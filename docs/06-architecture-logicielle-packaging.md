@@ -555,7 +555,7 @@ Jalons avec critere de validation objectif:
 |---|---|---|
 | J1 Prototype daemon | daemon Rust + IPC + machine a etats | connexion WireGuard etablie, kill switch actif, CLI pilote le daemon |
 | J2 Securite IPC | ACL named pipe, SO_PEERCRED, polkit | un process non privilegie ne peut pas piloter le daemon (test d'intrusion) |
-| GUI (jalon propre, apres J2) | GUI Tauri v2 non privilegiee | GUI Tauri non privilegiee pilote le daemon. Ce qui s'elargit, sous Windows seulement: l'etat, `connect-stored` (le profil enregistre par un administrateur) et `disconnect` s'ouvrent aux membres du groupe d'acces du canal, qu'un administrateur peuple; toute autre commande reste aux administrateurs. Prealable: le test d'intrusion J2 passe |
+| GUI (jalon propre, apres J2) | GUI Tauri v2 non privilegiee | GUI Tauri non privilegiee pilote le daemon. Ce qui s'ouvre aux comptes non administrateurs, sur les deux plateformes: l'etat, `connect-stored` (le profil enregistre par un administrateur) et `disconnect`, aux membres du groupe que le canal admet (sous Windows le groupe d'acces local qu'un administrateur peuple, sous Linux le groupe `bifrost`); toute autre commande reste aux administrateurs (sous Windows SYSTEM ou un jeton aux Administrateurs actifs, sous Linux un appelant admis par son uid). Prealable: le test d'intrusion J2 passe |
 | J3 Packaging | MSI signe + .deb/.rpm + depot | installation/desinstallation propre, filtres WFP retires, service demarre |
 | J4 Update | canal TUF + signature | un artefact non signe ou rollback est rejete par le client |
 | J5 Reproductibilite | build reproductible + SBOM + provenance | deux builds independants -> digests identiques; SBOM genere en CI |

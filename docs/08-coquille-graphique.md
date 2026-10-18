@@ -117,7 +117,18 @@ groupe local, le groupe d'acces que le daemon recoit par `--group <nom>`.
   exemple un client ouvert en `SECURITY_ANONYMOUS`, a les trois commandes
   et elles seules. Toute autre commande recoit un refus qui la nomme
   (`commande <nom> refusee: reservee aux administrateurs`, suivi de ce que
-  le compte peut demander) et n'atteint jamais le daemon. Sous Linux, la
+  le compte peut demander) et n'atteint jamais le daemon. Mesure le
+  17/10/2026 sur une machine virtuelle Windows Server 2025 jetable (build
+  26100), UAC active: un administrateur non eleve, membre du groupe
+  d'acces (un compte de recette cree dans une surcouche jetable), lance
+  avec son jeton filtre, lit son jeton lie (Administrateurs actifs, niveau
+  identification). Porte par un fil, ce jeton lie ne permet ni d'ouvrir le
+  pipe (`CreateFileW` rend 1346, `ERROR_BAD_IMPERSONATION_LEVEL`) ni d'y
+  ecrire (`WriteFile` rend 1346), en suivi statique comme dynamique du
+  contexte, avec ou sans `SECURITY_EFFECTIVE_ONLY`. Chaque requete atteint
+  donc le daemon sous le jeton filtre: niveau restreint, `check` refuse.
+  Non mesure: Windows 10 et 11, le service reel, les entrees et sorties
+  asynchrones, un bureau interactif. Sous Linux, la
   regle est la meme pour un membre du groupe `bifrost` (gid primaire ou
   groupe supplementaire), identifie a l'acceptation par `SO_PEERCRED`, une
   fois par connexion; son refus dit `reservee a root`, et root garde tout
