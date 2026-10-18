@@ -32,19 +32,24 @@
 //! et les audits du depot (`audits.toml`), et tous ceux de `gui/`, la
 //! coquille: sources Rust, page (HTML, JavaScript, CSS), configuration de
 //! Tauri, capacites, verrou, politiques d'avis et sa propre `supply-chain/`
-//! (cargo vet, verrou separe). De `gui/`, la recette ne
+//! (cargo vet, verrou separe), et ceux de `fuzz/supply-chain/`, la
+//! `supply-chain/` de cargo vet propre au harnais de fuzzing (verrou separe
+//! lui aussi). De `gui/`, la recette ne
 //! descend ni `gui/target/` ni `gui/gen/`: la construction les engendre et
-//! git les ignore. Les documents `.md` ne sont PAS gardes ici: c'est une
+//! git les ignore. Du harnais, elle ne lit que `fuzz/supply-chain/`: ses
+//! graines (`fuzz/graines/`) sont des octets arbitraires par construction.
+//! Les documents `.md` ne sont PAS gardes ici: c'est une
 //! decision de la tranche qui a ecrit cette recette, `docs/` portant du
 //! non-ASCII anterieur qu'une autre passe traitera.
 //!
 //! Chaque racine est ramassee dans son propre lot, et la meme regle s'applique
-//! a chaque octet des cinq. Un lot doit avoir ete lu pour que la recette
+//! a chaque octet des six. Un lot doit avoir ete lu pour que la recette
 //! passe: une racine absente ou vide la fait rougir au lieu de la laisser
-//! verte sans rien avoir regarde. Pour `supply-chain/` et pour `gui/`, ce
-//! controle est nominatif: les trois fichiers de cargo vet de la racine, et
-//! chaque fichier source de la coquille (ses trois fichiers de cargo vet dans
-//! `gui/supply-chain/` compris), doivent etre dans leur lot.
+//! verte sans rien avoir regarde. Pour `supply-chain/`, `gui/` et
+//! `fuzz/supply-chain/`, ce controle est nominatif: les trois fichiers de
+//! cargo vet de la racine, chaque fichier source de la coquille (ses trois
+//! fichiers de cargo vet dans `gui/supply-chain/` compris) et les trois
+//! fichiers de cargo vet du harnais doivent etre dans leur lot.
 //!
 //! Le parcours se fait sur le disque, sans git: sur essai-linux le depot est
 //! copie par `tar` et n'a pas de `.git`. Une recette qui appellerait
@@ -218,9 +223,41 @@ const FICHIERS_DE_LA_COQUILLE: [&str; 15] = [
     "gui/ui/style.css",
 ];
 
-/// Les cinq racines du perimetre, chacune dans son propre lot pour que le
-/// controle positif verifie qu'AUCUNE des cinq n'est restee vide.
-fn collecter() -> (Lot, Lot, Lot, Lot, Lot) {
+/// Les fichiers que cargo vet tient dans `fuzz/supply-chain/`, la
+/// `supply-chain/` propre au harnais de fuzzing (verrou separe), chemin
+/// relatif a la racine: meme controle nominatif que `FICHIERS_DE_CARGO_VET`.
+const FICHIERS_DE_CARGO_VET_DU_HARNAIS: [&str; 3] = [
+    "fuzz/supply-chain/audits.toml",
+    "fuzz/supply-chain/config.toml",
+    "fuzz/supply-chain/imports.lock",
+];
+
+/// Les lots du perimetre, un par racine.
+struct Lots {
+    rust: Lot,
+    scripts: Lot,
+    packaging: Lot,
+    approvisionnement: Lot,
+    coquille: Lot,
+    harnais: Lot,
+}
+
+impl Lots {
+    /// Tous les fichiers des six lots, a la suite.
+    fn tous(&self) -> impl Iterator<Item = &(String, Vec<u8>)> {
+        self.rust
+            .iter()
+            .chain(&self.scripts)
+            .chain(&self.packaging)
+            .chain(&self.approvisionnement)
+            .chain(&self.coquille)
+            .chain(&self.harnais)
+    }
+}
+
+/// Les six racines du perimetre, chacune dans son propre lot pour que le
+/// controle positif verifie qu'AUCUNE des six n'est restee vide.
+fn collecter() -> Lots {
     let mut rust = Vec::new();
     ramasser(&racine().join("crates"), Some("rs"), &mut rust);
     let mut scripts = Vec::new();
@@ -231,7 +268,20 @@ fn collecter() -> (Lot, Lot, Lot, Lot, Lot) {
     ramasser(&racine().join("supply-chain"), None, &mut approvisionnement);
     let mut coquille = Vec::new();
     ramasser(&racine().join("gui"), None, &mut coquille);
-    (rust, scripts, packaging, approvisionnement, coquille)
+    let mut harnais = Vec::new();
+    ramasser(
+        &racine().join("fuzz").join("supply-chain"),
+        None,
+        &mut harnais,
+    );
+    Lots {
+        rust,
+        scripts,
+        packaging,
+        approvisionnement,
+        coquille,
+        harnais,
+    }
 }
 
 /// Un ecart, forme lisible: `chemin:ligne:colonne: U+XXXX`.
@@ -262,11 +312,19 @@ fn ecarts_de(rel: &str, bytes: &[u8]) -> Vec<String> {
 
 #[test]
 fn aucun_octet_non_ascii_hors_admis_et_exceptions() {
-    let (rust, scripts, packaging, approvisionnement, coquille) = collecter();
+    let lots = collecter();
+    let Lots {
+        rust,
+        scripts,
+        packaging,
+        approvisionnement,
+        coquille,
+        harnais,
+    } = &lots;
 
     // Controle positif par racine: un parcours casse - mauvaise racine, lecture
     // qui echoue en silence - rendrait un lot vide, donc un succes, sans avoir
-    // rien lu. Les cinq racines doivent chacune avoir ete descendues.
+    // rien lu. Les six racines doivent chacune avoir ete descendues.
     assert!(
         rust.len() > 100,
         "seules {} source(s) Rust trouvees: le parcours de crates/ est casse",
@@ -303,7 +361,7 @@ fn aucun_octet_non_ascii_hors_admis_et_exceptions() {
             coquille.len()
         );
     }
-    for (rel, _) in &coquille {
+    for (rel, _) in coquille {
         assert!(
             !DOSSIERS_ENGENDRES
                 .iter()
@@ -311,15 +369,19 @@ fn aucun_octet_non_ascii_hors_admis_et_exceptions() {
             "{rel}: fichier engendre par la construction dans le lot de gui/"
         );
     }
+    // Nominatif pour `fuzz/supply-chain/` aussi: la `supply-chain/` du
+    // harnais de fuzzing, que l'etape de cargo vet lancee depuis `fuzz/` lit.
+    for attendu in FICHIERS_DE_CARGO_VET_DU_HARNAIS {
+        assert!(
+            harnais.iter().any(|(rel, _)| rel == attendu),
+            "{attendu} absent du lot de fuzz/supply-chain/ ({} fichier(s) trouves): \
+             le repertoire ou ce fichier manque, ou le parcours est casse",
+            harnais.len()
+        );
+    }
 
     let mut ecarts = Vec::new();
-    for (rel, bytes) in rust
-        .iter()
-        .chain(&scripts)
-        .chain(&packaging)
-        .chain(&approvisionnement)
-        .chain(&coquille)
-    {
+    for (rel, bytes) in lots.tous() {
         ecarts.extend(ecarts_de(rel, bytes));
     }
 
@@ -337,14 +399,8 @@ fn chaque_exception_designe_encore_du_non_ascii_reel() {
     // Une derogation qui ne sert plus elargit la regle en silence. Chaque
     // exception doit encore designer un fichier scanne, dont le litteral admis
     // est present ET porte vraiment du non-ASCII.
-    let (rust, scripts, packaging, approvisionnement, coquille) = collecter();
-    let tous: Lot = rust
-        .into_iter()
-        .chain(scripts)
-        .chain(packaging)
-        .chain(approvisionnement)
-        .chain(coquille)
-        .collect();
+    let lots = collecter();
+    let tous: Vec<&(String, Vec<u8>)> = lots.tous().collect();
 
     for ex in EXCEPTIONS {
         let Some((_, bytes)) = tous.iter().find(|(rel, _)| rel == ex.fichier) else {

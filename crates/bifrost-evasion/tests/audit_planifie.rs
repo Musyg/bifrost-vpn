@@ -61,21 +61,24 @@
 //! 3. Le job `dependances` porte ses juges, et ils tournent sur `schedule`:
 //!    `cargo audit` a la racine et dans `gui/` (`working-directory: gui`),
 //!    `cargo deny check` a la racine, dans `fuzz/` (`working-directory:
-//!    fuzz`) et dans `gui/`, `cargo vet` a la racine et dans `gui/`, chacun
-//!    suivi du `git diff` de `supply-chain/`. Chacun a la lettre
-//!    (`cargo audit -D warnings`, `cargo deny check`, `cargo vet --locked`,
-//!    `git diff --exit-code -- supply-chain/`) et a sa place: `cargo audit`
-//!    a la racine et dans `gui/`, `cargo deny check` a la racine, dans
-//!    `fuzz/` et dans `gui/`, `cargo vet` a la racine et dans `gui/`
-//!    (`working-directory` lu sous forme canonique: `./fuzz`, `fuzz/` et
-//!    `./fuzz/` valent `fuzz`, `./` la racine). `gui/` est la coquille, espace
-//!    de travail separe avec son propre verrou et sa propre `supply-chain/`:
-//!    sans ses trois juges, un avis ou une dependance non couverte contre la
-//!    pile de la WebView ne rougirait aucun run planifie. `cargo vet --locked`
-//!    et le `git diff` sont seuls dans leur etape, et dans cet ordre, a la
-//!    racine comme dans `gui/`: vet reecrit `supply-chain/` a sa forme
-//!    canonique, le diff fait echouer l'etape des qu'un octet change; place
-//!    avant vet, il ne verrait pas la reecriture.
+//!    fuzz`) et dans `gui/`, `cargo vet` a la racine, dans `gui/` et dans
+//!    `fuzz/`, chacun suivi du `git diff` de `supply-chain/`. Chacun a la
+//!    lettre (`cargo audit -D warnings`, `cargo deny check`,
+//!    `cargo vet --locked`, `git diff --exit-code -- supply-chain/`) et a sa
+//!    place: `cargo audit` a la racine et dans `gui/`, `cargo deny check` a
+//!    la racine, dans `fuzz/` et dans `gui/`, `cargo vet` a la racine, dans
+//!    `gui/` et dans `fuzz/` (`working-directory` lu sous forme canonique:
+//!    `./fuzz`, `fuzz/` et `./fuzz/` valent `fuzz`, `./` la racine). `gui/`
+//!    est la coquille, espace de travail separe avec son propre verrou et sa
+//!    propre `supply-chain/`: sans ses trois juges, un avis ou une dependance
+//!    non couverte contre la pile de la WebView ne rougirait aucun run
+//!    planifie. `fuzz/`, le harnais de fuzzing, a de meme son verrou et sa
+//!    `supply-chain/`: sans son `cargo vet`, une dependance non couverte du
+//!    harnais ne rougirait aucun run. `cargo vet --locked` et le `git diff`
+//!    sont seuls dans leur etape, et dans cet ordre, a la racine, dans `gui/`
+//!    et dans `fuzz/`: vet reecrit `supply-chain/` a sa forme canonique, le
+//!    diff fait echouer l'etape des qu'un octet change; place avant vet, il
+//!    ne verrait pas la reecriture.
 //!    Un argument de plus (`--ignore`, `--file`, `--manifest-path`, une liste
 //!    de controles) changerait ce qui est juge; une graphie equivalente
 //!    (`--deny warnings` pour `-D warnings`) rougit aussi, choix assume.
@@ -303,6 +306,10 @@ const ENV_A_69D846F: [(&str, &str); 1] = [("CARGO_TERM_COLOR", "always")];
 
 const CONFIG_DENY: &str = "deny.toml";
 const CONFIG_DENY_FUZZ: &str = "fuzz/deny.toml";
+
+/// Le repertoire ou tournent les juges du harnais de fuzzing, sous forme
+/// canonique: `cargo deny check`, et `cargo vet` suivi de son `git diff`.
+const REPERTOIRE_FUZZ: &str = "fuzz";
 
 /// Les lignes actives (ni vides, ni commentaires) de `[advisories]` dans
 /// `deny.toml` et dans `fuzz/deny.toml` a `69d846f`: les memes dans les deux,
@@ -2292,7 +2299,9 @@ fn juger(texte: &str, configs: &Configs) -> Result<Rapport, String> {
         }
         let (mut audit, mut deny_racine, mut deny_fuzz, mut vet) = (false, false, false, false);
         let (mut audit_gui, mut deny_gui, mut vet_gui) = (false, false, false);
+        let mut vet_fuzz = false;
         let (mut vet_puis_diff, mut vet_gui_puis_diff) = (false, false);
+        let mut vet_fuzz_puis_diff = false;
         for e in &job.etapes {
             let Some(corps) = &e.run else { continue };
             let si = e.si.as_deref().unwrap_or("success()");
@@ -2301,6 +2310,7 @@ fn juger(texte: &str, configs: &Configs) -> Result<Rapport, String> {
             let repertoire = e.repertoire.as_deref().unwrap_or(".");
             let racine = repertoire == ".";
             let gui = repertoire == REPERTOIRE_GUI;
+            let fuzz = repertoire == REPERTOIRE_FUZZ;
             let mut juges = Vec::new();
             let mut etrangeres = Vec::new();
             // L'ordre des commandes de l'etape, et la place de `cargo vet` et
@@ -2319,7 +2329,9 @@ fn juger(texte: &str, configs: &Configs) -> Result<Rapport, String> {
                             e.nom, e.ligne
                         ));
                     }
-                    juges.push((texte, racine || gui));
+                    // Le `git diff` suit `cargo vet`, a la racine, dans `gui/`
+                    // et dans `fuzz/`.
+                    juges.push((texte, racine || gui || fuzz));
                     continue;
                 }
                 let Some((sous, autres)) = commande_cargo(&mots) else {
@@ -2328,7 +2340,7 @@ fn juger(texte: &str, configs: &Configs) -> Result<Rapport, String> {
                 };
                 // Ou chaque juge a sa place: `cargo audit` a la racine et dans
                 // `gui/`, `cargo deny check` a la racine, dans `fuzz/` et dans
-                // `gui/`, `cargo vet` a la racine et dans `gui/`.
+                // `gui/`, `cargo vet` a la racine, dans `gui/` et dans `fuzz/`.
                 let juge = match sous {
                     "audit" => {
                         audit |= tourne && racine;
@@ -2337,15 +2349,16 @@ fn juger(texte: &str, configs: &Configs) -> Result<Rapport, String> {
                     }
                     "deny" if autres.contains(&"check") => {
                         deny_racine |= tourne && racine;
-                        deny_fuzz |= tourne && repertoire == "fuzz";
+                        deny_fuzz |= tourne && fuzz;
                         deny_gui |= tourne && gui;
-                        Some(racine || repertoire == "fuzz" || gui)
+                        Some(racine || fuzz || gui)
                     }
                     "vet" => {
                         vet |= tourne && racine;
                         vet_gui |= tourne && gui;
+                        vet_fuzz |= tourne && fuzz;
                         i_vet = i_vet.or(Some(ordre.len() - 1));
-                        Some(racine || gui)
+                        Some(racine || gui || fuzz)
                     }
                     _ => None,
                 };
@@ -2400,6 +2413,7 @@ fn juger(texte: &str, configs: &Configs) -> Result<Rapport, String> {
                 }
                 vet_puis_diff |= tourne && racine && ordre == PAIRE_VET;
                 vet_gui_puis_diff |= tourne && gui && ordre == PAIRE_VET;
+                vet_fuzz_puis_diff |= tourne && fuzz && ordre == PAIRE_VET;
             }
             for (j, a_sa_place) in &juges {
                 if !a_sa_place {
@@ -2489,6 +2503,15 @@ fn juger(texte: &str, configs: &Configs) -> Result<Rapport, String> {
                 vet_gui_puis_diff,
                 "`cargo vet --locked` puis `git diff --exit-code -- supply-chain/`, seuls et dans \
                  cet ordre dans une meme etape dans `gui/`,",
+            ),
+            (
+                vet_fuzz,
+                "`cargo vet` dans `fuzz/` (`working-directory: fuzz`)",
+            ),
+            (
+                vet_fuzz_puis_diff,
+                "`cargo vet --locked` puis `git diff --exit-code -- supply-chain/`, seuls et dans \
+                 cet ordre dans une meme etape dans `fuzz/`,",
             ),
         ] {
             if !present {
@@ -3106,6 +3129,11 @@ jobs:
         run: |
           cargo vet --locked
           git diff --exit-code -- supply-chain/
+      - name: Vet du harnais
+        working-directory: fuzz
+        run: |
+          cargo vet --locked
+          git diff --exit-code -- supply-chain/
       - name: SBOM
         if: github.event_name != 'schedule'
         run: cargo cyclonedx
@@ -3184,6 +3212,7 @@ fn le_temoin_est_lu_et_juge_sain() {
             "Licences de la coquille",
             "Vet",
             "Vet de la coquille",
+            "Vet du harnais",
             "SBOM"
         ]
     );
@@ -3192,6 +3221,11 @@ fn le_temoin_est_lu_et_juge_sain() {
     assert_eq!(dep.etapes[5].repertoire.as_deref(), Some("gui"));
     assert_eq!(
         dep.etapes[6].run.as_deref(),
+        Some("cargo vet --locked\ngit diff --exit-code -- supply-chain/\n")
+    );
+    assert_eq!(dep.etapes[8].repertoire.as_deref(), Some("fuzz"));
+    assert_eq!(
+        dep.etapes[8].run.as_deref(),
         Some("cargo vet --locked\ngit diff --exit-code -- supply-chain/\n")
     );
 
@@ -3615,6 +3649,67 @@ fn chaque_mutation_du_temoin_rougit() {
             "      - name: Vet de la coquille\n        working-directory: gui\n        run: |\n          cargo vet --locked\n",
             "      - name: Vet de la coquille\n        run: |\n          cargo vet --locked\n",
             "`cargo vet` dans `gui/` (`working-directory: gui`) ne tourne pas",
+        ),
+        // L'etape de cargo vet du harnais de fuzzing (`fuzz/`).
+        (
+            "vet du harnais retire",
+            "      - name: Vet du harnais\n        working-directory: fuzz\n        run: |\n          cargo vet --locked\n          git diff --exit-code -- supply-chain/\n",
+            "",
+            "`cargo vet` dans `fuzz/` (`working-directory: fuzz`) ne tourne pas",
+        ),
+        (
+            "vet du harnais sans son repertoire",
+            "      - name: Vet du harnais\n        working-directory: fuzz\n",
+            "      - name: Vet du harnais\n",
+            "`cargo vet` dans `fuzz/` (`working-directory: fuzz`) ne tourne pas",
+        ),
+        (
+            "vet du harnais dans gui",
+            "      - name: Vet du harnais\n        working-directory: fuzz\n",
+            "      - name: Vet du harnais\n        working-directory: gui\n",
+            "`cargo vet` dans `fuzz/` (`working-directory: fuzz`) ne tourne pas",
+        ),
+        (
+            "vet du harnais saute sur schedule",
+            "      - name: Vet du harnais\n",
+            "      - name: Vet du harnais\n        if: github.event_name != 'schedule'\n",
+            "`cargo vet` y est saute sur `schedule`",
+        ),
+        (
+            "vet du harnais saute sur schedule, ce que le rapport nomme",
+            "      - name: Vet du harnais\n",
+            "      - name: Vet du harnais\n        if: github.event_name != 'schedule'\n",
+            "`cargo vet` dans `fuzz/` (`working-directory: fuzz`) ne tourne pas",
+        ),
+        (
+            "git diff du harnais retire",
+            "        working-directory: fuzz\n        run: |\n          cargo vet --locked\n          git diff --exit-code -- supply-chain/\n",
+            "        working-directory: fuzz\n        run: |\n          cargo vet --locked\n",
+            "seuls et dans cet ordre dans une meme etape dans `fuzz/`, ne tourne pas",
+        ),
+        (
+            "git diff du harnais avant cargo vet",
+            "        working-directory: fuzz\n        run: |\n          cargo vet --locked\n          git diff --exit-code -- supply-chain/\n",
+            "        working-directory: fuzz\n        run: |\n          git diff --exit-code -- supply-chain/\n          cargo vet --locked\n",
+            "seuls et dans cet ordre dans une meme etape dans `fuzz/`, ne tourne pas",
+        ),
+        (
+            "vet du harnais a l'echec ignore",
+            "      - name: Vet du harnais\n",
+            "      - name: Vet du harnais\n        continue-on-error: true\n",
+            "`continue-on-error: true`: un echec du juge",
+        ),
+        (
+            "vet du harnais || true",
+            "        working-directory: fuzz\n        run: |\n          cargo vet --locked\n",
+            "        working-directory: fuzz\n        run: |\n          cargo vet --locked || true\n",
+            "operateur shell",
+        ),
+        (
+            "vet du harnais sans --locked",
+            "        working-directory: fuzz\n        run: |\n          cargo vet --locked\n",
+            "        working-directory: fuzz\n        run: |\n          cargo vet\n",
+            "`cargo vet`: forme que la recette ne connait pas",
         ),
         // Les jobs de la coquille, et tout job nouveau, sur `schedule`.
         (

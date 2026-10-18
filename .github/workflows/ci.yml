@@ -844,7 +844,8 @@ jobs:
       # Ce que cette etape ne garantit pas: une exemption n'est pas un audit.
       # L'etape dit seulement qu'aucune dependance n'entre ni ne change de
       # version sans un commit de `supply-chain/`, pas qu'une dependance a ete
-      # lue. Le harnais `fuzz/` n'est pas couvert. Voir le document 07,
+      # lue. La coquille (`gui/`) et le harnais `fuzz/`, espaces de travail
+      # separes, ont chacun leur etape plus bas. Voir le document 07,
       # section 2.2.
       - name: Audits de la chaine d'approvisionnement (cargo vet)
         run: |
@@ -862,6 +863,23 @@ jobs:
       # `audit_planifie.rs`.
       - name: Audits de la chaine d'approvisionnement de la coquille (cargo vet)
         working-directory: gui
+        run: |
+          cargo vet --locked
+          git diff --exit-code -- supply-chain/
+
+      # Le harnais de fuzzing (`fuzz/`) a lui aussi son propre verrou et sa
+      # propre `supply-chain/`, que les deux etapes precedentes ne lisent pas.
+      # Meme forme, DEPUIS `fuzz/`: chaque dependance tierce de son verrou est
+      # couverte par une exemption a version exacte (aucun audit importe;
+      # `fuzz/supply-chain/audits.toml` est vide,
+      # `fuzz/supply-chain/imports.lock` reduit a son en-tete), et les paquets
+      # du depot qu'il tire par chemin sont declares de premiere partie
+      # (`audit-as-crates-io = false`). `git diff` ensuite: un octet reecrit
+      # par vet dans `fuzz/supply-chain/` fait echouer l'etape. Les trois
+      # fichiers sont aussi sous la garde ASCII du depot (`sources_ascii.rs`),
+      # et la forme de cette etape est figee par `audit_planifie.rs`.
+      - name: Audits de la chaine d'approvisionnement du harnais de fuzzing (cargo vet)
+        working-directory: fuzz
         run: |
           cargo vet --locked
           git diff --exit-code -- supply-chain/

@@ -115,7 +115,7 @@ les index d'Ubuntu ne gardent que la version de sortie et la derniere mise a jou
 push, une PR ou un lancement manuel, ne les a vus qu'au run suivant. `ci.yml` porte depuis un
 declencheur `schedule` quotidien (04:37 UTC, hors du debut d'heure, ou GitHub annonce des retards
 et des jobs abandonnes) qui ne lance que le job `dependances`: `cargo audit` a la racine et dans
-`gui/`, `cargo deny check` a la racine, dans `fuzz/` et dans `gui/`, et `cargo vet` a la racine et dans `gui/`; les etapes
+`gui/`, `cargo deny check` a la racine, dans `fuzz/` et dans `gui/`, et `cargo vet` a la racine, dans `gui/` et dans `fuzz/`; les etapes
 du SBOM y sont sautees. La base d'avis est
 telechargee a chaque run: runner neuf, aucun cache, et un telechargement qui echoue fait echouer
 l'etape au lieu de laisser juger une base ancienne. La recette
@@ -128,7 +128,7 @@ suivante, indicateur de bloc autre que `run: |`, ancre, alias... Une forme legit
 workflow n'emploie pas encore rougit aussi: l'employer demande d'etendre la grammaire, ses
 recettes et sa mesure dans le meme commit. Elle exige ensuite le declencheur, ce routage (evalue
 pour chaque evenement, `needs:` compris), les juges du job a la lettre et a leur place sur
-`schedule` (`cargo vet --locked` puis le `git diff` de `supply-chain/`, seuls et dans cet ordre, a la racine comme dans `gui/`),
+`schedule` (`cargo vet --locked` puis le `git diff` de `supply-chain/`, seuls et dans cet ordre, a la racine, dans `gui/` et dans `fuzz/`),
 l'absence de tout drapeau qui fige la base (`--no-fetch`, `--stale`, `--offline`, `--frozen`), un
 echec de juge qui fait echouer le run (ni `continue-on-error`, ni operateur ou commande
 etrangere dans son etape, ni `shell:`, ni `defaults:`), un job `dependances` qui ne porte que
@@ -164,7 +164,7 @@ donc toutes exemptees, chacune a sa version exacte (270 au critere `safe-to-depl
 dependances normales et de construction de chaque paquet du depot, `safe-to-run` pour celles qui ne
 servent qu'aux recettes. Les deux paquets du depot qui ne sont pas livres, le temoin de diagnostic
 `bifrost-temoin-svchost` et la logique de la coquille graphique `bifrost-coquille`, ne tirent rien
-que le daemon ne tire deja. Les douze paquets du depot sont
+que le daemon ne tire deja. Les treize paquets du depot sont
 declares de premiere partie (`audit-as-crates-io = false`): aucun n'existe sur crates.io, et la
 declaration empeche vet de les confondre un jour avec un paquet homonyme du registre.
 
@@ -189,8 +189,8 @@ Ce que cela ne dit pas:
   accepter telles quelles, prise a la mise en place puis a chaque changement de version (rustls
   0.23.46 le 14/10/2026, pour quatre avis RustSec); l'etape dit seulement qu'aucune n'entre ni ne
   change de version sans un commit de `supply-chain/`;
-- le harnais `fuzz/`, espace de travail separe, n'est pas couvert: 266 dependances tierces dans son
-  verrou, dont 2 absentes du verrou racine (`arbitrary`, `libfuzzer-sys`).
+- la coquille `gui/` et le harnais `fuzz/`, espaces de travail separes, ont chacun leur propre
+  `supply-chain/` et leur propre etape: voir les deux paragraphes qui suivent.
 
 **cargo vet sur la coquille** (17/10/2026). `gui/` a son propre verrou, que l'etape racine ne lit
 pas; `cargo vet init` lance depuis `gui/` lui donne sa `supply-chain/`, de la meme forme que la
@@ -210,6 +210,40 @@ fichier hors de la forme canonique. `audit_planifie.rs` exige cette etape a sa p
 dit pas: une exemption n'est pas un audit; les 422 dependances ne sont couvertes que par la decision
 de les accepter telles quelles, prise a la montee de Tauri a 2.12.4 qui a fixe ce verrou, puis a
 chaque changement de version a venir.
+
+**cargo vet sur le harnais de fuzzing** (18/10/2026). `fuzz/` a son propre verrou, que les etapes
+de la racine et de la coquille ne lisent pas; `cargo vet init` lance depuis `fuzz/` lui donne sa
+`supply-chain/`, de la meme forme: aucun ensemble d'audits publies importe, donc aucune section
+`[imports]`, un `imports.lock` reduit a son en-tete et un `audits.toml` VIDE. Les 266 dependances
+tierces du verrou du harnais, toutes plateformes et fonctionnalites confondues, sont exemptees
+chacune a sa version exacte, toutes au critere `safe-to-deploy`, celui que vet exige par defaut
+(264 partagees avec la racine a la meme version et au meme critere, 2 propres au harnais:
+`arbitrary` et `libfuzzer-sys`); les onze paquets de premiere partie de son graphe (`bifrost-fuzz`
+et les dix paquets du depot qu'il tire par chemin, directement ou non) sont declares
+`audit-as-crates-io = false`, aucun n'existant sur crates.io. La CI le verifie dans le job
+`dependances`, depuis `fuzz/`: `cargo vet --locked`, puis `git diff --exit-code` sur
+`supply-chain/`, apres l'etape de la coquille et de la meme forme, run planifie compris; elle
+echoue sur une dependance nouvelle, une autre version d'une dependance exemptee, une exemption
+retiree, un `imports.lock` absent ou vide et un fichier hors de la forme canonique.
+`audit_planifie.rs` exige cette etape a sa place, dans cet ordre et sur le run planifie, et
+`sources_ascii.rs` lit les trois fichiers de `fuzz/supply-chain/` sous la garde ASCII. Ce que cela
+ne dit pas: une exemption n'est pas un audit; le harnais n'est jamais livre, et `safe-to-deploy` y
+est le critere par defaut de vet, pas un besoin du harnais.
+
+**Reduire les exemptions** (18/10/2026). Examine dans une copie jetable, rien n'est change dans le
+depot. `cargo vet prune` et `cargo vet regenerate exemptions` n'en retirent aucune dans les trois
+magasins: ils sont deja minimaux. Les autres mecanismes de cargo-vet en retireraient, mais chacun
+recopierait dans le depot ce que le choix ci-dessus exclut, ou deplacerait la decision: un import
+d'audits publies recopie le nom et l'adresse de courriel de chaque auditeur dont un audit sert;
+`cargo vet trust` envers un compte de crates.io ecrit son identifiant d'utilisateur, et son nom en
+commentaire; envers l'editeur de confiance d'un depot GitHub d'organisation, il n'ecrit aucune
+donnee personnelle et en retirerait 23 a la racine, 16 dans la coquille et 16 dans le harnais,
+mais il accepte toute version que ce depot publiera jusqu'a la date de fin de l'entree (un an au
+plus): a une montee, `cargo vet --locked` rougit encore, puis un `cargo vet` sans `--locked`
+l'accepte seul, sans exemption decidee version par version. Pour le harnais, jamais livre, une
+politique `criteria = []` retirerait ses 266 exemptions, mais vet n'y verifierait plus rien.
+Aucun n'est applique: les exemptions restent a version exacte, par choix (18/10/2026), pour
+qu'aucune dependance n'entre ni ne change de version sans un commit de `supply-chain/`.
 
 **2.3 Fuzzing** - Priorite : parseur de profils > parseur IPC > metadonnees de mise a jour > deserialisation. Outils : cargo-fuzz (libFuzzer) + `arbitrary` en premier choix ; AFL++/honggfuzz en complement (tous trois supportes par OSS-Fuzz/ClusterFuzz).
 
