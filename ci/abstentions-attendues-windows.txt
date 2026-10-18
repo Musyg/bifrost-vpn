@@ -75,6 +75,18 @@ SKIPPED le_client_s_ouvre_par_les_droits_que_le_groupe_accorde: le compte des re
 SKIPPED le_compte_courant_passe_la_forme_et_le_domaine: le compte des recettes est un compte predefini de la machine, pas un compte cree par un administrateur: la recette miroir ne le mesure pas
 SKIPPED le_descripteur_ajoute_une_seule_ace_pour_le_groupe: le compte des recettes est un compte predefini de la machine, pas un compte cree par un administrateur: la recette miroir ne le mesure pas
 SKIPPED le_pipe_lie_porte_l_ace_du_groupe_et_rien_de_plus: le compte des recettes est un compte predefini de la machine, pas un compte cree par un administrateur: la recette miroir ne le mesure pas
+# La recette du refus d'un appelant identifie (bifrost-ipc, transport.rs)
+# provoque le refus d'une commande reservee par un client que le daemon lit au
+# niveau restreint: un enfant du processus des recettes, sous son jeton,
+# Administrateurs inactifs. Sur le runner (compte predefini eleve,
+# Administrateurs actifs) ce jeton vaut le niveau complet et rien ne lui est
+# refuse. AVEU: elle est mesuree sur dev-windows (releve du 2026-10-18). Ce
+# que le runner garde a la place: la recette du refus d'un appelant non
+# identifie (client anonyme, niveau restreint sous tout jeton), dont chaque
+# ligne de refus porte le champ peer avec le PID du client, et la garde de
+# source qui exige ce champ dans chaque ligne de refus du transport. Elle part
+# le jour ou le compte des recettes du runner ne sera plus eleve.
+SKIPPED le_refus_d_une_commande_reservee_nomme_le_client_par_son_sid_et_son_pid: les Administrateurs sont actifs dans le jeton des recettes: ce compte y est admis au niveau complet et le refus d'une commande reservee ne s'y provoque pas
 SKIPPED les_quatre_issues_de_la_sonde_tiennent_face_a_un_vrai_coeur: BIFROST_COEURS ne designe aucun repertoire: cette recette veut un vrai sing-box, que le depot ne distribue pas
 SKIPPED miroir_le_compte_du_groupe_echange_sans_pouvoir_ajouter_d_instance: le compte des recettes est un compte predefini de la machine, pas un compte cree par un administrateur: la recette miroir ne le mesure pas
 # La recette SYSTEM (bifrost-ipc, transport.rs) ne mesure que sous un jeton

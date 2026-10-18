@@ -773,6 +773,11 @@ mod imp {
         /// version Windows, qui identifie en plus l'appelant de chaque
         /// requete.
         ///
+        /// La ligne du journal d'un refus nomme l'appelant comme celle d'une
+        /// commande servie (`commande privilegiee`, `bifrost-daemon`): le champ
+        /// `peer`, rendu par [`Connection::peer`] (uid, gid et pid du
+        /// `SO_PEERCRED`).
+        ///
         /// # Pilote de temps requis
         ///
         /// Le delai est un minuteur tokio: `recv` doit tourner dans un runtime
@@ -790,6 +795,7 @@ mod imp {
                     Err(refus) => {
                         tracing::warn!(
                             command = refus.commande,
+                            peer = %self.peer(),
                             "commande reservee a root, refusee"
                         );
                         self.send(&Response::error(refus.to_string())).await?;
@@ -1211,6 +1217,78 @@ mod imp {
             le_groupe_seul_n_ouvre_que_les_trois_commandes("groupe-supplementaire", politique)
                 .await;
         }
+
+        /// (d) Le journal d'un refus nomme l'appelant. Admis SEULEMENT par son
+        /// gid primaire, comme en (b), la recette envoie chacune des sept
+        /// commandes reservees, chacune sur sa connexion. Le journal, capture
+        /// sur ce fil, porte pour chacune une ligne de refus et une seule, un
+        /// avertissement, qui nomme la commande et l'appelant par le champ
+        /// `peer` de la ligne `commande privilegiee`: `uid=<euid> gid=<egid>
+        /// pid=<pid>`, valeurs relevees par la recette elle-meme (`geteuid`,
+        /// `getegid`, son numero de processus: le client est ce processus).
+        /// Sous root, toujours admis par son uid, le refus ne se provoque pas,
+        /// et la recette le dit.
+        #[tokio::test]
+        async fn admis_par_son_seul_gid_primaire_le_refus_nomme_l_appelant_au_journal() {
+            if euid() == 0 {
+                println!(
+                    "SKIPPED admis_par_son_seul_gid_primaire_le_refus_nomme_l_appelant_au_journal: \
+                     lance en root, toujours admis par son uid: le refus ne se provoque pas"
+                );
+                return;
+            }
+            let (capture, _journal) = super::super::tests_acceptation::capturer();
+            let politique = AuthPolicy {
+                allowed_uids: vec![0],
+                allowed_gid: Some(egid()),
+            };
+            let mut refusees = Vec::new();
+            for (rang, (commande, admise)) in une_de_chaque().into_iter().enumerate() {
+                if admise {
+                    continue;
+                }
+                let nom = commande.name();
+                let echange = echanger("refus-journal", rang, politique.clone(), commande).await;
+                assert_eq!(echange.niveau, NiveauDAppelant::Restreint, "{nom}");
+                assert_eq!(
+                    echange.rendues,
+                    ["status"],
+                    "le transport a rendu au serveur la commande refusee {nom}"
+                );
+                refusees.push(nom);
+            }
+            let appelant = format!(
+                "peer=uid={} gid={} pid={} ",
+                euid(),
+                egid(),
+                std::process::id()
+            );
+            let journal = capture.0.lock().unwrap().clone();
+            let refus: Vec<&String> = journal
+                .iter()
+                .filter(|l| l.contains("commande reservee a root, refusee"))
+                .collect();
+            println!("RELEVE refus au journal: appelant attendu << {appelant}>>, lignes {refus:?}");
+            assert_eq!(refusees.len(), 7, "{refusees:?}");
+            assert_eq!(
+                refus.len(),
+                refusees.len(),
+                "une ligne par refus: {journal:?}"
+            );
+            for nom in &refusees {
+                let lignes: Vec<&&String> = refus
+                    .iter()
+                    .filter(|l| l.contains(&format!("command=\"{nom}\" ")))
+                    .collect();
+                assert_eq!(lignes.len(), 1, "{nom}: {refus:?}");
+                assert!(lignes[0].starts_with("WARN "), "{nom}: {}", lignes[0]);
+                assert!(
+                    lignes[0].contains(&appelant),
+                    "{nom}: la ligne du refus ne nomme pas l'appelant: {}",
+                    lignes[0]
+                );
+            }
+        }
     }
 }
 
@@ -1478,7 +1556,7 @@ mod imp {
             let suivante = self.instance_suivante().await?;
             let connectee = std::mem::replace(&mut self.next, suivante);
             let connexion = Connection::new(connectee, self.delai_requete);
-            tracing::debug!(client = %connexion.peer(), "client accepte");
+            tracing::debug!(peer = %connexion.peer(), "client accepte");
             Ok(connexion)
         }
 
@@ -1686,6 +1764,12 @@ mod imp {
         /// execute rien. L'identification et la decision n'attendent rien
         /// (aucun `await`): le fil qui emprunte l'identite du client la rend
         /// avant toute autre tache.
+        ///
+        /// Les lignes du journal d'une identification impossible et d'un
+        /// refus nomment l'appelant comme celle d'une commande servie
+        /// (`commande privilegiee`, `bifrost-daemon`): le champ `peer`, rendu
+        /// par [`Connection::peer`] ([`ClientDuPipe`]), ecrit apres que le
+        /// compte de cette requete a ete pose.
         pub async fn recv(&mut self) -> Result<Request> {
             loop {
                 let bytes = read_request_frame(&mut self.reader, self.delai).await?;
@@ -1700,6 +1784,7 @@ mod imp {
                     tracing::warn!(
                         etape = etape.nom(),
                         code,
+                        peer = %self.peer(),
                         "appelant non identifie: niveau restreint"
                     );
                 }
@@ -1708,6 +1793,7 @@ mod imp {
                     Err(refus) => {
                         tracing::warn!(
                             command = refus.commande,
+                            peer = %self.peer(),
                             "commande reservee aux administrateurs, refusee"
                         );
                         self.send(&Response::error(refus.to_string())).await?;
@@ -3895,6 +3981,375 @@ mod imp {
             }
         }
 
+        /// Le nom de la recette du refus d'un appelant identifie, tel que son
+        /// abstention l'imprime et que `ci/abstentions-attendues-windows.txt`
+        /// le porte.
+        const RECETTE_REFUS_IDENTIFIE: &str =
+            "le_refus_d_une_commande_reservee_nomme_le_client_par_son_sid_et_son_pid";
+
+        /// Le nom de la recette du refus d'un appelant non identifie.
+        const RECETTE_REFUS_ANONYME: &str =
+            "le_refus_d_un_appelant_non_identifie_nomme_son_processus";
+
+        /// La raison de l'abstention de la premiere, sans chiffre ni chemin.
+        const RAISON_REFUS_ADMINISTRATEURS_ACTIFS: &str = "les Administrateurs sont actifs \
+            dans le jeton des recettes: ce compte y est admis au niveau complet et le refus \
+            d'une commande reservee ne s'y provoque pas";
+
+        /// Present dans l'environnement de l'enfant des deux recettes du
+        /// refus, et la seulement: le niveau d'imitation qu'il demande
+        /// (`identification` ou `anonyme`), `|`, puis le nom du pipe.
+        const ROLE_CLIENT_DU_REFUS: &str = "BIFROST_RECETTE_REFUS_CLIENT";
+
+        /// Le role de l'enfant des recettes du refus: ouvrir le pipe comme le
+        /// client du depot, au niveau d'imitation demande, envoyer chacune des
+        /// sept commandes reservees puis `status`, sur la meme connexion,
+        /// imprimer chaque reponse, sortir. Un enfant que personne
+        /// n'arreterait sort seul.
+        fn client_du_refus(role: &str) {
+            std::thread::spawn(|| {
+                std::thread::sleep(Duration::from_secs(30));
+                std::process::exit(4);
+            });
+            let (niveau, nom) = role.split_once('|').expect("role de l'enfant");
+            let niveau = match niveau {
+                "identification" => SECURITY_IDENTIFICATION,
+                "anonyme" => SECURITY_ANONYMOUS,
+                autre => panic!("niveau d'imitation inconnu: {autre}"),
+            };
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime de l'enfant");
+            rt.block_on(async {
+                let mut client = client(nom, niveau);
+                for (commande, admise) in une_de_chaque() {
+                    if admise {
+                        continue;
+                    }
+                    let nom_commande = commande.name();
+                    let reponse = client.request(&Request::new(commande)).await;
+                    println!("REPONSE {nom_commande} {reponse:?}");
+                }
+                let reponse = client.request(&Request::new(Command::Status)).await;
+                println!("REPONSE status {reponse:?}");
+            });
+        }
+
+        /// Ce que le serveur d'une recette du refus a vu de son enfant.
+        struct RefusVu {
+            /// Le PID de l'enfant, releve a son lancement.
+            pid_enfant: u32,
+            /// La commande que `recv` a rendue, et l'identification de la
+            /// requete qui l'a portee; ou l'erreur du serveur.
+            rendue: std::result::Result<(&'static str, Option<Identification>), String>,
+            /// Les lignes du journal emises sur le fil du serveur pendant
+            /// l'echange.
+            journal: Vec<String>,
+        }
+
+        /// Sert un enfant de la recette `recette` (ce binaire relance pour
+        /// elle seule), qui ouvre le pipe au niveau d'imitation `niveau`: une
+        /// acceptation, puis un seul `recv`, qui juge les sept commandes
+        /// reservees et ne rend que le `status` qui les suit. Le journal est
+        /// capture sur le fil qui sert, celui de `block_on`. Le releve de
+        /// l'enfant est imprime avant tout jugement, sa sortie echappee: elle
+        /// porte sa propre ligne `test result:`.
+        fn servir_un_enfant_du_refus(recette: &str, niveau: &str, suffixe: &str) -> RefusVu {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .expect("runtime");
+            let nom = nom(suffixe);
+            let mut serveur = {
+                let _dans = rt.enter();
+                serveur(&nom)
+            };
+            let (capture, garde) = super::super::tests_acceptation::capturer();
+            let filtre = format!("transport::imp::tests_appelant::{recette}");
+            let enfant =
+                std::process::Command::new(std::env::current_exe().expect("binaire de la recette"))
+                    .args([
+                        "--exact",
+                        filtre.as_str(),
+                        "--nocapture",
+                        "--test-threads=1",
+                    ])
+                    .env(ROLE_CLIENT_DU_REFUS, format!("{niveau}|{nom}"))
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                    .expect("lancement de l'enfant");
+            let pid_enfant = enfant.id();
+            let issue = rt.block_on(async {
+                tokio::time::timeout(Duration::from_secs(20), async {
+                    let mut connexion = serveur.accept().await?;
+                    let requete = connexion.recv().await?;
+                    let identification = connexion.identification();
+                    connexion.send(&Response::Ok).await?;
+                    Ok::<_, IpcError>((requete.command.name(), identification))
+                })
+                .await
+            });
+            drop(garde);
+            // Servi, l'enfant sort de lui-meme apres la reponse; sinon il est
+            // arrete par sa poignee, celle du processus lance ici.
+            let (tx, rx) = std::sync::mpsc::channel();
+            let attente = std::thread::spawn(move || {
+                let mut enfant = enfant;
+                if rx.recv_timeout(Duration::from_secs(25)).is_err() {
+                    let _ = enfant.kill();
+                }
+                enfant.wait_with_output()
+            });
+            let issue = issue.unwrap_or(Err(IpcError::RequestTimeout));
+            if issue.is_ok() {
+                let _ = tx.send(());
+            } else {
+                drop(tx);
+            }
+            let sortie = attente
+                .join()
+                .expect("attente de l'enfant")
+                .expect("sortie de l'enfant");
+            let journal = capture.0.lock().unwrap().clone();
+            println!(
+                "RELEVE {recette}: issue={issue:?}, pid enfant={pid_enfant}, pid recette={}, \
+                 journal={journal:?}, enfant: {:?} / {:?}",
+                std::process::id(),
+                String::from_utf8_lossy(&sortie.stdout).trim(),
+                String::from_utf8_lossy(&sortie.stderr).trim()
+            );
+            RefusVu {
+                pid_enfant,
+                rendue: issue.map_err(|e| e.to_string()),
+                journal,
+            }
+        }
+
+        /// Les lignes du journal dont le message est `message`.
+        fn lignes_de<'a>(journal: &'a [String], message: &str) -> Vec<&'a String> {
+            let champ = format!("message={message} ");
+            journal.iter().filter(|l| l.contains(&champ)).collect()
+        }
+
+        /// Chaque commande reservee a sa ligne de refus et une seule, un
+        /// avertissement qui porte `appelant` (le champ `peer` et sa valeur).
+        fn chaque_refus_nomme(journal: &[String], appelant: &str) {
+            let refus = lignes_de(journal, "commande reservee aux administrateurs, refusee");
+            let reservees: Vec<&'static str> = une_de_chaque()
+                .iter()
+                .filter(|(_, admise)| !admise)
+                .map(|(c, _)| c.name())
+                .collect();
+            assert_eq!(reservees.len(), 7, "{reservees:?}");
+            assert_eq!(
+                refus.len(),
+                reservees.len(),
+                "une ligne par refus: {journal:?}"
+            );
+            for nom in reservees {
+                let lignes: Vec<&&String> = refus
+                    .iter()
+                    .filter(|l| l.contains(&format!("command=\"{nom}\" ")))
+                    .collect();
+                assert_eq!(lignes.len(), 1, "{nom}: {refus:?}");
+                assert!(lignes[0].starts_with("WARN "), "{nom}: {}", lignes[0]);
+                assert!(
+                    lignes[0].contains(appelant),
+                    "{nom}: la ligne du refus ne nomme pas l'appelant << {appelant}>>: {}",
+                    lignes[0]
+                );
+            }
+        }
+
+        /// Le journal d'un refus nomme l'appelant comme celui d'une commande
+        /// servie: le SID de l'utilisateur du jeton que porte sa requete et le
+        /// PID de son processus, par le champ `peer` de la ligne `commande
+        /// privilegiee`.
+        ///
+        /// Le client est un AUTRE processus, ce binaire relance pour cette
+        /// seule recette, qui ouvre le pipe comme le client du depot
+        /// (`SECURITY_IDENTIFICATION`) et envoie les sept commandes reservees
+        /// puis `status`. Il est identifie, jeton lu, au niveau restreint,
+        /// comme un membre du groupe d'acces: c'est la premisse, les
+        /// Administrateurs inactifs dans le jeton des recettes, que l'enfant
+        /// herite; sinon abstention nommee,
+        /// `RAISON_REFUS_ADMINISTRATEURS_ACTIFS`, sur le runner de la CI
+        /// notamment. Chaque refus a sa ligne, qui porte
+        /// `peer=sid=<compte de la recette> pid=<enfant>`, comparee aux
+        /// releves de la recette: le SID du jeton de ce processus, sous la
+        /// forme canonique que le systeme rend, et le PID de l'enfant lance.
+        /// Aucune ligne d'identification impossible; l'acceptation porte le
+        /// meme champ, avant toute requete; aucun `uid=` ni `gid=`.
+        #[test]
+        fn le_refus_d_une_commande_reservee_nomme_le_client_par_son_sid_et_son_pid() {
+            if let Some(role) = std::env::var_os(ROLE_CLIENT_DU_REFUS) {
+                return client_du_refus(&role.to_string_lossy());
+            }
+            if administrateurs_actifs() {
+                println!(
+                    "SKIPPED {RECETTE_REFUS_IDENTIFIE}: {RAISON_REFUS_ADMINISTRATEURS_ACTIFS}"
+                );
+                return;
+            }
+            let vu = servir_un_enfant_du_refus(
+                RECETTE_REFUS_IDENTIFIE,
+                "identification",
+                "refus-identifie",
+            );
+            let compte = crate::groupe::sid_du_compte_courant()
+                .unwrap_or_else(|e| panic!("utilisateur du jeton de ce processus: {e}"));
+            // SAFETY: SID valide rendu par le systeme et copie dans `compte`,
+            // vivant pendant l'appel.
+            let sid = unsafe { crate::groupe::forme_canonique(compte.as_ptr() as PSID) }
+                .unwrap_or_else(|code| panic!("ConvertSidToStringSidW: erreur Win32 {code}"));
+            let (rendue, identification) = vu.rendue.expect("le serveur");
+            assert_ne!(
+                vu.pid_enfant,
+                std::process::id(),
+                "le client est un autre processus"
+            );
+            assert_eq!(
+                rendue, "status",
+                "une commande reservee a ete rendue au serveur"
+            );
+            assert_eq!(
+                identification,
+                Some(Identification::Lue {
+                    systeme: false,
+                    administrateurs: false
+                })
+            );
+            chaque_refus_nomme(
+                &vu.journal,
+                &format!("peer=sid={sid} pid={} ", vu.pid_enfant),
+            );
+            assert!(
+                lignes_de(&vu.journal, "appelant non identifie: niveau restreint").is_empty(),
+                "{:?}",
+                vu.journal
+            );
+            let acceptation = lignes_de(&vu.journal, "client accepte");
+            assert_eq!(acceptation.len(), 1, "{:?}", vu.journal);
+            assert!(
+                acceptation[0].contains(&format!(
+                    "peer=sid=non lu (aucune requete lue) pid={} ",
+                    vu.pid_enfant
+                )),
+                "{}",
+                acceptation[0]
+            );
+            for ligne in &vu.journal {
+                assert!(
+                    !ligne.contains("uid=") && !ligne.contains("gid="),
+                    "{ligne}"
+                );
+            }
+        }
+
+        /// Un appelant que le daemon n'identifie pas est nomme au journal par
+        /// ce qui en est connu: le PID de son processus, et la raison pour
+        /// laquelle son SID n'est pas lu. Sans premisse: un client ouvert en
+        /// `SECURITY_ANONYMOUS` vaut le niveau restreint sous tout jeton,
+        /// eleve compris; la recette mesure donc aussi sur le runner.
+        ///
+        /// L'enfant, ce binaire relance pour cette seule recette, ouvre le
+        /// pipe en `SECURITY_ANONYMOUS` et envoie les sept commandes reservees
+        /// puis `status`. Chacune des huit requetes ecrit une ligne
+        /// d'identification impossible (`OpenThreadToken`, 1347), chacune des
+        /// sept commandes reservees une ligne de refus, et toutes portent
+        /// `peer=sid=non lu (OpenThreadToken, code 1347) pid=<enfant>`.
+        #[test]
+        fn le_refus_d_un_appelant_non_identifie_nomme_son_processus() {
+            if let Some(role) = std::env::var_os(ROLE_CLIENT_DU_REFUS) {
+                return client_du_refus(&role.to_string_lossy());
+            }
+            let vu = servir_un_enfant_du_refus(RECETTE_REFUS_ANONYME, "anonyme", "refus-anonyme");
+            let (rendue, identification) = vu.rendue.expect("le serveur");
+            assert_ne!(
+                vu.pid_enfant,
+                std::process::id(),
+                "le client est un autre processus"
+            );
+            assert_eq!(
+                rendue, "status",
+                "une commande reservee a ete rendue au serveur"
+            );
+            assert_eq!(
+                identification,
+                Some(Identification::Impossible {
+                    etape: EtapeDIdentification::Jeton,
+                    code: ANONYME
+                })
+            );
+            let appelant = format!(
+                "peer=sid=non lu (OpenThreadToken, code {ANONYME}) pid={} ",
+                vu.pid_enfant
+            );
+            let non_identifie = lignes_de(&vu.journal, "appelant non identifie: niveau restreint");
+            assert_eq!(
+                non_identifie.len(),
+                8,
+                "une ligne par requete: {:?}",
+                vu.journal
+            );
+            for ligne in &non_identifie {
+                assert!(ligne.starts_with("WARN "), "{ligne}");
+                assert!(
+                    ligne.contains("etape=\"OpenThreadToken\" ")
+                        && ligne.contains(&format!("code={ANONYME} ")),
+                    "{ligne}"
+                );
+                assert!(
+                    ligne.contains(&appelant),
+                    "l'identification impossible ne nomme pas l'appelant << {appelant}>>: {ligne}"
+                );
+            }
+            chaque_refus_nomme(&vu.journal, &appelant);
+        }
+
+        /// L'abstention de la recette du refus d'un appelant identifie, sous
+        /// la forme que la CI compare: le runner a les Administrateurs actifs,
+        /// et `ci/abstentions-attendues-windows.txt` porte sa ligne exacte,
+        /// une fois. Sa soeur, la recette de l'appelant non identifie, mesure
+        /// sur le runner: la liste ne la nomme pas. La raison n'a ni chiffre
+        /// ni chemin, et n'est celle d'aucune autre recette.
+        #[test]
+        fn la_recette_du_refus_identifie_avoue_son_abstention_dans_la_liste_windows() {
+            use super::tests_groupe_d_acces::RAISON_ADMINISTRATEURS_INACTIFS;
+            use crate::groupe::{RAISON_ADMINISTRATEURS_ACTIFS, RAISON_COMPTE_PREDEFINI};
+            let raison = RAISON_REFUS_ADMINISTRATEURS_ACTIFS;
+            assert!(!raison.chars().any(|c| c.is_ascii_digit()), "{raison}");
+            assert!(!raison.contains(['/', '\\']), "{raison}");
+            assert!(raison.is_ascii() && !raison.contains('\n'), "{raison}");
+            for autre in [
+                RAISON_ADMINISTRATEURS_ACTIFS,
+                RAISON_ADMINISTRATEURS_INACTIFS,
+                RAISON_COMPTE_PREDEFINI,
+                RAISON_SANS_SYSTEME,
+            ] {
+                assert_ne!(raison, autre);
+            }
+            let liste = std::fs::read_to_string(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../ci/abstentions-attendues-windows.txt"
+            ))
+            .expect("la liste des abstentions attendues du job Windows");
+            let attendue = format!("SKIPPED {RECETTE_REFUS_IDENTIFIE}: {raison}");
+            assert_eq!(
+                liste.lines().filter(|l| *l == attendue).count(),
+                1,
+                "la liste Windows doit porter la ligne exacte de la recette du refus, une fois"
+            );
+            assert!(
+                !liste.contains(RECETTE_REFUS_ANONYME),
+                "la recette du refus d'un appelant non identifie mesure sur le runner"
+            );
+        }
+
         /// Le nom de la recette SYSTEM, tel que son abstention l'imprime et
         /// que `ci/abstentions-attendues-windows.txt` le porte.
         const RECETTE_SYSTEME: &str =
@@ -4993,9 +5448,11 @@ mod tests_acceptation {
     /// Les evenements de journal emis sur le fil qui l'a pose par
     /// `tracing::subscriber::set_default`, chacun reduit a son niveau puis a
     /// ses champs: le journal de production filtre par niveau, une ligne
-    /// emise sous ce filtre n'existe pas. Se pose par [`capturer`].
+    /// emise sous ce filtre n'existe pas. Se pose par [`capturer`], ici et
+    /// dans les recettes du journal des refus (`tests_niveau_linux`,
+    /// `tests_appelant`).
     #[derive(Clone, Default)]
-    struct Capture(Arc<std::sync::Mutex<Vec<String>>>);
+    pub(super) struct Capture(pub(super) Arc<std::sync::Mutex<Vec<String>>>);
 
     /// L'abonne global des recettes de ce binaire: il ne garde rien.
     ///
@@ -5033,7 +5490,7 @@ mod tests_acceptation {
 
     /// Une capture du journal de ce fil, l'abonne global [`Muet`] pose une
     /// fois pour tout le binaire.
-    fn capturer() -> (Capture, tracing::subscriber::DefaultGuard) {
+    pub(super) fn capturer() -> (Capture, tracing::subscriber::DefaultGuard) {
         static GLOBAL: std::sync::Once = std::sync::Once::new();
         GLOBAL.call_once(|| {
             tracing::subscriber::set_global_default(Muet)
@@ -5396,6 +5853,191 @@ mod tests_acceptation {
             );
         }
         assert!(!imp::est_un_epuisement(&std::io::Error::other("sans code")));
+    }
+}
+
+/// Le lexeur partage des gardes de source (commentaires et litteraux separes
+/// du code), pour la garde du journal des refus. Declare au niveau du fichier:
+/// dans un module en ligne, le chemin relatif se resoudrait sous
+/// `src/transport/`, qui n'existe pas.
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../../bifrost-evasion/tests/commun/lexeur_rust.rs"]
+mod lexeur_rust;
+
+/// Chaque ligne du journal que le transport ecrit pour un appelant qu'il
+/// refuse, qu'il n'identifie pas ou qu'il accepte le nomme, par le champ
+/// `peer` de la ligne `commande privilegiee` du daemon et sous le meme
+/// affichage: celui de `Connection::peer` (Linux: `PeerIdentity`, uid, gid et
+/// pid du `SO_PEERCRED`; Windows: `ClientDuPipe`, SID et PID), seule source de
+/// ce texte. Garde de source, commentaires et litteraux retires du code par le
+/// lexeur partage, sur les deux plateformes a la fois: le texte du fichier
+/// porte les deux modules `imp`, quelle que soit la cible compilee. Elle tient
+/// sur le runner Windows, ou la recette du refus d'un appelant identifie
+/// s'abstient (Administrateurs actifs), et sur un hote Linux lance en root, ou
+/// la recette du refus s'abstient aussi.
+#[cfg(test)]
+mod tests_journal_des_refus {
+    use super::lexeur_rust;
+
+    /// Le code du fichier, commentaires et litteraux remplaces par des blancs
+    /// (sauts de ligne gardes, positions inchangees), et son decoupage.
+    fn code_neutre() -> (String, lexeur_rust::Decoupe) {
+        let source = include_str!("transport.rs");
+        let decoupe = lexeur_rust::decouper(source).expect("lexeur");
+        let mut code = source.as_bytes().to_vec();
+        for &(debut, fin) in &decoupe.neutres {
+            for octet in &mut code[debut..fin] {
+                if *octet != b'\n' {
+                    *octet = b' ';
+                }
+            }
+        }
+        (String::from_utf8(code).expect("source ASCII"), decoupe)
+    }
+
+    /// La fin (exclue) du bloc ou de la parenthese qui s'ouvre a `ouvrant`.
+    fn fermeture(code: &str, ouvrant: usize) -> usize {
+        let octets = code.as_bytes();
+        let (ouvre, ferme) = match octets[ouvrant] {
+            b'{' => (b'{', b'}'),
+            b'(' => (b'(', b')'),
+            autre => panic!("ni accolade ni parenthese a {ouvrant}: {}", autre as char),
+        };
+        let mut profondeur = 0usize;
+        for (i, &c) in octets[ouvrant..].iter().enumerate() {
+            if c == ouvre {
+                profondeur += 1;
+            } else if c == ferme {
+                profondeur -= 1;
+                if profondeur == 0 {
+                    return ouvrant + i + 1;
+                }
+            }
+        }
+        panic!("bloc ouvert a {ouvrant} jamais ferme")
+    }
+
+    /// Le corps de la premiere fonction `signature` apres `depuis`, de son
+    /// accolade ouvrante a sa fermante comprise.
+    fn corps(code: &str, depuis: usize, signature: &str) -> (usize, usize) {
+        let debut = depuis
+            + code[depuis..]
+                .find(signature)
+                .unwrap_or_else(|| panic!("`{signature}` introuvable apres {depuis}"));
+        let accolade = debut + code[debut..].find('{').expect("corps de la fonction");
+        (accolade, fermeture(code, accolade))
+    }
+
+    /// Les appels du journal (`tracing::<macro>!(...)`) de `code[debut..fin]`:
+    /// position de `tracing::` et fin (exclue) de leurs parentheses.
+    fn appels_du_journal(code: &str, (debut, fin): (usize, usize)) -> Vec<(usize, usize)> {
+        let mut appels = Vec::new();
+        let mut pos = debut;
+        while let Some(p) = code[pos..fin].find("tracing::") {
+            let appel = pos + p;
+            let nom_fin = appel
+                + "tracing::".len()
+                + code[appel + "tracing::".len()..]
+                    .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                    .expect("fin du nom");
+            if code[nom_fin..].starts_with("!(") {
+                let ferme = fermeture(code, nom_fin + 1);
+                appels.push((appel, ferme));
+                pos = ferme;
+            } else {
+                pos = nom_fin;
+            }
+        }
+        appels
+    }
+
+    /// Le texte d'un appel sans aucun blanc: rustfmt n'y change rien.
+    fn sans_blancs(texte: &str) -> String {
+        texte.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
+    /// Chaque ligne de refus, d'identification impossible et d'acceptation
+    /// du transport porte le champ `peer` sous sa forme exigee, une fois, dans
+    /// l'appel meme qui ecrit son message; et chaque appel du journal des deux
+    /// `Connection::recv` porte `peer = %self.peer()`, de sorte qu'une ligne
+    /// ajoutee sans l'appelant rougit ici.
+    #[test]
+    fn chaque_ligne_de_refus_du_transport_nomme_l_appelant() {
+        let (code, decoupe) = code_neutre();
+        let unix = code.find("#[cfg(unix)]\nmod imp {").expect("module Unix");
+        let windows = code
+            .find("#[cfg(windows)]\nmod imp {")
+            .expect("module Windows");
+        assert!(unix < windows, "le module Unix precede le module Windows");
+        let attendus = [
+            (
+                unix,
+                "pub async fn recv(",
+                "commande reservee a root, refusee",
+                "peer=%self.peer()",
+            ),
+            (
+                windows,
+                "pub async fn recv(",
+                "commande reservee aux administrateurs, refusee",
+                "peer=%self.peer()",
+            ),
+            (
+                windows,
+                "pub async fn recv(",
+                "appelant non identifie: niveau restreint",
+                "peer=%self.peer()",
+            ),
+            (unix, "pub async fn accept(", "connexion refusee", "%peer,"),
+            (unix, "pub async fn accept(", "client accepte", "%peer,"),
+            (
+                windows,
+                "pub async fn accept(",
+                "client accepte",
+                "peer=%connexion.peer()",
+            ),
+        ];
+        for (partie, signature, message, champ) in attendus {
+            let (debut, fin) = corps(&code, partie, signature);
+            if partie == unix {
+                assert!(fin <= windows, "{signature} Unix lu dans le module Windows");
+            }
+            let porteurs: Vec<(usize, usize)> = appels_du_journal(&code, (debut, fin))
+                .into_iter()
+                .filter(|&(appel, ferme)| {
+                    decoupe
+                        .litteraux
+                        .iter()
+                        .any(|l| l.corps == message && appel < l.debut && l.debut < ferme)
+                })
+                .collect();
+            assert_eq!(
+                porteurs.len(),
+                1,
+                "<< {message} >>: un appel du journal dans {signature} attendu, {porteurs:?}"
+            );
+            let (appel, ferme) = porteurs[0];
+            let texte = sans_blancs(&code[appel..ferme]);
+            assert_eq!(
+                texte.matches(champ).count(),
+                1,
+                "<< {message} >> ne nomme pas l'appelant par `{champ}`: {texte}"
+            );
+        }
+        for partie in [unix, windows] {
+            let recv = corps(&code, partie, "pub async fn recv(");
+            let appels = appels_du_journal(&code, recv);
+            assert!(!appels.is_empty(), "aucun appel du journal dans recv");
+            for (appel, ferme) in appels {
+                let texte = sans_blancs(&code[appel..ferme]);
+                assert_eq!(
+                    texte.matches("peer=%self.peer()").count(),
+                    1,
+                    "une ligne du journal de recv sans l'appelant: {texte}"
+                );
+            }
+        }
     }
 }
 

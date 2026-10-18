@@ -30,10 +30,16 @@ pub async fn serve(
         let tx = tx.clone();
         let profil = profil.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle(conn, tx, profil).await
+            // La connexion survit a `handle`: la ligne d'une connexion terminee
+            // sur erreur (trame mal formee, delai depasse, client parti en
+            // pleine reponse) nomme son appelant comme `commande privilegiee`,
+            // par `Connection::peer`. Sous Windows, le SID est celui de la
+            // derniere requete lue, et `non lu` avant la premiere.
+            let mut conn = conn;
+            if let Err(e) = handle(&mut conn, tx, profil).await
                 && !matches!(e, IpcError::Closed)
             {
-                tracing::warn!(error = %e, "connexion terminee sur erreur");
+                tracing::warn!(peer = %conn.peer(), error = %e, "connexion terminee sur erreur");
             }
         });
     }
@@ -161,7 +167,7 @@ where
 }
 
 async fn handle(
-    mut conn: Connection,
+    conn: &mut Connection,
     tx: Sender<Cmd>,
     profil: std::path::PathBuf,
 ) -> Result<(), IpcError> {
@@ -503,6 +509,67 @@ upstream = ["10.2.0.1"]
             !corps[info..message[0]].contains(';'),
             "l'appelant est pris hors de l'appel qui l'ecrit: {}",
             &corps[info..message[0]]
+        );
+    }
+
+    /// La ligne d'une connexion terminee sur erreur (trame mal formee, delai
+    /// de requete depasse, client parti en pleine reponse) nomme son appelant
+    /// comme `commande privilegiee`: le champ `peer`, rendu par
+    /// `Connection::peer`, seule source de ce texte. `handle` emprunte la
+    /// connexion, qui lui survit dans `serve` pour l'ecrire.
+    ///
+    /// Garde de source par le lexeur partage, commentaires et litteraux
+    /// retires du code: dans `serve`, le message << connexion terminee sur
+    /// erreur >> une seule fois, dans un appel de `tracing::warn!` qui porte
+    /// `peer = %conn.peer()` une fois, sans fin d'instruction entre l'appel
+    /// et son message. Le chemin ne se joue pas ici de bout en bout sous
+    /// Windows (le pipe du daemon ne s'ouvre pas sans elevation); les lignes
+    /// du transport se mesurent par les recettes de `bifrost-ipc`.
+    #[test]
+    fn la_ligne_d_une_connexion_terminee_sur_erreur_nomme_l_appelant() {
+        let source = include_str!("server.rs");
+        let decoupe = lexeur_rust::decouper(source).expect("lexeur");
+        let mut code = source.as_bytes().to_vec();
+        for &(debut, fin) in &decoupe.neutres {
+            for octet in &mut code[debut..fin] {
+                if *octet != b'\n' {
+                    *octet = b' ';
+                }
+            }
+        }
+        let code = String::from_utf8(code).expect("source ASCII");
+        let debut = code.find("\npub async fn serve(").expect("serve");
+        let fin = debut + code[debut..].find("\n}\n").expect("fin de serve");
+        let message: Vec<usize> = decoupe
+            .litteraux
+            .iter()
+            .filter(|l| {
+                l.corps == "connexion terminee sur erreur" && (debut..fin).contains(&l.debut)
+            })
+            .map(|l| l.debut)
+            .collect();
+        assert_eq!(message.len(), 1, "le message dans serve: {message:?}");
+        let appel = debut
+            + code[debut..message[0]]
+                .rfind("tracing::")
+                .expect("un appel du journal avant le message");
+        assert!(
+            code[appel..].starts_with("tracing::warn!("),
+            "{}",
+            &code[appel..message[0]]
+        );
+        let arguments: String = code[appel..message[0]]
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        assert!(
+            !arguments.contains(';'),
+            "le message hors de l'appel: {arguments}"
+        );
+        assert_eq!(
+            arguments.matches("peer=%conn.peer()").count(),
+            1,
+            "la ligne d'une connexion terminee sur erreur ne nomme pas l'appelant: {arguments}"
         );
     }
 
