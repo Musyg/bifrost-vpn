@@ -24,12 +24,17 @@
 //! 2. Les comptes: la meme declaration (`packaging/sysusers.d/bifrost.conf`,
 //!    un groupe `bifrost`, deux comptes `bifrost-coeur` et
 //!    `bifrost-resolveur`), appliquee par `systemd-sysusers` dans
-//!    l'installateur, le postinst et le `%post`, avec les memes refus: un
+//!    l'installateur, le postinst et le `%pre`, avec les memes refus: un
 //!    compte de service membre du groupe de pilotage, deux comptes qui
-//!    partagent un uid.
-//! 3. Le demarrage: ni l'installateur, ni le postinst, ni le `%post`
-//!    n'active, ne demarre ou ne relance le service. Le retrait (prerm,
-//!    `%preun`) l'arrete, le desactive et retire les filtres.
+//!    partagent un uid. Le .rpm les joue en `%pre`, avant la pose des
+//!    fichiers, parce que rpm n'installe pas un paquet dont le `%pre` echoue
+//!    mais garde celui dont le `%post` echoue: les comptes et les refus sont
+//!    dans le `%pre`, chaque refus y rend 1, et aucun autre scriptlet n'en
+//!    porte. Le `%pre` recoit la declaration que `%install` pose, lue par
+//!    rpmbuild a la construction, jamais recopiee dans le spec.
+//! 3. Le demarrage: ni l'installateur, ni le postinst, ni le `%pre`, ni le
+//!    `%post` n'active, ne demarre ou ne relance le service. Le retrait
+//!    (prerm, `%preun`) l'arrete, le desactive et retire les filtres.
 //! 4. Une version (`@VERSION@`), un mainteneur sans donnee personnelle (le
 //!    contact public du depot), la licence du depot, les memes dependances
 //!    hors bibliotheques, et la regle des trois commandes du groupe dite par
@@ -305,16 +310,23 @@ fn poses_du_deb(texte: &str) -> Poses {
     p
 }
 
+/// Une ligne de spec qui ouvre une section (`%install`, `%pre`...): un `%` en
+/// tete, hors macro (`%{...}`), substitution de commande (`%(...)`, que
+/// rpmbuild developpe sur place) et attribut de `%files`.
+fn ouvre_une_section(ligne: &str) -> bool {
+    ligne.starts_with('%')
+        && !ligne.starts_with("%{")
+        && !ligne.starts_with("%(")
+        && !ligne.starts_with("%attr")
+        && !ligne.starts_with("%license")
+}
+
 /// La section `%nom` d'un spec, jusqu'a la section suivante.
 fn section<'a>(spec: &'a str, nom: &str) -> Vec<&'a str> {
     let mut dedans = false;
     let mut lignes = Vec::new();
     for l in spec.lines() {
-        if l.starts_with('%')
-            && !l.starts_with("%{")
-            && !l.starts_with("%attr")
-            && !l.starts_with("%license")
-        {
+        if ouvre_une_section(l) {
             dedans = l.split_whitespace().next() == Some(nom);
             continue;
         }
@@ -397,17 +409,173 @@ fn les_paquets_posent_les_fichiers_de_l_installateur_aux_memes_modes() {
     );
 }
 
-/// Ce que l'installateur, le postinst et le `%post` disent tous trois des
-/// comptes, une fois leurs variables resolues: la meme declaration appliquee
-/// par systemd-sysusers, les deux comptes passes en revue contre le groupe de
-/// pilotage, leurs uid compares.
-const CONTRAT_DES_COMPTES: [&str; 5] = [
-    "systemd-sysusers /usr/lib/sysusers.d/bifrost.conf",
+/// La creation des comptes par l'installateur et le postinst, une fois leurs
+/// variables resolues: la declaration posee, appliquee par systemd-sysusers.
+const CREATION_DES_COMPTES: &str = "systemd-sysusers /usr/lib/sysusers.d/bifrost.conf";
+
+/// Les refus que l'installateur, le postinst et le `%pre` portent tous trois:
+/// les deux comptes passes en revue contre le groupe de pilotage, leurs uid
+/// compares.
+const REFUS_DES_COMPTES: [&str; 4] = [
     "for compte in bifrost-coeur bifrost-resolveur",
     "grep -x bifrost",
     "id -u bifrost-coeur",
     "id -u bifrost-resolveur",
 ];
+
+/// Les conditions des refus du `%pre`: chacune ouvre un `if` dont le bloc rend 1.
+const CONDITIONS_DES_REFUS: [&str; 2] = ["grep -x bifrost", "id -u bifrost-coeur"];
+
+/// La creation des comptes par le `%pre`, avant que la declaration soit sur le
+/// disque: rpmbuild lit a la construction le fichier que `%install` pose
+/// (`%(cat ...)`, developpe sur place) et le scriptlet le passe sur l'entree
+/// de systemd-sysusers, `--replace` le tenant pour le fichier pose. Trois
+/// lignes exactes et consecutives: sans apostrophes autour du delimiteur, le
+/// shell executerait les mots entre accents graves des commentaires de la
+/// declaration; un corps ecrit dans le spec serait une seconde source des
+/// comptes.
+const CREATION_DU_PRE: [&str; 3] = [
+    "if ! systemd-sysusers --replace=/usr/lib/sysusers.d/bifrost.conf - <<'DECLARATION_BIFROST'",
+    "%(cat %{pkg_source}/sysusers.d/bifrost.conf)",
+    "DECLARATION_BIFROST",
+];
+
+/// La destination de la declaration, que `--replace` nomme.
+const DECLARATION_POSEE: &str = "/usr/lib/sysusers.d/bifrost.conf";
+
+/// Les sections que la recette sait lire dans le spec du daemon. Toute autre
+/// (`%pretrans`, `%posttrans`, un trigger, un `%if`) la fait rougir au lieu
+/// d'etre devinee: un refus qui s'y logerait tournerait ailleurs qu'avant la
+/// pose, ou pas du tout.
+const SECTIONS_DU_SPEC: [&str; 8] = [
+    "%description",
+    "%install",
+    "%files",
+    "%pre",
+    "%post",
+    "%preun",
+    "%postun",
+    "%changelog",
+];
+
+/// Celles qui ne sont pas des scriptlets.
+const SECTIONS_SANS_SCRIPT: [&str; 4] = ["%description", "%install", "%files", "%changelog"];
+
+/// Les lignes actives d'une section de spec, sans leurs blancs, commentaires
+/// et lignes vides ecartes; le corps d'un document en ligne garde.
+fn lignes_de_section(spec: &str, nom: &str) -> Vec<String> {
+    section(spec, nom)
+        .iter()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .collect()
+}
+
+/// Le `%pre` du spec: creation depuis la declaration posee, puis chacun des
+/// refus dans un `if` dont le bloc dit pourquoi et rend 1.
+fn ecarts_du_pre(spec: &str) -> Vec<String> {
+    let mut ecarts = Vec::new();
+    let brutes = lignes_de_section(spec, "%pre");
+    let creations = brutes
+        .windows(CREATION_DU_PRE.len())
+        .filter(|f| *f == CREATION_DU_PRE)
+        .count();
+    if creations != 1 {
+        ecarts.push(format!(
+            "le %pre du spec porte {creations} fois la creation des comptes depuis la declaration posee, attendu une: {CREATION_DU_PRE:?}"
+        ));
+    }
+    let documents = brutes.iter().filter(|l| l.contains("<<")).count();
+    if documents != 1 {
+        ecarts.push(format!(
+            "le %pre du spec ouvre {documents} document(s) en ligne, attendu le seul de la declaration"
+        ));
+    }
+    match poses_du_rpm(spec).get(DECLARATION_POSEE) {
+        Some((_, source)) if source == DECLARATION => {}
+        autre => ecarts.push(format!(
+            "%install pose {DECLARATION_POSEE} depuis {autre:?}, le %pre la lit dans {DECLARATION}"
+        )),
+    }
+    // Le corps du document en ligne ecarte: le shell ne l'execute pas.
+    let lignes = lignes_shell(&section(spec, "%pre").join("\n"));
+    let texte = lignes.join("\n");
+    for fragment in REFUS_DES_COMPTES {
+        if !texte.contains(fragment) {
+            ecarts.push(format!("%pre du spec ne porte pas `{fragment}`"));
+        }
+    }
+    let creation = lignes.iter().position(|l| *l == CREATION_DU_PRE[0]);
+    let premier_refus = lignes
+        .iter()
+        .position(|l| REFUS_DES_COMPTES.iter().any(|f| l.contains(f)));
+    if let (Some(c), Some(r)) = (creation, premier_refus)
+        && r < c
+    {
+        ecarts.push(format!(
+            "le %pre du spec refuse avant de creer les comptes: `{}`",
+            lignes[r]
+        ));
+    }
+    // Grammaire fermee: les seules lignes que le %pre peut porter. Un `exit 0`,
+    // une condition sur `$1` ou une commande de plus sont des formes que la
+    // recette ne sait pas lire, et qui pourraient sauter un refus.
+    for l in &lignes {
+        let lue = *l == CREATION_DU_PRE[0]
+            || [
+                "if ! command -v systemd-sysusers >/dev/null 2>&1; then",
+                "for compte in bifrost-coeur bifrost-resolveur; do",
+                "then",
+                "exit 1",
+                "fi",
+                "done",
+            ]
+            .contains(&l.as_str())
+            || (l.starts_with("echo ") && l.ends_with(">&2"))
+            || (l.starts_with("if ")
+                && l.ends_with("; then")
+                && CONDITIONS_DES_REFUS.iter().any(|f| l.contains(f)));
+        if !lue {
+            ecarts.push(format!(
+                "le %pre du spec porte une ligne que la recette ne sait pas lire: `{l}`"
+            ));
+        }
+    }
+    for (i, l) in lignes.iter().enumerate() {
+        let refus = CONDITIONS_DES_REFUS.iter().any(|f| l.contains(f));
+        let garde = l.starts_with("if ! command -v systemd-sysusers")
+            || i == creation.unwrap_or(usize::MAX);
+        if !refus && !garde {
+            continue;
+        }
+        if !l.starts_with("if ") {
+            ecarts.push(format!(
+                "le %pre du spec porte un refus hors d'un `if`, forme que la recette ne sait pas lire: `{l}`"
+            ));
+            continue;
+        }
+        let mut bloc: Vec<&str> = lignes[i + 1..]
+            .iter()
+            .map(String::as_str)
+            .take_while(|b| *b != "fi")
+            .collect();
+        if !l.ends_with("then") && bloc.first() == Some(&"then") {
+            bloc.remove(0);
+        }
+        let messages = bloc.len().saturating_sub(1);
+        let lu = bloc.last() == Some(&"exit 1")
+            && messages > 0
+            && bloc[..messages]
+                .iter()
+                .all(|b| b.starts_with("echo ") && b.ends_with(">&2"));
+        if !lu {
+            ecarts.push(format!(
+                "le %pre du spec: le bloc de `{l}` n'est pas un message suivi de `exit 1`: {bloc:?}"
+            ));
+        }
+    }
+    ecarts
+}
 
 fn ecarts_des_comptes(
     installateur: &str,
@@ -425,6 +593,13 @@ fn ecarts_des_comptes(
     if entrees != ["g bifrost", "u bifrost-coeur", "u bifrost-resolveur"] {
         ecarts.push(format!("{DECLARATION} declare {entrees:?}"));
     }
+    // rpmbuild insere la declaration dans le %pre et relit chacune de ses
+    // lignes comme une ligne du spec: un `%` y serait une macro, ou une section.
+    if declaration.contains('%') {
+        ecarts.push(format!(
+            "{DECLARATION} porte un `%`, que rpmbuild lirait dans le %pre"
+        ));
+    }
     let resolu = |texte: &str, imposees: &[(&str, &str)]| -> String {
         let lignes = lignes_shell(texte);
         let vars = affectations(&lignes, imposees);
@@ -434,20 +609,53 @@ fn ecarts_des_comptes(
             .collect::<Vec<_>>()
             .join("\n")
     };
-    let post: Vec<String> = section(spec, "%post")
-        .iter()
-        .map(|l| l.trim().to_string())
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .collect();
     for (nom, texte) in [
         (INSTALLATEUR, resolu(installateur, &[("ICI", "packaging")])),
         (POSTINST, resolu(postinst, &[])),
-        ("%post du spec", post.join("\n")),
     ] {
-        for fragment in CONTRAT_DES_COMPTES {
+        for fragment in std::iter::once(CREATION_DES_COMPTES).chain(REFUS_DES_COMPTES) {
             if !texte.contains(fragment) {
                 ecarts.push(format!("{nom} ne porte pas `{fragment}`"));
             }
+        }
+    }
+    ecarts.extend(ecarts_du_pre(spec));
+    // Aucun autre scriptlet ne cree ni ne refuse: apres la pose, un refus
+    // laisserait le paquet installe.
+    // Une section s'ouvre par son seul nom: `%pre -p <lua>` changerait
+    // d'interpreteur, `%pre -f fichier` lirait le scriptlet ailleurs.
+    for l in spec.lines().filter(|l| ouvre_une_section(l)) {
+        let nom = l.split_whitespace().next().unwrap_or("");
+        if !SECTIONS_DU_SPEC.contains(&l.trim_end()) {
+            ecarts.push(format!(
+                "le spec ouvre `{l}`, une section que la recette ne sait pas lire"
+            ));
+            continue;
+        }
+        if nom == "%pre" || SECTIONS_SANS_SCRIPT.contains(&nom) {
+            continue;
+        }
+        for ligne in lignes_de_section(spec, nom) {
+            for fragment in std::iter::once("systemd-sysusers").chain(REFUS_DES_COMPTES) {
+                if ligne.contains(fragment) {
+                    ecarts.push(format!(
+                        "le {nom} du spec porte `{fragment}`: les comptes et leurs refus se jouent en %pre, avant la pose"
+                    ));
+                }
+            }
+        }
+    }
+    // Une seule source des comptes: aucune ligne de la declaration ecrite
+    // dans le spec, ou elle deriverait de celle que le paquet pose.
+    for l in spec.lines().map(str::trim) {
+        let mut mots = l.split_whitespace();
+        if let (Some(type_), Some(nom)) = (mots.next(), mots.next())
+            && ["u", "u!", "g", "m", "r"].contains(&type_)
+            && nom.starts_with("bifrost")
+        {
+            ecarts.push(format!(
+                "le spec ecrit une ligne de declaration, {DECLARATION} est la seule source: `{l}`"
+            ));
         }
     }
     ecarts
@@ -543,6 +751,7 @@ fn ecarts_du_demarrage(
         (POSTINST, lignes_shell(postinst)),
         (PRERM, lignes_shell(prerm)),
         (POSTRM, lignes_shell(postrm)),
+        ("%pre du spec", scriptlet("%pre")),
         ("%post du spec", scriptlet("%post")),
         ("%preun du spec", scriptlet("%preun")),
         ("%postun du spec", scriptlet("%postun")),
@@ -780,17 +989,124 @@ fn chaque_exigence_mord() {
     let e = ecarts_des_comptes(&installateur, &postinst_mute, &spec, &declaration);
     assert!(e.iter().any(|x| x.contains(POSTINST)), "{e:?}");
 
-    // Le refus du membre retire du %post.
+    // Les comptes du spec: temoin, puis chaque exigence du %pre.
+    let comptes = |spec: &str, declaration: &str| -> Vec<String> {
+        ecarts_des_comptes(&installateur, &postinst, spec, declaration)
+    };
+    let mord = |e: Vec<String>, motif: &str| {
+        assert!(
+            e.iter().any(|x| x.contains(motif)),
+            "`{motif}` attendu dans {e:?}"
+        );
+    };
+    assert!(comptes(&spec, &declaration).is_empty());
+    let creation = format!("{}\n", CREATION_DU_PRE.join("\n"));
+    let refus = "for compte in bifrost-coeur bifrost-resolveur; do\n";
+    let fin_des_refus = "  exit 1\nfi\n\n# Miroir du reste de postinst";
+    let bloc_des_refus = {
+        let debut = spec.find(refus).expect("refus du %pre");
+        let fin = spec.find(fin_des_refus).expect("fin des refus du %pre") + "  exit 1\nfi\n".len();
+        spec[debut..fin].to_string()
+    };
+    let ouverture_du_post = "\n%post\nif [ -d /run/systemd/system ]; then\n";
+
+    // Le refus du membre retire du %pre.
     let spec_mute = remplacer(
         &spec,
         "  if id -nG \"$compte\" | tr ' ' '\\n' | grep -x bifrost >/dev/null; then",
         "  if false; then",
     );
-    let e = ecarts_des_comptes(&installateur, &postinst, &spec_mute, &declaration);
-    assert!(
-        e.iter()
-            .any(|x| x.contains("%post du spec ne porte pas `grep -x bifrost`")),
-        "{e:?}"
+    mord(
+        comptes(&spec_mute, &declaration),
+        "%pre du spec ne porte pas `grep -x bifrost`",
+    );
+    // Les refus remis en %post, apres la pose.
+    let spec_mute = remplacer(
+        &remplacer(&spec, &bloc_des_refus, ""),
+        ouverture_du_post,
+        &format!("\n%post\n{bloc_des_refus}if [ -d /run/systemd/system ]; then\n"),
+    );
+    let e = comptes(&spec_mute, &declaration);
+    mord(e.clone(), "le %post du spec porte `grep -x bifrost`");
+    mord(e, "%pre du spec ne porte pas `id -u bifrost-coeur`");
+    // Les refus portes par un scriptlet que la recette ne lit pas.
+    let spec_mute = remplacer(
+        &remplacer(&spec, &bloc_des_refus, ""),
+        "\n%changelog\n",
+        &format!("\n%posttrans\n{bloc_des_refus}\n%changelog\n"),
+    );
+    mord(
+        comptes(&spec_mute, &declaration),
+        "`%posttrans`, une section que la recette ne sait pas lire",
+    );
+    // Un refus qui ne rend plus 1.
+    let spec_mute = remplacer(
+        &spec,
+        fin_des_refus,
+        "  true\nfi\n\n# Miroir du reste de postinst",
+    );
+    mord(
+        comptes(&spec_mute, &declaration),
+        "n'est pas un message suivi de `exit 1`",
+    );
+    // Les refus avant la creation.
+    let spec_mute = remplacer(
+        &remplacer(&spec, &bloc_des_refus, ""),
+        "if ! command -v systemd-sysusers",
+        &format!("{bloc_des_refus}if ! command -v systemd-sysusers"),
+    );
+    mord(
+        comptes(&spec_mute, &declaration),
+        "refuse avant de creer les comptes",
+    );
+    // Le delimiteur sans apostrophes: le shell executerait les accents graves.
+    let spec_mute = remplacer(
+        &spec,
+        "- <<'DECLARATION_BIFROST'",
+        "- <<DECLARATION_BIFROST",
+    );
+    mord(
+        comptes(&spec_mute, &declaration),
+        "porte 0 fois la creation des comptes",
+    );
+    // La declaration recopiee dans le spec au lieu d'etre lue a la construction.
+    let spec_mute = remplacer(
+        &spec,
+        &creation,
+        &format!(
+            "{}\n{declaration}{}\n",
+            CREATION_DU_PRE[0], CREATION_DU_PRE[2]
+        ),
+    );
+    let e = comptes(&spec_mute, &declaration);
+    mord(e.clone(), "le spec ecrit une ligne de declaration");
+    mord(e, "porte 0 fois la creation des comptes");
+    // La declaration posee depuis un autre fichier que celui que lit le %pre.
+    let spec_mute = remplacer(
+        &spec,
+        "%{pkg_source}/sysusers.d/bifrost.conf %{buildroot}",
+        "%{pkg_source}/sysusers.d/autre.conf %{buildroot}",
+    );
+    mord(
+        comptes(&spec_mute, &declaration),
+        "%install pose /usr/lib/sysusers.d/bifrost.conf depuis",
+    );
+    // Un `%` dans la declaration, que rpmbuild relirait dans le %pre.
+    mord(
+        comptes(&spec, &format!("{declaration}# 100%\n")),
+        "porte un `%`",
+    );
+    // Les refus sautes a la mise a jour.
+    let spec_mute = remplacer(&spec, refus, &format!("[ \"$1\" = 2 ] && exit 0\n{refus}"));
+    mord(
+        comptes(&spec_mute, &declaration),
+        "porte une ligne que la recette ne sait pas lire: `[ \"$1\" = 2 ] && exit 0`",
+    );
+    // Un %pre qui change d'interpreteur.
+    let spec_mute = remplacer(&spec, "\n%pre\n", "\n%pre -p <lua>\n");
+    mord(
+        comptes(&spec_mute, &declaration),
+        "`%pre -p <lua>`, une section que la recette ne sait pas lire",
     );
 
     // Un demarrage ajoute au postinst, et sous une forme composee au %post.
@@ -808,6 +1124,14 @@ fn chaque_exigence_mord() {
     );
     let e = ecarts_du_demarrage(&installateur, &postinst, &spec_mute, &prerm, &postrm);
     assert!(e.iter().any(|x| x.contains("%post du spec")), "{e:?}");
+    // Et au %pre, qui tourne avant la pose.
+    let spec_mute = remplacer(
+        &spec,
+        "\n%pre\n",
+        "\n%pre\nsystemctl enable bifrost-daemon.service\n",
+    );
+    let e = ecarts_du_demarrage(&installateur, &postinst, &spec_mute, &prerm, &postrm);
+    assert!(e.iter().any(|x| x.contains("%pre du spec")), "{e:?}");
 
     // Une activation laissee par le postrm, et par le %postun.
     let postrm_mute = remplacer(

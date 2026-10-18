@@ -537,7 +537,12 @@ depuis ce run, pas son auteur.
 Ce que les paquets executent avec les privileges de l'installation est borne et garde. Sous Linux,
 les scripts du mainteneur appliquent `sysusers.d`, refusent des comptes melanges comme
 `install-linux.sh` et rechargent systemd; ils n'activent ni ne demarrent l'unite, et le retrait
-arrete le service, le desactive et retire les filtres du kill switch. Sous Windows, les actions
+arrete le service, le desactive et retire les filtres du kill switch. Le `.rpm` cree les comptes
+et refuse en `%pre`, avant de poser un fichier: rpm n'installe pas un paquet dont le `%pre`
+echoue, alors qu'un `%post` en echec laisse le paquet installe; aucun autre de ses scriptlets ne
+cree ni ne refuse de compte, et sa declaration est lue a la construction dans le fichier que le
+paquet pose, jamais recopiee (`paquets_linux.rs`). Le `.deb` refuse a la configuration, ses
+fichiers deja poses. Sous Windows, les actions
 differees tournent sous LocalSystem: `icacls` pose sur `%ProgramData%\Bifrost` les droits que pose
 `install-windows.ps1` (propriete aux Administrateurs, heritage coupe, SYSTEM et Administrateurs
 seuls, lecture heritable de `resolveur` et ecriture heritable de `resolveur\etat` a LocalService,
@@ -564,6 +569,9 @@ Limites, lues dans le code:
 - Un utilisateur local nomme `Bifrost` fait echouer l'installation du MSI a `--install-service`, ou
   le daemon refuse un compte; `install-windows.ps1` le refuse plus tot.
 - `dnscrypt-proxy` et `wireguard.dll` ne sont dans aucun paquet.
+- Aucun `.rpm` n'est installe, ni par la CI ni ailleurs: son `%pre` n'est garde que par la lecture
+  du spec (`paquets_linux.rs`), et le texte que rpmbuild en tire ne se lit que dans le journal du
+  job `paquets-linux` (`rpm -qp --scripts`).
 
 ### PARTIE 3 - AUDIT EXTERNE
 

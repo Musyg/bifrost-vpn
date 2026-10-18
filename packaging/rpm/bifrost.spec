@@ -13,6 +13,10 @@
 ## des scriptlets qui reproduisent postinst, prerm et postrm, donc ce que fait
 ## packaging/install-linux.sh: memes comptes, memes binaires et memes modes, la
 ## meme unite, le meme hook. Il N'ACTIVE NI NE DEMARRE le service.
+## Une difference d'ordre avec le .deb, voulue: les comptes et leurs refus
+## passent en %%pre, avant la pose des fichiers, parce que rpm arrete
+## l'installation d'un paquet dont le %%pre echoue et pas celle d'un paquet
+## dont le %%post echoue.
 ## crates/bifrost-evasion/tests/paquets_linux.rs garde cette parite.
 
 Name:           bifrost
@@ -35,6 +39,12 @@ Requires:       glibc
 Requires:       libgcc
 Requires:       systemd
 Requires:       nftables
+# Ce que le %%pre appelle avant que le paquet soit pose: systemd-sysusers, id
+# et tr (coreutils), grep. Requires(pre) les fait installer avant lui dans
+# une meme transaction, une image construite d'un coup comprise.
+Requires(pre):  systemd
+Requires(pre):  coreutils
+Requires(pre):  grep
 Requires(post): systemd
 Requires(preun): systemd
 Requires(postun): systemd
@@ -76,15 +86,41 @@ install -D -m 0644 %{pkg_source}/man/bifrost-cli.1 %{buildroot}/usr/share/man/ma
 /usr/share/man/man1/bifrost-daemon.1.gz
 /usr/share/man/man1/bifrost-cli.1.gz
 
-# Miroir de postinst: comptes depuis la declaration, memes refus que
-# l'installateur, daemon-reload. Ni enable ni start. $1 = 1 a l'installation,
-# 2 a la mise a jour: meme traitement.
-%post
+# Miroir de la partie comptes de postinst, AVANT la pose des fichiers: comptes
+# depuis la declaration, memes refus que l'installateur. $1 = 1 a
+# l'installation, 2 a la mise a jour: meme traitement.
+#
+# rpm n'installe pas un paquet dont le %%pre rend un code non nul: rien n'est
+# pose, et une mise a jour laisse la version precedente en place. Un %%post qui
+# echoue laisse au contraire le paquet installe, avec un avertissement
+# (rpm-scriptlets(7), EXIT STATUS).
+#
+# La declaration n'est pas encore sur le disque. rpmbuild lit a la construction
+# le fichier que %%install pose, par %%(cat ...), et le scriptlet le passe a
+# systemd-sysusers sur son entree; --replace le tient pour
+# /usr/lib/sysusers.d/bifrost.conf, si bien qu'une surcharge de
+# l'administrateur sous /etc/sysusers.d garde la priorite. C'est la forme de
+# %%sysusers_create_package de systemd, sans son `|| :`: ici un echec refuse.
+# Le delimiteur est entre apostrophes parce que les commentaires de la
+# declaration portent des mots entre accents graves, que le shell executerait.
+#
+# rpm 4.19 et suivants creent aussi les comptes de lui-meme juste avant ce
+# %%pre, depuis les Provides user() et group() que rpmbuild 4.19 tire d'un
+# fichier sysusers.d. Le .rpm de la CI est construit par le rpmbuild 4.18
+# d'Ubuntu 24.04, qui n'en tire aucun: ce %%pre est donc le seul createur, et
+# la ou rpm cree deja, il ne refait rien.
+%pre
 if ! command -v systemd-sysusers >/dev/null 2>&1; then
   echo "bifrost: systemd-sysusers absent, les comptes ne peuvent pas etre crees depuis /usr/lib/sysusers.d/bifrost.conf" >&2
   exit 1
 fi
-systemd-sysusers /usr/lib/sysusers.d/bifrost.conf
+if ! systemd-sysusers --replace=/usr/lib/sysusers.d/bifrost.conf - <<'DECLARATION_BIFROST'
+%(cat %{pkg_source}/sysusers.d/bifrost.conf)
+DECLARATION_BIFROST
+then
+  echo "bifrost: systemd-sysusers a echoue, les comptes ne sont pas crees" >&2
+  exit 1
+fi
 for compte in bifrost-coeur bifrost-resolveur; do
   if id -nG "$compte" | tr ' ' '\n' | grep -x bifrost >/dev/null; then
     echo "bifrost: REFUS, $compte appartient au groupe bifrost et pourrait piloter le daemon" >&2
@@ -95,6 +131,10 @@ if [ "$(id -u bifrost-coeur)" = "$(id -u bifrost-resolveur)" ]; then
   echo "bifrost: REFUS, bifrost-coeur et bifrost-resolveur partagent un uid" >&2
   exit 1
 fi
+
+# Miroir du reste de postinst: daemon-reload et le message de fin. Ni enable
+# ni start, et plus aucun compte: ils sont crees et controles en %%pre.
+%post
 if [ -d /run/systemd/system ]; then
   systemctl daemon-reload
 fi
