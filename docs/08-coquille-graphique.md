@@ -298,10 +298,20 @@ cette page`), jamais comme un autre.
 - Sous Windows, le bout en bout du groupe d'acces (un membre commande le
   daemon par la coquille et recoit un refus nomme pour toute autre
   commande, un non-membre est refuse, un processus eleve garde tout le
-  canal) n'est mesure que sur le runner jetable de la CI, au run manuel
-  `windows`, face a un `IpcServer` de recette et non au service installe.
-  Aucun lancement reel de la fenetre par un membre du groupe n'est mesure,
-  ni l'identification d'un appelant par le daemon installe en service.
+  canal) est mesure sur le runner jetable de la CI, au run manuel
+  `windows`, face a un `IpcServer` de recette. Face au service installe,
+  il est mesure une fois, le 18/10/2026, dans une machine virtuelle
+  Windows Server 2025 jetable (build 26100): les deux MSI
+  installes, le service demarre a la main, un compte local standard
+  du groupe d'acces, dans sa session interactive ouverte automatiquement,
+  lance la coquille depuis son raccourci, qui dit `deconnecte` et le kill
+  switch `desarme`; sa CLI lit l'etat et fait servir `disconnect`, que le
+  daemon sert au niveau restreint, et une commande hors des trois
+  (`prove routes --politique-daemon`) est refusee par le daemon. Retire du
+  groupe, a la session suivante, le compte est refuse a l'ouverture: la
+  CLI le dit, la coquille rend `compte non admis par le canal`. Non
+  mesures face au service: `connect-stored`, le kill switch arme, le menu
+  du tray, une session de bureau a distance, Windows 10 et 11.
 - Sous Linux, la regle des trois commandes est mesuree par les recettes de
   `bifrost-ipc` (un vrai `IpcServer`; le groupe de la politique est le gid
   effectif de la recette, ou l'un de ses groupes supplementaires), pas par
@@ -320,6 +330,7 @@ cette page`), jamais comme un autre.
   rejoue sur la coquille installee: en root par le job `paquets-gui-linux`,
   en administrateur par le job `paquets-gui-windows` (code 3 et message,
   observes dans une VM Windows Server 2025 jetable). Le lancement non eleve
-  de la coquille installee n'est mesure sous aucun Windows: le runner et
-  cette VM tournent sous le compte administrateur predefini, dont le jeton
-  n'est pas filtre.
+  de la coquille installee est mesure dans cette VM le 18/10/2026, sous un
+  compte local standard cree dans une surcouche jetable (point du groupe
+  d'acces sous Windows, plus haut); le runner, lui, tourne sous le compte
+  administrateur predefini, dont le jeton n'est pas filtre.
