@@ -569,9 +569,12 @@ Limites, lues dans le code:
 - Un utilisateur local nomme `Bifrost` fait echouer l'installation du MSI a `--install-service`, ou
   le daemon refuse un compte; `install-windows.ps1` le refuse plus tot.
 - `dnscrypt-proxy` et `wireguard.dll` ne sont dans aucun paquet.
-- Aucun `.rpm` n'est installe, ni par la CI ni ailleurs: son `%pre` n'est garde que par la lecture
-  du spec (`paquets_linux.rs`), et le texte que rpmbuild en tire ne se lit que dans le journal du
-  job `paquets-linux` (`rpm -qp --scripts`).
+- Le `.rpm` n'est installe que dans des conteneurs Fedora 44 jetables, par dnf, sur le runner du
+  job `paquets-linux` (`scripts/paquets-rpm-conteneur.sh`, image tiree par l'empreinte de son
+  manifeste): son `%pre` y cree les comptes et y refuse les deux melanges sans rien poser, une
+  reinstallation le rejoue, le retrait garde les comptes. systemd n'y tourne pas: le service n'y
+  est jamais demarre et le `%preun` n'y arrete rien. Ni mise a jour depuis une version
+  precedente, ni autre distribution que Fedora 44, ni machine reelle.
 
 ### PARTIE 3 - AUDIT EXTERNE
 

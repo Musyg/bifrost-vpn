@@ -151,12 +151,18 @@
 //! 12. Leurs etapes: chaque commande de `ETAPES_DES_PAQUETS` est, a la
 //!     lettre, le corps entier d'une seule etape de son job, dans cet ordre
 //!     (WiX 5.0.2, et pour le daemon son extension util a la meme version,
-//!     la construction, la verification, l'installation reelle).
+//!     la construction, la verification, pour le .rpm du daemon son
+//!     installation dans des conteneurs Fedora, l'installation reelle).
 //!     `BIFROST_RUNNER_JETABLE` ne se pose que sur l'installation reelle:
 //!     dans sa commande pour un .deb, dans l'`env:` de son etape pour un MSI,
 //!     jamais au niveau du job ni ailleurs. Chaque depot d'artefact
 //!     (`actions/upload-artifact`) porte `retention-days: 7`, et chaque job en
-//!     a au moins un.
+//!     a au moins un. L'etape des conteneurs (`ETAPE_DU_RPM_EN_CONTENEUR`) ne
+//!     porte que `name` et `run`: ni `if`, ni `continue-on-error`, ni `env`,
+//!     qui la sauteraient, la rendraient sans effet sur le run ou changeraient
+//!     ce qu'elle lance; et son job ne porte ni `container` ni `services`,
+//!     ou une image se tirerait par son etiquette (le script ne tire l'image
+//!     Fedora que par son empreinte, `paquets_linux.rs` le garde).
 //!
 //! # La grammaire qu'elle lit
 //!
@@ -2639,6 +2645,7 @@ const ETAPES_DES_PAQUETS: [(&str, bool, &[&str]); 4] = [
         &[
             "cargo build --release --locked -p bifrost-daemon -p bifrost-cli",
             "./scripts/paquets-linux.sh",
+            ETAPE_DU_RPM_EN_CONTENEUR.1,
             "sudo BIFROST_RUNNER_JETABLE=1 ./scripts/paquets-linux-installer.sh",
         ],
     ),
@@ -2675,6 +2682,16 @@ const ETAPES_DES_PAQUETS: [(&str, bool, &[&str]); 4] = [
         ],
     ),
 ];
+
+/// L'etape qui installe le .rpm du daemon dans des conteneurs Fedora (regle
+/// 12): son job, sa commande, et les seules cles qu'elle porte.
+const ETAPE_DU_RPM_EN_CONTENEUR: (&str, &str) =
+    (JOB_PAQUETS_LINUX, "./scripts/paquets-rpm-conteneur.sh");
+const CLES_DE_L_ETAPE_DU_RPM: [&str; 2] = ["name", "run"];
+
+/// Les cles qu'un job des paquets Linux du daemon ne porte pas: elles
+/// tireraient une image par son etiquette.
+const CLES_D_IMAGE_DU_JOB: [&str; 2] = ["container", "services"];
 
 /// Regles 11 et 12, sur le texte d'un workflow: ou tournent les quatre jobs
 /// des paquets, et ce que leurs etapes font. `Err`: un workflow que la
@@ -2799,6 +2816,37 @@ fn defauts_des_jobs_de_paquets(texte_du_workflow: &str) -> Result<Vec<String>, S
             }
         }
 
+        // L'etape des conteneurs: `name` et `run`, rien d'autre; et son job
+        // ne tire aucune image par lui-meme.
+        if id == ETAPE_DU_RPM_EN_CONTENEUR.0 {
+            for e in job
+                .etapes
+                .iter()
+                .filter(|e| e.run.as_deref().unwrap_or("").trim() == ETAPE_DU_RPM_EN_CONTENEUR.1)
+            {
+                let cles: Vec<&str> = e.cles.iter().map(|(_, k, _)| k.as_str()).collect();
+                let mut triees = cles.clone();
+                triees.sort_unstable();
+                if triees != CLES_DE_L_ETAPE_DU_RPM || e.nom.is_empty() {
+                    defauts.push(format!(
+                        "job `{id}`, etape ligne {}: l'installation du .rpm en conteneurs porte \
+                         les cles {cles:?}, attendu {CLES_DE_L_ETAPE_DU_RPM:?} avec un nom",
+                        e.ligne
+                    ));
+                }
+            }
+            for (l, k) in &job.cles {
+                if CLES_D_IMAGE_DU_JOB.contains(&k.as_str()) {
+                    defauts.push(format!(
+                        "job `{id}`, ligne {l}: `{k}:` tirerait une image par son etiquette; \
+                         l'image Fedora ne se tire que par son empreinte, dans \
+                         `{}`",
+                        ETAPE_DU_RPM_EN_CONTENEUR.1
+                    ));
+                }
+            }
+        }
+
         // Les artefacts: au moins un depot, et chacun retenu 7 jours.
         let depots: Vec<&Etape> = job
             .etapes
@@ -2847,7 +2895,43 @@ fn chaque_mutation_des_jobs_de_paquets_rougit() {
     assert!(temoin.is_empty(), "temoin rouge: {temoin:?}");
     let condition_windows = "    if: github.event_name == 'workflow_dispatch' && inputs.windows\n    runs-on: windows-2025-vs2026\n    # Une borne pour un job bloque, pas une duree mesuree sur ce runner.";
     let condition_linux = "    if: github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.windows)\n    runs-on: windows-2025-vs2026\n    # Une borne pour un job bloque, pas une duree mesuree sur ce runner.";
-    let mutations: [(&str, &str, &str, &str); 14] = [
+    let etape_rpm = "      - name: Installation du .rpm dans des conteneurs Fedora\n        run: ./scripts/paquets-rpm-conteneur.sh\n";
+    let etape_installateur = "      # Installation et retrait reels, sur ce runner jetable seulement: la\n      # variable n'est posee que pour cette commande.\n      - name: Installation et retrait reels\n        run: sudo BIFROST_RUNNER_JETABLE=1 ./scripts/paquets-linux-installer.sh\n";
+    let deux_etapes = format!("{etape_rpm}{etape_installateur}");
+    let inversees = format!("{etape_installateur}{etape_rpm}");
+    let avec_continuer = format!("{etape_rpm}        continue-on-error: true\n");
+    let avec_condition = format!("{etape_rpm}        if: false\n");
+    let mutations: [(&str, &str, &str, &str); 19] = [
+        (
+            "le .rpm en conteneurs retire",
+            etape_rpm,
+            "",
+            "job `paquets-linux`: aucune etape n'a pour seul corps `./scripts/paquets-rpm-conteneur.sh`",
+        ),
+        (
+            "le .rpm en conteneurs apres l'installation reelle",
+            &deux_etapes,
+            &inversees,
+            "vient avant une etape qui doit la preceder",
+        ),
+        (
+            "le .rpm en conteneurs sans effet sur le run",
+            etape_rpm,
+            &avec_continuer,
+            "l'installation du .rpm en conteneurs porte les cles",
+        ),
+        (
+            "le .rpm en conteneurs saute",
+            etape_rpm,
+            &avec_condition,
+            "l'installation du .rpm en conteneurs porte les cles",
+        ),
+        (
+            "une image tiree par le job",
+            "    timeout-minutes: 30\n    steps:\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n      # rpm fournit rpmbuild",
+            "    timeout-minutes: 30\n    container: fedora\n    steps:\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n      # rpm fournit rpmbuild",
+            "`container:` tirerait une image par son etiquette",
+        ),
         (
             "le MSI a chaque PR",
             condition_windows,

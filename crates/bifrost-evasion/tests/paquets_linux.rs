@@ -10,7 +10,8 @@
 //! d'un cote, un compte renomme de l'autre, un `systemctl enable` ajoute dans
 //! un script du mainteneur, et chaque chemin reste vert sur la machine qui
 //! l'essaie. Le .deb ne s'installe que sur le runner jetable de la CI, le .rpm
-//! nulle part: cette recette lit les textes, sur chaque hote.
+//! que dans des conteneurs Fedora jetables de ce meme runner: cette recette lit
+//! les textes, sur chaque hote.
 //!
 //! # Ce qu'elle exige
 //!
@@ -64,17 +65,42 @@
 //!    automatique. Les deux gabarits RPM n'ont ni macro nue dans un
 //!    commentaire (rpm la developpe) ni date de changelog au mauvais jour.
 //!
+//! # Le .rpm installe dans des conteneurs Fedora
+//!
+//! `scripts/paquets-rpm-conteneur.sh` installe le .rpm du daemon par dnf, un
+//! conteneur Fedora neuf par cas, sur le runner du job `paquets-linux`
+//! (`audit_planifie.rs` exige l'etape). Le script ne tourne pas sur un hote
+//! d'essai (aucun conteneur sur la flotte): la recette le lit.
+//!
+//! 9. L'image n'est nommee que par l'empreinte de son manifeste
+//!    (`IMAGE_PAR_EMPREINTE` puis 64 chiffres hexadecimaux), en une seule
+//!    affectation; aucune autre ligne ne nomme un registre ou une etiquette.
+//!    Docker ne se lance que par `"${DOCKER[@]}"`, en grammaire fermee: un
+//!    seul tirage, de cette image; un seul lancement, `--rm --pull=never`, de
+//!    cette image, montages en lecture seule ou volume, et aucune autre option.
+//! 10. Les cinq cas de `CAS_DU_CONTENEUR`, chacun lance dans la boucle du
+//!     lancement et aiguille vers sa fonction, qui part d'un conteneur vierge
+//!     et porte ses attentes dans l'ordre (code de dnf, lignes relues, etat);
+//!     les fonctions qui comparent le font a la lettre (`LIGNES_DES_AIDES`),
+//!     la liste du paquet comprise (lue sans les artefacts de rpmbuild). Chaque
+//!     ligne d'une fonction commence par un mot du shell, une affectation, une
+//!     commande de `COMMANDES_DU_CONTENEUR` ou une fonction du script: une aide
+//!     mal nommee ne s'executerait pas, et le cas continuerait sans elle.
+//! 11. Les lignes que le script attend sont celles que les scriptlets du spec
+//!     impriment, et ses poses celles de `%install`, modes compris.
+//!
 //! # Ce qu'elle ne fait pas
 //!
 //! Elle ne construit ni n'installe rien: `scripts/paquets-linux.sh` construit
 //! et verifie le .deb, `scripts/paquets-linux-installer.sh` l'installe et le
-//! retire sur le runner. Elle lit le shell ligne a ligne (commentaires de
+//! retire sur le runner, `scripts/paquets-rpm-conteneur.sh` y installe le
+//! .rpm dans des conteneurs. Elle lit le shell ligne a ligne (commentaires de
 //! ligne entiere et documents en ligne ecartes, continuations jointes,
 //! variables simples resolues); une forme qu'elle ne sait pas lire fait
 //! rougir une de ses exigences au lieu d'etre devinee. Elle lit sur le
 //! disque, sans git.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 fn racine() -> PathBuf {
@@ -2093,5 +2119,799 @@ fn chaque_exigence_de_la_coquille_mord() {
     mord(
         ecarts_du_gabarit_rpm(SPEC_GUI, &spec_mute),
         "Sat au lieu de Sun",
+    );
+}
+
+// ====================== le .rpm du daemon installe dans des conteneurs Fedora
+
+const CONTENEUR: &str = "scripts/paquets-rpm-conteneur.sh";
+
+/// L'image, nommee par l'empreinte de son manifeste: ce prefixe, puis 64
+/// chiffres hexadecimaux minuscules, rien d'autre.
+const IMAGE_PAR_EMPREINTE: &str = "registry.fedoraproject.org/fedora@sha256:";
+
+/// Ce qu'aucune ligne active du script ne porte hors de l'affectation de
+/// `IMAGE_FEDORA`: un registre, une etiquette.
+const REFERENCES_INTERDITES: [&str; 6] = [
+    "registry.fedoraproject.org",
+    "quay.io",
+    "docker.io",
+    "ghcr.io",
+    "fedora:",
+    ":latest",
+];
+
+/// L'appel de Docker, la seule forme admise.
+const APPEL_DOCKER: &str = "\"${DOCKER[@]}\" ";
+
+/// Les sous-commandes de Docker que le script peut lancer. `pull` et `run`
+/// sont lus en plus, mot a mot.
+const SOUS_COMMANDES_DOCKER: [&str; 6] = ["info", "version", "image", "volume", "pull", "run"];
+
+/// Ce que le lancement execute dans le conteneur, apres l'image.
+const COMMANDE_DU_CONTENEUR: &str = "bash /bifrost/paquets-rpm-conteneur.sh --cas \"$cas\"";
+
+/// Les cinq cas, et les lignes exactes que la fonction de chacun porte, dans
+/// cet ordre (d'autres lignes peuvent s'intercaler). Chaque fonction part de
+/// `preconditions_vierges`.
+const CAS_DU_CONTENEUR: [(&str, &[&str]); 5] = [
+    (
+        "installation",
+        &[
+            "transaction 0 install \"$RPM\"",
+            "relue \"$MESSAGE_POST\"",
+            "aucun_refus",
+            "paquet_installe",
+            "fichiers_poses",
+            "comptes_de_la_declaration",
+            "rien_de_demarre",
+        ],
+    ),
+    (
+        "refus-membre",
+        &[
+            "groupadd -r bifrost || echec \"groupadd -r bifrost a echoue\"",
+            "useradd -r -M -d /nonexistent -s /usr/sbin/nologin -G bifrost bifrost-coeur || echec \"useradd bifrost-coeur a echoue\"",
+            "transaction 1 install \"$RPM\"",
+            "relue \"$REFUS_MEMBRE\"",
+            "refus_unique",
+            "absente \"$MESSAGE_POST\"",
+            "paquet_absent",
+            "aucun_fichier_pose",
+        ],
+    ),
+    (
+        "refus-uid",
+        &[
+            "useradd -r -M -d /nonexistent -s /usr/sbin/nologin bifrost-coeur || echec \"useradd bifrost-coeur a echoue\"",
+            "useradd -r -o -u \"$uid\" -M -d /nonexistent -s /usr/sbin/nologin bifrost-resolveur || echec \"useradd bifrost-resolveur a echoue\"",
+            "transaction 1 install \"$RPM\"",
+            "relue \"$REFUS_UID\"",
+            "refus_unique",
+            "absente \"$MESSAGE_POST\"",
+            "paquet_absent",
+            "aucun_fichier_pose",
+        ],
+    ),
+    (
+        "reinstallation",
+        &[
+            "transaction 0 install \"$RPM\"",
+            "avant=\"$(comptes)\"",
+            "transaction 0 reinstall \"$RPM\"",
+            "relue \"$MESSAGE_POST\"",
+            "aucun_refus",
+            "paquet_installe",
+            "comptes_inchanges \"$avant\"",
+            "gpasswd -a bifrost-coeur bifrost >/dev/null || echec \"gpasswd -a bifrost-coeur bifrost a echoue\"",
+            "transaction 1 reinstall \"$RPM\"",
+            "relue \"$REFUS_MEMBRE\"",
+            "refus_unique",
+            "paquet_installe",
+        ],
+    ),
+    (
+        "desinstallation",
+        &[
+            "transaction 0 install \"$RPM\"",
+            "avant=\"$(comptes)\"",
+            "transaction 0 remove bifrost",
+            "relue \"$MESSAGE_COMPTES\"",
+            "absente \"$MESSAGE_ETAT\"",
+            "paquet_absent",
+            "aucun_fichier_pose",
+            "comptes_inchanges \"$avant\"",
+            "transaction 0 install \"$RPM\"",
+            "transaction 0 remove bifrost",
+            "relue \"$MESSAGE_ETAT\"",
+            "relue \"$MESSAGE_COMPTES\"",
+            "comptes_inchanges \"$avant\"",
+        ],
+    ),
+];
+
+/// Les aides qui comparent, et la ligne exacte qui porte leur comparaison: un
+/// `-ge` au lieu de `-eq`, un `!=` au lieu de `=` rendrait une attente lache.
+/// La liste du paquet, lue sans les artefacts de rpmbuild et lue dans chaque
+/// cas. Et le verrou de la forme `--cas`, qui ne tourne que dans un conteneur.
+const LIGNES_DES_AIDES: [(&str, &str); 10] = [
+    (
+        "lire_le_paquet",
+        "lue=\"$(rpm -qlp --noartifact \"$RPM\")\" || echec \"rpm -qlp --noartifact $RPM a echoue\"",
+    ),
+    ("lire_le_paquet", "if [ \"$lue\" = \"$attendue\" ]; then"),
+    ("dans_le_conteneur", "lire_le_paquet"),
+    ("transaction", "if [ \"$code\" -eq \"$attendu\" ]; then"),
+    ("relue", "if [ \"$l\" = \"$attendu\" ]; then"),
+    ("absente", "if [ \"$l\" = \"$interdite\" ]; then"),
+    ("refus_unique", "if [ \"$n\" -eq 1 ]; then"),
+    (
+        "paquet_installe",
+        "if [ \"$code\" -eq 0 ] && [ \"$lu\" = \"$NVRA\" ]; then",
+    ),
+    ("paquet_absent", "if [ \"$code\" -eq 1 ]; then"),
+    (
+        "dans_le_conteneur",
+        "if [ ! -f /.dockerenv ] || [ \"${BIFROST_CONTENEUR_JETABLE:-}\" != \"1\" ]; then",
+    ),
+];
+
+/// Les lignes que le script attend, et ou le spec les imprime: (variable du
+/// script, scriptlet, fragment qui designe l'`echo`). `$compte` vaut
+/// `bifrost-coeur`, le compte que les cas mettent dans le groupe.
+const MESSAGES_DU_SPEC: [(&str, &str, &str); 5] = [
+    ("REFUS_MEMBRE", "%pre", "appartient au groupe"),
+    ("REFUS_UID", "%pre", "partagent un uid"),
+    ("MESSAGE_POST", "%post", "installe."),
+    ("MESSAGE_COMPTES", "%postun", "sont conserves"),
+    ("MESSAGE_ETAT", "%postun", "n'est pas vide"),
+];
+
+/// Les mots du shell qu'une ligne d'une fonction du script peut porter en
+/// tete.
+const MOTS_DU_SHELL: [&str; 20] = [
+    "if", "then", "elif", "else", "fi", "for", "while", "do", "done", "case", "esac", ";;",
+    "local", "shift", "return", "continue", "read", "printf", "echo", "[",
+];
+
+/// Les commandes externes qu'une ligne d'une fonction du script lance en tete,
+/// dans le conteneur. Aucune ne demarre de service.
+const COMMANDES_DU_CONTENEUR: [&str; 7] = [
+    "dnf", "sed", "getent", "groupadd", "useradd", "gpasswd", "mkdir",
+];
+
+/// Les fonctions du script: `nom() {`, sur une ligne ou suivi du corps.
+fn fonctions_du_script(lignes: &[String]) -> BTreeSet<String> {
+    lignes
+        .iter()
+        .filter_map(|l| {
+            let (nom, reste) = l.split_once("()")?;
+            let nomme = !nom.is_empty() && nom.bytes().all(|b| b.is_ascii_lowercase() || b == b'_');
+            (nomme && reste.trim_start().starts_with('{')).then(|| nom.to_string())
+        })
+        .collect()
+}
+
+/// La position de la premiere `)` hors guillemets.
+fn premiere_parenthese_fermante(ligne: &str) -> Option<usize> {
+    let (mut simple, mut double) = (false, false);
+    for (i, c) in ligne.char_indices() {
+        match c {
+            '\'' if !double => simple = !simple,
+            '"' if !simple => double = !double,
+            ')' if !simple && !double => return Some(i),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Le mot qu'une ligne de fonction execute en tete, ou rien: une affectation,
+/// un motif de `case` seul sur sa ligne. Une branche `motif) commande ;;`
+/// rend le premier mot de sa commande.
+fn commande_en_tete(ligne: &str) -> Option<&str> {
+    let mut l = ligne;
+    if l.ends_with(";;") && l != ";;" {
+        let fin = premiere_parenthese_fermante(l)?;
+        l = l[fin + 1..].trim_end_matches(";;").trim();
+    }
+    let mot = l.split_whitespace().next()?;
+    let affectation = mot.split_once('=').is_some_and(|(nom, _)| {
+        let nom = nom.strip_suffix('+').unwrap_or(nom);
+        !nom.is_empty() && nom.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    });
+    let motif_seul = l.ends_with(')') && premiere_parenthese_fermante(l) == Some(l.len() - 1);
+    (!affectation && !motif_seul).then_some(mot)
+}
+
+/// Le corps de la fonction shell `nom`, de `nom() {` a la premiere ligne `}`.
+fn corps_de_fonction(lignes: &[String], nom: &str) -> Option<Vec<String>> {
+    let entete = format!("{nom}() {{");
+    let debut = lignes.iter().position(|l| *l == entete)?;
+    let corps: Vec<String> = lignes[debut + 1..]
+        .iter()
+        .take_while(|l| l.as_str() != "}")
+        .cloned()
+        .collect();
+    (debut + 1 + corps.len() < lignes.len()).then_some(corps)
+}
+
+/// Le texte des `echo "..."` d'un scriptlet du spec qui portent `fragment`.
+fn messages_du_scriptlet(spec: &str, scriptlet: &str, fragment: &str) -> Vec<String> {
+    lignes_de_section(spec, scriptlet)
+        .iter()
+        .filter(|l| l.starts_with("echo \"") && l.contains(fragment))
+        .filter_map(|l| {
+            let debut = l.find('"')?;
+            let fin = l.rfind('"')?;
+            (fin > debut).then(|| l[debut + 1..fin].to_string())
+        })
+        .collect()
+}
+
+/// Le lancement d'un conteneur, `run` et ce qui le suit sur la ligne, en
+/// grammaire fermee: `--rm`, `--pull=never`, `--env X`, `--mount X` (lien en
+/// lecture seule ou volume) avant l'image, l'image par sa variable, puis
+/// `COMMANDE_DU_CONTENEUR`.
+fn ecarts_du_lancement(apres_run: &str) -> Vec<String> {
+    let mut ecarts = Vec::new();
+    let mots: Vec<&str> = apres_run.split_whitespace().collect();
+    let (mut retire, mut sans_tirage, mut verrou) = (false, false, false);
+    let mut k = 1usize;
+    while k < mots.len() && mots[k] != "\"$IMAGE_FEDORA\"" {
+        match mots[k] {
+            "--rm" => retire = true,
+            "--pull=never" => sans_tirage = true,
+            "--env" => {
+                verrou |= mots.get(k + 1) == Some(&"BIFROST_CONTENEUR_JETABLE=1");
+                k += 1;
+            }
+            "--mount" => {
+                let m = mots.get(k + 1).copied().unwrap_or("");
+                let lu = (m.starts_with("\"type=bind,") && m.ends_with(",readonly\""))
+                    || m.starts_with("\"type=volume,");
+                if !lu {
+                    ecarts.push(format!(
+                        "{CONTENEUR}: montage que la recette ne sait pas lire (lien en lecture \
+                         seule ou volume attendus): `{m}`"
+                    ));
+                }
+                k += 1;
+            }
+            autre => ecarts.push(format!(
+                "{CONTENEUR}: option du lancement que la recette ne sait pas lire: `{autre}`"
+            )),
+        }
+        k += 1;
+    }
+    if k >= mots.len() {
+        ecarts.push(format!(
+            "{CONTENEUR}: le lancement ne nomme pas l'image par \"$IMAGE_FEDORA\": `{apres_run}`"
+        ));
+    } else if mots[k + 1..].join(" ") != COMMANDE_DU_CONTENEUR {
+        ecarts.push(format!(
+            "{CONTENEUR}: le conteneur execute `{}`, attendu `{COMMANDE_DU_CONTENEUR}`",
+            mots[k + 1..].join(" ")
+        ));
+    }
+    for (vu, quoi) in [
+        (retire, "`--rm`"),
+        (sans_tirage, "`--pull=never`"),
+        (verrou, "`--env BIFROST_CONTENEUR_JETABLE=1`"),
+    ] {
+        if !vu {
+            ecarts.push(format!("{CONTENEUR}: lancement sans {quoi}"));
+        }
+    }
+    ecarts
+}
+
+fn ecarts_du_conteneur(script: &str, spec: &str) -> Vec<String> {
+    let mut ecarts = Vec::new();
+    let lignes = lignes_shell(script);
+    let vars = affectations(&lignes, &[]);
+
+    // 9. L'image par empreinte exacte, et rien d'autre ne nomme une image.
+    let images: Vec<&String> = lignes
+        .iter()
+        .filter(|l| l.starts_with("IMAGE_FEDORA="))
+        .collect();
+    match images.as_slice() {
+        [l] => {
+            let empreinte = l
+                .strip_prefix("IMAGE_FEDORA=\"")
+                .and_then(|v| v.strip_suffix('"'))
+                .and_then(|v| v.strip_prefix(IMAGE_PAR_EMPREINTE));
+            let exacte = empreinte.is_some_and(|e| {
+                e.len() == 64
+                    && e.bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            });
+            if !exacte {
+                ecarts.push(format!(
+                    "{CONTENEUR}: `{l}`: l'image n'est pas nommee par `{IMAGE_PAR_EMPREINTE}` \
+                     suivi de 64 chiffres hexadecimaux, entre guillemets doubles"
+                ));
+            }
+        }
+        autres => ecarts.push(format!(
+            "{CONTENEUR}: {} affectation(s) de IMAGE_FEDORA, attendu une",
+            autres.len()
+        )),
+    }
+    let mut tirages = 0usize;
+    let mut lancements = Vec::new();
+    for (i, l) in lignes.iter().enumerate() {
+        if l.starts_with("IMAGE_FEDORA=") {
+            continue;
+        }
+        for interdite in REFERENCES_INTERDITES {
+            if l.contains(interdite) {
+                ecarts.push(format!(
+                    "{CONTENEUR} nomme une image hors de IMAGE_FEDORA (`{interdite}`): `{l}`"
+                ));
+            }
+        }
+        if !l.starts_with("command -v docker ")
+            && l.split_whitespace()
+                .any(|m| ["docker", "podman", "nerdctl"].contains(&m))
+        {
+            ecarts.push(format!(
+                "{CONTENEUR} lance un moteur de conteneurs hors de `{}`: `{l}`",
+                APPEL_DOCKER.trim_end()
+            ));
+        }
+        let mut reste = l.as_str();
+        while let Some(p) = reste.find(APPEL_DOCKER) {
+            let apres = &reste[p + APPEL_DOCKER.len()..];
+            let sous = apres.split_whitespace().next().unwrap_or("");
+            if !SOUS_COMMANDES_DOCKER.contains(&sous) {
+                ecarts.push(format!(
+                    "{CONTENEUR}: sous-commande de Docker que la recette ne sait pas lire: `{l}`"
+                ));
+            }
+            if sous == "pull" {
+                tirages += 1;
+                let argument = apres["pull".len()..].trim_start();
+                let nom = argument.split(';').next().unwrap_or("").trim_end();
+                if nom != "\"$IMAGE_FEDORA\"" {
+                    ecarts.push(format!(
+                        "{CONTENEUR}: un tirage d'autre chose que \"$IMAGE_FEDORA\": `{l}`"
+                    ));
+                }
+            }
+            if sous == "run" {
+                lancements.push(i);
+                ecarts.extend(ecarts_du_lancement(apres));
+            }
+            reste = apres;
+        }
+    }
+    if tirages != 1 {
+        ecarts.push(format!(
+            "{CONTENEUR}: {tirages} tirage(s) d'image, attendu un"
+        ));
+    }
+
+    // 10. Les cas: la boucle qui les lance, le lancement dedans, l'aiguillage
+    // vers chaque fonction, ses attentes dans l'ordre.
+    let noms: Vec<&str> = CAS_DU_CONTENEUR.iter().map(|(c, _)| *c).collect();
+    let boucle = format!("for cas in {}; do", noms.join(" "));
+    let debuts: Vec<usize> = lignes
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| **l == boucle)
+        .map(|(i, _)| i)
+        .collect();
+    match (debuts.as_slice(), lancements.as_slice()) {
+        ([d], [r]) => {
+            let fin = lignes[*d..].iter().position(|l| l == "done").map(|p| p + d);
+            if !fin.is_some_and(|f| d < r && r < &f) {
+                ecarts.push(format!(
+                    "{CONTENEUR}: le lancement n'est pas dans la boucle `{boucle}`"
+                ));
+            }
+        }
+        (b, r) => ecarts.push(format!(
+            "{CONTENEUR}: {} boucle(s) `{boucle}` et {} lancement(s), attendu un de chaque",
+            b.len(),
+            r.len()
+        )),
+    }
+    for (cas, attendues) in CAS_DU_CONTENEUR {
+        let fonction = format!("cas_{}", cas.replace('-', "_"));
+        let aiguillage = format!("{cas}) {fonction} ;;");
+        let n = lignes.iter().filter(|l| **l == aiguillage).count();
+        if n != 1 {
+            ecarts.push(format!("{CONTENEUR}: `{aiguillage}` {n} fois, attendu une"));
+        }
+        let Some(corps) = corps_de_fonction(&lignes, &fonction) else {
+            ecarts.push(format!("{CONTENEUR}: fonction `{fonction}` absente"));
+            continue;
+        };
+        let premiere = corps
+            .iter()
+            .find(|l| !l.starts_with("local "))
+            .map(String::as_str);
+        if premiere != Some("preconditions_vierges") {
+            ecarts.push(format!(
+                "{CONTENEUR}: cas {cas}: `{fonction}` ne part pas de `preconditions_vierges`"
+            ));
+        }
+        let mut suite = corps.iter();
+        for attendue in attendues {
+            if !suite.any(|l| l.as_str() == *attendue) {
+                ecarts.push(format!(
+                    "{CONTENEUR}: cas {cas}: la fonction `{fonction}` ne porte pas `{attendue}` \
+                     a sa place"
+                ));
+                break;
+            }
+        }
+    }
+    for (aide, ligne) in LIGNES_DES_AIDES {
+        let porte = corps_de_fonction(&lignes, aide).is_some_and(|c| c.iter().any(|l| l == ligne));
+        if !porte {
+            ecarts.push(format!(
+                "{CONTENEUR}: l'aide `{aide}` ne porte pas sa comparaison exacte `{ligne}`"
+            ));
+        }
+    }
+    let fonctions = fonctions_du_script(&lignes);
+    for fonction in &fonctions {
+        let Some(corps) = corps_de_fonction(&lignes, fonction) else {
+            continue;
+        };
+        for l in &corps {
+            let Some(mot) = commande_en_tete(l) else {
+                continue;
+            };
+            if !MOTS_DU_SHELL.contains(&mot)
+                && !COMMANDES_DU_CONTENEUR.contains(&mot)
+                && !fonctions.contains(mot)
+            {
+                ecarts.push(format!(
+                    "{CONTENEUR}: `{fonction}` appelle `{mot}`, ni mot du shell, ni commande \
+                     admise, ni fonction du script: `{l}`"
+                ));
+            }
+        }
+    }
+
+    // 11. Les lignes attendues sont celles du spec, les poses celles de
+    // %install.
+    for (variable, scriptlet, fragment) in MESSAGES_DU_SPEC {
+        let dans_le_spec = messages_du_scriptlet(spec, scriptlet, fragment);
+        let attendu = match dans_le_spec.as_slice() {
+            [m] => m.replace("$compte", "bifrost-coeur"),
+            autres => {
+                ecarts.push(format!(
+                    "le {scriptlet} du spec porte {} echo avec `{fragment}`, attendu un",
+                    autres.len()
+                ));
+                continue;
+            }
+        };
+        match vars.get(variable) {
+            Some(v) if *v == attendu => {}
+            autre => ecarts.push(format!(
+                "{CONTENEUR}: {variable} vaut {autre:?}, le {scriptlet} du spec imprime `{attendu}`"
+            )),
+        }
+    }
+    let debut = lignes.iter().position(|l| l == "POSES=(");
+    let mut poses_du_script = BTreeMap::new();
+    match debut {
+        Some(d) => {
+            for l in lignes[d + 1..].iter().take_while(|l| l.as_str() != ")") {
+                let entree = l.strip_prefix('"').and_then(|v| v.strip_suffix('"'));
+                match entree.and_then(|e| e.split_once(' ')) {
+                    Some((mode, chemin)) => {
+                        poses_du_script.insert(chemin.to_string(), mode.to_string());
+                    }
+                    None => ecarts.push(format!(
+                        "{CONTENEUR}: entree de POSES que la recette ne sait pas lire: `{l}`"
+                    )),
+                }
+            }
+        }
+        None => ecarts.push(format!("{CONTENEUR}: aucune ligne `POSES=(`")),
+    }
+    // Les modes de %install, aux chemins que %files declare: une page de
+    // manuel posee non compressee y est recomprimee par brp-compress.
+    let poses_du_spec: BTreeMap<String, String> = poses_du_rpm(spec)
+        .into_iter()
+        .map(|(destination, (mode, _))| {
+            let posee =
+                if destination.starts_with("/usr/share/man/") && !destination.ends_with(".gz") {
+                    format!("{destination}.gz")
+                } else {
+                    destination
+                };
+            (posee, mode.trim_start_matches('0').to_string())
+        })
+        .collect();
+    let declares: Vec<String> = lignes_de_section(spec, "%files")
+        .iter()
+        .map(|l| {
+            let l = l.strip_prefix("%license ").unwrap_or(l);
+            match l.strip_prefix("%attr(").and_then(|r| r.split_once(") ")) {
+                Some((_, chemin)) => chemin.to_string(),
+                None => l.to_string(),
+            }
+        })
+        .collect();
+    let poses_declarees: Vec<String> = poses_du_spec.keys().cloned().collect();
+    let mut declares_tries = declares.clone();
+    declares_tries.sort();
+    if declares_tries != poses_declarees {
+        ecarts.push(format!(
+            "le spec: %files declare {declares_tries:?}, %install pose {poses_declarees:?}"
+        ));
+    }
+    if poses_du_script != poses_du_spec {
+        ecarts.push(format!(
+            "{CONTENEUR}: POSES {poses_du_script:?}, %install du spec {poses_du_spec:?}"
+        ));
+    }
+    ecarts
+}
+
+#[test]
+fn le_rpm_s_installe_dans_des_conteneurs_fedora_epingles() {
+    let ecarts = ecarts_du_conteneur(&lire(CONTENEUR), &lire(SPEC));
+    assert!(
+        ecarts.is_empty(),
+        "{} ecart(s):\n  {}",
+        ecarts.len(),
+        ecarts.join("\n  ")
+    );
+}
+
+/// Chaque exigence du conteneur mord sur une mutation du script ou du spec
+/// reels.
+#[test]
+fn chaque_exigence_du_conteneur_mord() {
+    let script = lire(CONTENEUR);
+    let spec = lire(SPEC);
+    assert!(ecarts_du_conteneur(&script, &spec).is_empty());
+    let remplacer = |texte: &str, avant: &str, apres: &str| -> String {
+        assert_eq!(
+            texte.matches(avant).count(),
+            1,
+            "`{avant}` doit etre unique"
+        );
+        texte.replacen(avant, apres, 1)
+    };
+    let mord = |script: &str, spec: &str, motif: &str| {
+        let e = ecarts_du_conteneur(script, spec);
+        assert!(
+            e.iter().any(|x| x.contains(motif)),
+            "`{motif}` attendu dans {e:?}"
+        );
+    };
+    let image = script
+        .lines()
+        .find(|l| l.starts_with("IMAGE_FEDORA="))
+        .expect("IMAGE_FEDORA")
+        .to_string();
+    let tirage = "if ! \"${DOCKER[@]}\" pull \"$IMAGE_FEDORA\"; then\n";
+    let lancement = "  \"${DOCKER[@]}\" run --rm --pull=never \\\n";
+
+    // L'image par son etiquette, puis par une empreinte tronquee.
+    mord(
+        &remplacer(
+            &script,
+            &image,
+            "IMAGE_FEDORA=\"registry.fedoraproject.org/fedora:44\"",
+        ),
+        &spec,
+        "l'image n'est pas nommee par",
+    );
+    mord(
+        &remplacer(&script, &image, &image.replacen("10667e", "", 1)),
+        &spec,
+        "l'image n'est pas nommee par",
+    );
+    // Un second tirage, par etiquette; un moteur lance hors du tableau.
+    let script_mute = remplacer(
+        &script,
+        tirage,
+        &format!("\"${{DOCKER[@]}}\" pull fedora:44\n{tirage}"),
+    );
+    mord(&script_mute, &spec, "nomme une image hors de IMAGE_FEDORA");
+    mord(&script_mute, &spec, "2 tirage(s) d'image");
+    mord(
+        &remplacer(
+            &script,
+            tirage,
+            &format!("docker pull \"$IMAGE_FEDORA\"\n{tirage}"),
+        ),
+        &spec,
+        "lance un moteur de conteneurs hors de",
+    );
+    // Un lancement qui tirerait, qui resterait, qui aurait des privileges, un
+    // montage en ecriture.
+    mord(
+        &remplacer(&script, lancement, "  \"${DOCKER[@]}\" run --rm \\\n"),
+        &spec,
+        "lancement sans `--pull=never`",
+    );
+    mord(
+        &remplacer(
+            &script,
+            lancement,
+            "  \"${DOCKER[@]}\" run --pull=never \\\n",
+        ),
+        &spec,
+        "lancement sans `--rm`",
+    );
+    mord(
+        &remplacer(
+            &script,
+            lancement,
+            "  \"${DOCKER[@]}\" run --rm --pull=never --privileged \\\n",
+        ),
+        &spec,
+        "option du lancement que la recette ne sait pas lire: `--privileged`",
+    );
+    mord(
+        &remplacer(
+            &script,
+            "dst=/bifrost/packaging,readonly\"",
+            "dst=/bifrost/packaging\"",
+        ),
+        &spec,
+        "montage que la recette ne sait pas lire",
+    );
+    mord(
+        &remplacer(&script, "    --env BIFROST_CONTENEUR_JETABLE=1 \\\n", ""),
+        &spec,
+        "lancement sans `--env BIFROST_CONTENEUR_JETABLE=1`",
+    );
+    // Un cas retire de la boucle, un cas aiguille ailleurs.
+    mord(
+        &remplacer(
+            &script,
+            "for cas in installation refus-membre refus-uid reinstallation desinstallation; do",
+            "for cas in installation refus-membre reinstallation desinstallation; do",
+        ),
+        &spec,
+        "boucle(s) `for cas in installation refus-membre refus-uid",
+    );
+    mord(
+        &remplacer(
+            &script,
+            "refus-uid) cas_refus_uid ;;",
+            "refus-uid) cas_refus_membre ;;",
+        ),
+        &spec,
+        "`refus-uid) cas_refus_uid ;;` 0 fois",
+    );
+    // Un refus attendu comme une installation acceptee; un refus que l'on ne
+    // relit plus; une reinstallation que l'on ne refuse plus.
+    mord(
+        &remplacer(
+            &script,
+            "  transaction 1 install \"$RPM\"\n  relue \"$REFUS_MEMBRE\"\n",
+            "  transaction 0 install \"$RPM\"\n  relue \"$REFUS_MEMBRE\"\n",
+        ),
+        &spec,
+        "cas refus-membre: la fonction `cas_refus_membre` ne porte pas `transaction 1 install",
+    );
+    mord(
+        &remplacer(&script, "  relue \"$REFUS_UID\"\n", ""),
+        &spec,
+        "cas refus-uid: la fonction `cas_refus_uid` ne porte pas `relue \"$REFUS_UID\"`",
+    );
+    mord(
+        &remplacer(&script, "  transaction 1 reinstall \"$RPM\"\n", ""),
+        &spec,
+        "cas reinstallation",
+    );
+    mord(
+        &remplacer(
+            &script,
+            "cas_installation() {\n  preconditions_vierges\n",
+            "cas_installation() {\n",
+        ),
+        &spec,
+        "ne part pas de `preconditions_vierges`",
+    );
+    // Une comparaison lache, un verrou retire.
+    mord(
+        &remplacer(
+            &script,
+            "  if [ \"$code\" -eq \"$attendu\" ]; then\n",
+            "  if [ \"$code\" -ge \"$attendu\" ]; then\n",
+        ),
+        &spec,
+        "l'aide `transaction` ne porte pas sa comparaison exacte",
+    );
+    mord(
+        &remplacer(
+            &script,
+            "  if [ ! -f /.dockerenv ] || [ \"${BIFROST_CONTENEUR_JETABLE:-}\" != \"1\" ]; then\n",
+            "  if [ \"${BIFROST_CONTENEUR_JETABLE:-}\" != \"1\" ]; then\n",
+        ),
+        &spec,
+        "l'aide `dans_le_conteneur` ne porte pas",
+    );
+    // Le spec change un message, ou une pose, sans le script.
+    mord(
+        &script,
+        &remplacer(
+            &spec,
+            "et pourrait piloter le daemon",
+            "et piloterait le daemon",
+        ),
+        "REFUS_MEMBRE vaut",
+    );
+    mord(
+        &script,
+        &remplacer(&spec, "sont conserves\"", "restent\""),
+        "le %postun du spec porte 0 echo avec `sont conserves`",
+    );
+    mord(
+        &remplacer(
+            &script,
+            "  \"755 /usr/lib/systemd/system-sleep/bifrost-reprise\"\n",
+            "  \"644 /usr/lib/systemd/system-sleep/bifrost-reprise\"\n",
+        ),
+        &spec,
+        "POSES",
+    );
+    mord(
+        &script,
+        &remplacer(&spec, "\n/usr/bin/bifrost-cli\n", "\n"),
+        "%files declare",
+    );
+    // Une aide mal nommee dans un cas, dans une aide; une commande hors de la
+    // liste (un service demarre).
+    mord(
+        &remplacer(
+            &script,
+            "  aucun_refus\n  paquet_installe\n  comptes_inchanges",
+            "  refus_unique_absent\n  paquet_installe\n  comptes_inchanges",
+        ),
+        &spec,
+        "`cas_reinstallation` appelle `refus_unique_absent`",
+    );
+    mord(
+        &remplacer(
+            &script,
+            "    ok \"rpm -qa bifrost: vide\"\n",
+            "    okk \"rpm -qa bifrost: vide\"\n",
+        ),
+        &spec,
+        "`paquet_absent` appelle `okk`",
+    );
+    mord(
+        &remplacer(
+            &script,
+            "  comptes_de_la_declaration\n  rien_de_demarre\n",
+            "  comptes_de_la_declaration\n  systemctl start bifrost-daemon.service\n  rien_de_demarre\n",
+        ),
+        &spec,
+        "`cas_installation` appelle `systemctl`",
+    );
+    // La liste du paquet lue avec ses artefacts, ou plus lue du tout.
+    mord(
+        &remplacer(
+            &script,
+            "lue=\"$(rpm -qlp --noartifact \"$RPM\")\"",
+            "lue=\"$(rpm -qlp \"$RPM\")\"",
+        ),
+        &spec,
+        "l'aide `lire_le_paquet` ne porte pas",
+    );
+    mord(
+        &remplacer(
+            &script,
+            "  lire_declaration\n  lire_le_paquet\n",
+            "  lire_declaration\n",
+        ),
+        &spec,
+        "l'aide `dans_le_conteneur` ne porte pas sa comparaison exacte `lire_le_paquet`",
     );
 }

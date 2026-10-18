@@ -375,6 +375,12 @@ jobs:
       # Sans root: fakeroot suffit.
       - name: Construction et verification des paquets
         run: ./scripts/paquets-linux.sh
+      # Le .rpm installe pour de vrai par dnf, un conteneur Fedora neuf par
+      # cas: installation, deux refus du %pre, reinstallation, desinstallation.
+      # L'image est tiree par son empreinte, jamais par une etiquette; rien ne
+      # change hors des conteneurs. `paquets_linux.rs` garde le script.
+      - name: Installation du .rpm dans des conteneurs Fedora
+        run: ./scripts/paquets-rpm-conteneur.sh
       # Installation et retrait reels, sur ce runner jetable seulement: la
       # variable n'est posee que pour cette commande.
       - name: Installation et retrait reels

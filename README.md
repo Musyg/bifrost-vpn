@@ -509,8 +509,9 @@ MATCH n'est pas une preuve d'etancheite du VPN. Voir
 Les PR et les push sur `main` lancent les controles Linux, la coquille
 graphique sous Linux (format, compilation, clippy, recettes), les paquets
 Linux du daemon et ceux de la coquille (`.deb` et `.rpm` fabriques et
-verifies, le `.deb` installe puis retire sur le runner jetable, la coquille
-lancee une fois installee), la suite de fuite, l'audit des dependances et le
+verifies, le `.deb` installe puis retire sur le runner jetable, le `.rpm` du
+daemon installe, refuse, reinstalle et retire dans des conteneurs Fedora sur
+ce runner, la coquille lancee une fois installee), la suite de fuite, l'audit des dependances et le
 fuzzing des parseurs (graines rejouees, puis 30 secondes par cible). Chaque
 jour a 04:37 UTC, un run planifie ne lance
 que l'audit des dependances (`cargo audit`, `cargo deny`, `cargo vet`) sur le
@@ -562,7 +563,8 @@ droits de `%ProgramData%\Bifrost`, ligne du service relue dans le registre),
 repare, puis desinstalle, avec et sans resolveur depose; les journaux de
 `msiexec` sont gardes 7 jours a cote du MSI. Le job `paquets-linux` le porte a
 l'etape qui installe le `.deb`, rejoue le refus des comptes melanges, puis le
-retire et le purge. Les jobs de la coquille le portent a leur seule etape
+retire et le purge; son etape des conteneurs ne le porte pas, le `.rpm` du
+daemon n'y etant installe que dans des conteneurs Fedora jetables. Les jobs de la coquille le portent a leur seule etape
 d'installation: `paquets-gui-linux` installe son `.deb`, la lance en root
 (refus attendu) puis sous l'utilisateur du runner sur un serveur X virtuel,
 et la retire; `paquets-gui-windows` installe son MSI, la lance elevee (refus
@@ -582,6 +584,7 @@ sudo ./scripts/e2e-linux.sh target/debug --unite packaging/systemd/bifrost-daemo
 sudo ./scripts/check-strict.sh         # exige que les dix vecteurs soient PASSED
 sudo ./scripts/packaging-linux.sh      # l'installateur Linux, dans une racine jetable
 ./scripts/paquets-linux.sh             # .deb et .rpm depuis target/release, verifies, rien d'installe
+./scripts/paquets-rpm-conteneur.sh     # le .rpm de target/paquets installe dans des conteneurs Fedora (Docker)
 ./scripts/paquets-gui-linux.sh         # .deb et .rpm de la coquille (gui/target/release), verifies, rien d'installe
 ./scripts/resolveur-linux.sh           # configuration du resolveur chiffre et liste anti-telemetrie
 sudo ./scripts/resolveur-systemd-linux.sh   # le resolveur sous l'unite reelle
