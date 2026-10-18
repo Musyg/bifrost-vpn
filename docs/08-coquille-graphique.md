@@ -324,9 +324,23 @@ cette page`), jamais comme un autre.
   daemon sert au niveau restreint, et une commande hors des trois
   (`prove routes --politique-daemon`) est refusee par le daemon. Retire du
   groupe, a la session suivante, le compte est refuse a l'ouverture: la
-  CLI le dit, la coquille rend `compte non admis par le canal`. Non
-  mesures face au service: `connect-stored`, le kill switch arme, le menu
-  du tray, une session de bureau a distance, Windows 10 et 11.
+  CLI le dit, la coquille rend `compte non admis par le canal`. Mesure de
+  nouveau le 18/10/2026, dans une nouvelle VM jetable de meme sorte: la
+  coquille lancee depuis son raccourci par un compte standard du groupe
+  d'acces tourne sous un jeton non eleve (integrite moyenne, SID du
+  compte, groupe d'acces actif); la fenetre rend `deconnecte` et le kill
+  switch `desarme`, rien en vert, `Connecter` actif et `Deconnecter`
+  inactif, et le menu du tray `Etat: deconnecte` (entree inactive),
+  `Connecter` actif, `Deconnecter` inactif, `Afficher` et `Quitter`
+  actifs. Le daemon ne journalise pas les lectures d'etat de la coquille
+  au niveau par defaut; au niveau debug de `bifrost_ipc`, il ecrit une
+  ligne par connexion, au PID de la coquille, toutes les 2 secondes.
+  Hors du groupe, la coquille rend `compte non admis par le canal`, ses
+  deux boutons et les entrees `Connecter` et `Deconnecter` du tray sont
+  inactifs, rien en vert, et le daemon ne journalise rien du refus, fait
+  a l'ouverture du canal. Non mesures face au service: `connect-stored`,
+  le kill switch arme, une session de bureau a distance, Windows 10 et
+  11.
 - Sous Linux, la regle des trois commandes est mesuree par les recettes de
   `bifrost-ipc` (un vrai `IpcServer`; le groupe de la politique est le gid
   effectif de la recette, ou l'un de ses groupes supplementaires), pas par
