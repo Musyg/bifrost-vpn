@@ -963,7 +963,10 @@ struct Args {
     #[arg(long, value_name = "SECONDES", default_value_t = 60)]
     reprise_secondes: u64,
 
-    /// Enregistre le daemon comme service Windows a demarrage automatique.
+    /// Enregistre le daemon comme service Windows a demarrage automatique. Un
+    /// service deja enregistre est mis a jour en place (ligne, dependances,
+    /// compte, description, actions sur echec, type de SID), sans changer son
+    /// type de demarrage.
     #[cfg(windows)]
     #[arg(long)]
     install_service: bool,

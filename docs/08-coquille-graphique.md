@@ -294,7 +294,14 @@ cette page`), jamais comme un autre.
   et `scripts/paquets-gui-windows.ps1` les assemblent depuis le binaire
   construit (`cargo build --release --manifest-path gui/Cargo.toml`) et les
   icones de `bifrost-icone`. Le .deb et le .rpm ne sont fabriques, et le .deb
-  installe, que par la CI.
+  installe, que par la CI. La mise a niveau du MSI d'une version a la
+  suivante est mesuree une fois, le 18/10/2026, dans une machine virtuelle
+  Windows Server 2025 jetable (0.1.0 vers 0.1.1, deux MSI construits de la
+  meme revision, installation silencieuse, coquille fermee): une seule
+  entree de programmes, a la nouvelle version, l'executable neuf et le
+  raccourci du menu; la reparation les garde; poser l'ancienne version
+  par-dessus est refuse (code 1603). La mise a niveau avec la coquille
+  ouverte n'est pas mesuree.
 - Sous Windows, le bout en bout du groupe d'acces (un membre commande le
   daemon par la coquille et recoit un refus nomme pour toute autre
   commande, un non-membre est refuse, un processus eleve garde tout le

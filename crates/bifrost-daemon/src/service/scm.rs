@@ -67,19 +67,21 @@ use std::sync::{Mutex, OnceLock};
 use anyhow::{Context, anyhow, bail};
 use tokio::sync::watch;
 use windows_sys::Win32::Foundation::{
-    ERROR_SERVICE_DOES_NOT_EXIST, ERROR_SERVICE_EXISTS, GetLastError,
+    ERROR_SERVICE_DOES_NOT_EXIST, ERROR_SERVICE_EXISTS, ERROR_SERVICE_MARKED_FOR_DELETE,
+    GetLastError,
 };
 use windows_sys::Win32::System::Services::{
-    ChangeServiceConfig2W, CloseServiceHandle, CreateServiceW, DeleteService, OpenSCManagerW,
-    OpenServiceW, QueryServiceConfig2W, RegisterServiceCtrlHandlerExW, SC_ACTION,
+    ChangeServiceConfig2W, ChangeServiceConfigW, CloseServiceHandle, CreateServiceW, DeleteService,
+    OpenSCManagerW, OpenServiceW, QueryServiceConfig2W, RegisterServiceCtrlHandlerExW, SC_ACTION,
     SC_ACTION_RESTART, SC_HANDLE, SC_MANAGER_CONNECT, SC_MANAGER_CREATE_SERVICE,
     SERVICE_ACCEPT_SHUTDOWN, SERVICE_ACCEPT_STOP, SERVICE_ALL_ACCESS, SERVICE_AUTO_START,
     SERVICE_CONFIG_DESCRIPTION, SERVICE_CONFIG_FAILURE_ACTIONS, SERVICE_CONFIG_SERVICE_SID_INFO,
     SERVICE_CONTROL_SHUTDOWN, SERVICE_CONTROL_STOP, SERVICE_DEMAND_START, SERVICE_DESCRIPTIONW,
-    SERVICE_DISABLED, SERVICE_ERROR_NORMAL, SERVICE_FAILURE_ACTIONSW, SERVICE_QUERY_CONFIG,
-    SERVICE_RUNNING, SERVICE_SID_INFO, SERVICE_SID_TYPE_UNRESTRICTED, SERVICE_START_PENDING,
-    SERVICE_STATUS, SERVICE_STATUS_HANDLE, SERVICE_STOP_PENDING, SERVICE_STOPPED,
-    SERVICE_TABLE_ENTRYW, SERVICE_WIN32_OWN_PROCESS, SetServiceStatus, StartServiceCtrlDispatcherW,
+    SERVICE_DISABLED, SERVICE_ERROR_NORMAL, SERVICE_FAILURE_ACTIONSW, SERVICE_NO_CHANGE,
+    SERVICE_QUERY_CONFIG, SERVICE_RUNNING, SERVICE_SID_INFO, SERVICE_SID_TYPE_UNRESTRICTED,
+    SERVICE_START_PENDING, SERVICE_STATUS, SERVICE_STATUS_HANDLE, SERVICE_STOP_PENDING,
+    SERVICE_STOPPED, SERVICE_TABLE_ENTRYW, SERVICE_WIN32_OWN_PROCESS, SetServiceStatus,
+    StartServiceCtrlDispatcherW,
 };
 
 use super::spec::{Demarrage, ServiceSpec, spec};
@@ -135,7 +137,29 @@ fn code_demarrage(d: Demarrage) -> u32 {
     }
 }
 
-/// Enregistre le service aupres du SCM.
+/// Enregistre le service aupres du SCM, ou le met a jour en place s'il l'est
+/// deja.
+///
+/// # Un service deja enregistre est mis a jour, pas refuse
+///
+/// Il l'etait (<< le service existe deja >>), et les deux installateurs le
+/// retiraient donc avant de le recreer: le type de demarrage qu'un
+/// administrateur avait choisi (a la demande, desactive, automatique
+/// differe) redevenait automatique a chaque mise a niveau du MSI et a chaque
+/// passage de `install-windows.ps1`. Mesure le 18/10/2026 dans une VM Windows
+/// Server 2025: a la demande puis desactive, les deux revenus en
+/// automatique. Et un second MSI de la meme version, refuse ici, laissait son
+/// retour arriere retirer le service du premier.
+///
+/// Desormais, si `CreateServiceW` rend `ERROR_SERVICE_EXISTS`, la ligne, le
+/// type de service, le controle d'erreur, les dependances, le compte et le
+/// nom affiche sont reecrits par `ChangeServiceConfigW`, le type de
+/// demarrage passe en `SERVICE_NO_CHANGE` (le reglage << differe >> vit a
+/// part et n'est pas touche non plus); puis la description, les actions sur
+/// echec et le type de SID sont reposes comme a la creation. C'est la ligne
+/// qu'il faut reecrire: elle nomme le resolveur et le groupe, et change avec
+/// eux. Un service marque pour suppression est refuse en le disant: il
+/// disparaitra a son arret, et le reinscrire avant ne servirait a rien.
 ///
 /// `exe` doit etre le chemin ABSOLU du binaire: le SCM ne resout pas les
 /// chemins relatifs, et un chemin relatif produit un service qui se cree sans
@@ -258,7 +282,7 @@ pub fn install(
 
     // SAFETY: tous les tampons vivent jusqu'a la fin de l'appel. Le compte nul
     // vaut LocalSystem, et le mot de passe nul va avec.
-    let service = unsafe {
+    let cree = unsafe {
         CreateServiceW(
             scm.0,
             nom.as_ptr(),
@@ -275,26 +299,94 @@ pub fn install(
             std::ptr::null(),
         )
     };
-    if service.is_null() {
+    let (service, fait) = if cree.is_null() {
         // SAFETY: lecture de l'etat du thread courant.
         let code = unsafe { GetLastError() };
-        if code == ERROR_SERVICE_EXISTS {
+        if code == ERROR_SERVICE_MARKED_FOR_DELETE {
             bail!(
-                "le service {} existe deja. Le retirer d'abord avec \
-                 --uninstall-service.",
+                "le service {} est marque pour suppression: il disparaitra a son \
+                 arret. L'arreter, puis relancer l'installation.",
                 s.nom
             );
         }
-        return Err(derniere_erreur("CreateServiceW"));
-    }
-    let service = Poignee(service);
+        if code != ERROR_SERVICE_EXISTS {
+            bail!("CreateServiceW a echoue (code systeme {code})");
+        }
+        let service = mettre_a_jour(&scm, &s, &nom, &affiche, &ligne_w)?;
+        (service, "mis a jour en place, type de demarrage garde")
+    } else {
+        (Poignee(cree), "installe")
+    };
 
     decrire(&service, &s)?;
     actions_sur_echec(&service, &s)?;
     type_de_sid(&service, &s)?;
 
-    println!("service {} installe ({})", s.nom, ligne);
+    println!("service {} {fait} ({})", s.nom, ligne);
     Ok(())
+}
+
+/// Reecrit la configuration d'un service deja enregistre, sauf son type de
+/// demarrage (voir [`install`]).
+///
+/// Ce que la creation pose, la mise a jour le repose: type de service,
+/// controle d'erreur, ligne, aucun groupe d'ordre de chargement, dependances,
+/// LocalSystem (nomme ici, mot de passe vide, ce que demande
+/// `ChangeServiceConfigW` pour ce compte) et nom affiche. Seul le type de
+/// demarrage passe en `SERVICE_NO_CHANGE`.
+fn mettre_a_jour(
+    scm: &Poignee,
+    s: &ServiceSpec,
+    nom: &[u16],
+    affiche: &[u16],
+    ligne: &[u16],
+) -> anyhow::Result<Poignee> {
+    // SAFETY: `scm` est une poignee vivante et `nom` une chaine terminee par
+    // zero. `SERVICE_ALL_ACCESS` contient SERVICE_CHANGE_CONFIG, qu'exigent
+    // ChangeServiceConfigW et ChangeServiceConfig2W.
+    let h = unsafe { OpenServiceW(scm.0, nom.as_ptr(), SERVICE_ALL_ACCESS) };
+    if h.is_null() {
+        return Err(derniere_erreur("OpenServiceW")).context(format!(
+            "le service {} existe mais n'a pas pu etre ouvert pour sa mise a jour",
+            s.nom
+        ));
+    }
+    let service = Poignee(h);
+    // Une liste vide se dit par une chaine vide: un pointeur nul voudrait
+    // dire << ne pas changer >>.
+    let deps = super::spec::dependances_encodees(s.dependances).unwrap_or_else(|| vec![0, 0]);
+    let compte = wide("LocalSystem");
+    let vide = wide("");
+    // SAFETY: tous les tampons vivent jusqu'a la fin de l'appel; aucun
+    // identifiant d'ordre n'est demande (pointeur nul admis).
+    let ok = unsafe {
+        ChangeServiceConfigW(
+            service.0,
+            SERVICE_WIN32_OWN_PROCESS,
+            SERVICE_NO_CHANGE,
+            SERVICE_ERROR_NORMAL,
+            ligne.as_ptr(),
+            vide.as_ptr(),
+            std::ptr::null_mut(),
+            deps.as_ptr(),
+            compte.as_ptr(),
+            vide.as_ptr(),
+            affiche.as_ptr(),
+        )
+    };
+    if ok == 0 {
+        // SAFETY: lecture de l'etat du thread courant.
+        let code = unsafe { GetLastError() };
+        if code == ERROR_SERVICE_MARKED_FOR_DELETE {
+            bail!(
+                "le service {} est marque pour suppression: il disparaitra a son \
+                 arret. L'arreter, puis relancer l'installation.",
+                s.nom
+            );
+        }
+        bail!("ChangeServiceConfigW a echoue (code systeme {code})");
+    }
+    Ok(service)
 }
 
 fn decrire(service: &Poignee, s: &ServiceSpec) -> anyhow::Result<()> {

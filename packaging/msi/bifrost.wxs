@@ -17,6 +17,22 @@
     version precedente a la mise a niveau. ProductCode est engendre a chaque
     construction (MajorUpgrade l'exige).
 
+  - AllowSameVersionUpgrades: deux constructions de la meme version (deux runs
+    de la CI tirent la meme version du workspace) ont deux ProductCode. Sans
+    cet attribut, Windows Installer les tient pour deux installations
+    distinctes: la seconde butait sur le service de la premiere, et son retour
+    arriere le retirait (mesure du 18/10/2026). Avec lui, la meme version est
+    une mise a niveau: une seule installation inscrite. L'ICE61 le signale en
+    avertissement, c'est son objet. Une version plus recente reste refusee
+    (DowngradeErrorMessage).
+
+  - Schedule="afterInstallInitialize": l'ancienne version est retiree en
+    entier avant la pose de la nouvelle, comme au defaut de WiX, mais dans la
+    meme transaction. Au defaut (apres InstallValidate), un echec de la
+    nouvelle laissait la machine sans aucune des deux; ici le retour arriere
+    remet l'ancienne, son service et son type de demarrage (mesure du
+    18/10/2026, echec provoque en fin d'installation).
+
   - Aucun ServiceInstall. Le compte LocalSystem, la dependance BFE, le SID propre,
     les actions sur echec et la ligne de commande sont declares dans
     crates/bifrost-daemon/src/service/spec.rs; un ServiceInstall les recopierait ici
@@ -25,7 +41,10 @@
     le fait install-windows.ps1. Le daemon juge le groupe (groupe local cree par un
     administrateur, jamais un groupe predefini ni un compte) et ecrit son SID en fin
     de ligne: group "<SID>". Le SID d'un groupe local est propre a chaque machine:
-    aucune construction ne peut l'ecrire d'avance.
+    aucune construction ne peut l'ecrire d'avance. Un service deja enregistre
+    (version precedente, script, ou mise a niveau interrompue) est mis a jour
+    en place par la meme commande: la ligne est reecrite, le type de demarrage
+    choisi par l'administrateur est garde.
 
   - Le resolveur chiffre (dnscrypt-proxy.exe) n'est pas distribue. Comme le
     script, le MSI ne le nomme dans la ligne du service que s'il est deja pose dans
@@ -33,7 +52,10 @@
     compte LocalService. wireguard.dll n'est pas distribue non plus.
 
   - Le service n'est pas demarre. Il est enregistre en demarrage automatique par
-    spec.rs, comme avec le script: il partira au prochain redemarrage.
+    spec.rs, comme avec le script: il partira au prochain redemarrage. A une
+    mise a niveau, un service en marche est arrete puis relance sur le nouveau
+    binaire par Windows Installer (Restart Manager); une reinstallation de la
+    meme version l'arrete sans le relancer (mesure du 18/10/2026).
 
   - Les droits de %ProgramData%\Bifrost: les quatre invocations icacls du script,
     memes SID et memes drapeaux, en actions differees. util:PermissionEx ecrit la
@@ -54,8 +76,15 @@
   - Desinstallation, avant RemoveFiles: ServiceControl arrete le service, puis
     cleanup-firewall retire les filtres WFP (l'arret du service ne les retire pas,
     c'est voulu), puis uninstall-service retire le service. Pendant une mise a
-    niveau, l'ancienne version est desinstallee sans cleanup-firewall: le script ne
-    retire pas les filtres quand il reinstalle, le MSI non plus.
+    niveau (UPGRADINGPRODUCTCODE pose), l'ancienne version est desinstallee sans
+    cleanup-firewall ni uninstall-service: le script ne retire ni les filtres ni
+    le service quand il reinstalle, le MSI non plus; la nouvelle version met le
+    service a jour en place.
+
+  - Retour arriere de l'installation: uninstall-service, seulement si le service
+    n'existait pas avant elle (BIFROSTSERVICEEXISTANT, lu par AppSearch dans la
+    cle du service). Un retour arriere ne retire que le service que la
+    transaction a pose.
 
   - Ce que le daemon ecrit sous %ProgramData%\Bifrost a l'execution (profil,
     journal, etat du resolveur) n'est pas retire: le MSI ne retire que ce qu'il a
@@ -71,7 +100,8 @@
            Scope="perMachine"
            Language="1033">
 
-    <MajorUpgrade DowngradeErrorMessage="Une version plus recente de Bifrost est deja installee." />
+    <MajorUpgrade AllowSameVersionUpgrades="yes" Schedule="afterInstallInitialize"
+                  DowngradeErrorMessage="Une version plus recente de Bifrost est deja installee." />
 
     <MediaTemplate EmbedCab="yes" />
 
@@ -87,6 +117,14 @@
       <DirectorySearch Id="RechercheInstallation" Path="[ProgramFiles64Folder]Bifrost" Depth="0">
         <FileSearch Id="RechercheResolveur" Name="dnscrypt-proxy.exe" />
       </DirectorySearch>
+    </Property>
+
+    <!-- Le service deja enregistre avant cette installation: sa ligne, lue dans
+         sa cle. Secure: lue par AppSearch dans la sequence d'interface, elle
+         doit passer du cote serveur. -->
+    <Property Id="BIFROSTSERVICEEXISTANT" Secure="yes">
+      <RegistrySearch Id="RechercheService" Root="HKLM" Key="SYSTEM\CurrentControlSet\Services\BifrostDaemon"
+                      Name="ImagePath" Type="raw" Bitness="always64" />
     </Property>
 
     <StandardDirectory Id="ProgramFiles64Folder">
@@ -136,7 +174,8 @@
     <CustomAction Id="BifrostServiceInstallResolveur" FileRef="bifrostdaemon.exe"
                   ExeCommand="--install-service --resolveur-binaire &quot;[INSTALLFOLDER]dnscrypt-proxy.exe&quot; --resolveur-utilisateur LocalService --group Bifrost"
                   Execute="deferred" Impersonate="no" Return="check" />
-    <!-- Retour arriere: si une action posterieure echoue, le service pose part. -->
+    <!-- Retour arriere: si une action posterieure echoue, le service pose part;
+         un service qui existait avant l'installation reste (condition plus bas). -->
     <CustomAction Id="BifrostServiceRollback" FileRef="bifrostdaemon.exe"
                   ExeCommand="--uninstall-service"
                   Execute="rollback" Impersonate="no" Return="ignore" />
@@ -200,13 +239,14 @@
       <Custom Action="BifrostAclResolveur" After="BifrostAclDonnees" Condition="NOT Installed" />
       <Custom Action="BifrostAclEtat" After="BifrostAclResolveur" Condition="NOT Installed" />
       <Custom Action="BifrostGroupe" After="BifrostAclEtat" Condition="NOT Installed" />
-      <Custom Action="BifrostServiceRollback" After="BifrostGroupe" Condition="NOT Installed" />
+      <Custom Action="BifrostServiceRollback" After="BifrostGroupe" Condition="NOT Installed AND NOT BIFROSTSERVICEEXISTANT" />
       <Custom Action="BifrostServiceInstall" After="BifrostServiceRollback" Condition="NOT Installed AND NOT BIFROSTRESOLVEUR" />
       <Custom Action="BifrostServiceInstallResolveur" After="BifrostServiceInstall" Condition="NOT Installed AND BIFROSTRESOLVEUR" />
 
-      <!-- Desinstallation: apres StopServices, avant RemoveFiles. -->
+      <!-- Desinstallation: apres StopServices, avant RemoveFiles; ni l'une ni
+           l'autre quand une mise a niveau retire cette version. -->
       <Custom Action="BifrostCleanupFirewall" After="StopServices" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
-      <Custom Action="BifrostServiceUninstall" After="BifrostCleanupFirewall" Condition="REMOVE=&quot;ALL&quot;" />
+      <Custom Action="BifrostServiceUninstall" After="BifrostCleanupFirewall" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
     </InstallExecuteSequence>
 
   </Package>

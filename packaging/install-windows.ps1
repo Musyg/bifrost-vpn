@@ -15,9 +15,11 @@ donc il partira au prochain redemarrage sans qu'on le lui demande. L'unite
 systemd, elle, n'est pas activee par install-linux.sh. Sur Windows le reglage
 vit dans la specification du service, pas dans l'installateur.
 
-Idempotent: rejouable sur une installation existante. Le service est retire
-puis recree, parce que sa ligne de commande NOMME le resolveur chiffre et
-change donc avec lui.
+Idempotent: rejouable sur une installation existante. Le service est mis a
+jour en place par le daemon (--install-service), parce que sa ligne de
+commande NOMME le resolveur chiffre et change donc avec lui; son type de
+demarrage, s'il a ete change par un administrateur, est garde. Le MSI fait de
+meme a sa mise a niveau.
 
 Le groupe local Bifrost est le groupe d'acces du canal du daemon: ses membres,
 sans elevation, par la coquille ou la CLI, demandent l'etat du service, le
@@ -335,13 +337,13 @@ if ($existant) {
                "Stop-Service $NomService. Ses filtres SUBSISTENT a l'arret, " +
                "c'est voulu; --cleanup-firewall est la commande qui les retire.")
     }
-    # Retire puis recree, et non laisse en place: la ligne de commande du
+    # Mis a jour en place, et non laisse tel quel: la ligne de commande du
     # service NOMME le resolveur chiffre, donc elle change des que le resolveur
-    # apparait ou disparait. Un service laisse tel quel garderait la ligne de
-    # l'installation precedente sans que rien ne le signale.
-    & $Daemon --uninstall-service | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "retrait du service $NomService impossible (code $LASTEXITCODE)" }
-    Ok "ancien service $NomService retire"
+    # apparait ou disparait. --install-service la reecrit sur le service
+    # existant, avec ses dependances et ses reglages, sans toucher au type de
+    # demarrage qu'un administrateur a pu choisir. Il le retirait puis le
+    # recreait jusqu'au 18/10/2026, et ce choix redevenait automatique.
+    Info "service $NomService existant: mis a jour en place, type de demarrage garde"
 }
 
 $arguments = @('--install-service')
@@ -363,9 +365,15 @@ Write-Host ''
 Write-Host "  sc.exe qc $NomService        # relire la ligne enregistree"
 Write-Host "  Start-Service $NomService    # demarrer maintenant"
 Write-Host ''
-Write-Host 'Il est enregistre en demarrage AUTOMATIQUE: il partira de lui-meme au'
-Write-Host 'prochain redemarrage. Armer le kill switch coupe tout trafic hors tunnel,'
-Write-Host 'session distante comprise.'
+if ($existant) {
+    Write-Host 'Son type de demarrage reste celui qu il avait: la mise a jour en place ne'
+    Write-Host 'le change pas (sc.exe qc le relit). Armer le kill switch coupe tout trafic'
+    Write-Host 'hors tunnel, session distante comprise.'
+} else {
+    Write-Host 'Il est enregistre en demarrage AUTOMATIQUE: il partira de lui-meme au'
+    Write-Host 'prochain redemarrage. Armer le kill switch coupe tout trafic hors tunnel,'
+    Write-Host 'session distante comprise.'
+}
 Write-Host ''
 Write-Host "Les membres du groupe local $GroupeAcces, sans elevation (coquille, CLI),"
 Write-Host 'demandent l etat du service, le connectent sur le profil enregistre et le'

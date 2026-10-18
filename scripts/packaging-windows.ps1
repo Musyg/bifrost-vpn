@@ -248,8 +248,8 @@ try {
         # Idempotence: rejouer l installation dans le meme bac a sable ne doit
         # pas faire grossir le compte d ACE portant S-1-5-19, sur aucun des deux
         # repertoires. Par SID, jamais le total. Le service existe et est
-        # arrete: l installateur le retire et le recree, ce qui est son chemin
-        # normal de reinstallation.
+        # arrete: l installateur le met a jour en place (ligne reecrite, type
+        # de demarrage garde), ce qui est son chemin normal de reinstallation.
         $avantRep = (Regles-PourSid $RepResolveur 'S-1-5-19').Count
         $avantEtat = (Regles-PourSid $Etat 'S-1-5-19').Count
         & $Installateur -Binaires $Binaires -Resolveur $FauxResolveur -Pilote $FauxPilote | Out-Null

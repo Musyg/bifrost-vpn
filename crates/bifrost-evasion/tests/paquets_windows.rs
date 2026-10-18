@@ -36,6 +36,34 @@
 //! 6. Une seule version (`$(var.Version)`), le fabricant `Bifrost`, la page du
 //!    depot.
 //!
+//! # La mise a niveau et le service
+//!
+//! Mesure du 18/10/2026 dans une VM Windows Server 2025: deux MSI de la meme
+//! version etaient deux installations distinctes, la seconde butait sur le
+//! service de la premiere et son retour arriere le retirait; une mise a
+//! niveau retirait puis recreait
+//! le service, et le type de demarrage choisi par l'administrateur (a la
+//! demande, desactive) redevenait automatique; un echec de la nouvelle version
+//! laissait la machine sans aucune des deux. En grammaire FERMEE (une forme
+//! non prevue rougit):
+//!
+//! 10. `MajorUpgrade` porte exactement `AllowSameVersionUpgrades="yes"`,
+//!     `Schedule="afterInstallInitialize"` et `DowngradeErrorMessage`.
+//! 11. `BIFROSTSERVICEEXISTANT`: `Secure="yes"`, un seul `RegistrySearch`,
+//!     la valeur `ImagePath` de la cle du service que le script nomme.
+//! 12. La table `InstallExecuteSequence`, action par action (`Action`,
+//!     `After`, `Condition`, rien d'autre): le retour arriere du service
+//!     seulement si le service n'existait pas, son retrait et celui des
+//!     filtres jamais pendant une mise a niveau. `BifrostServiceRollback` est
+//!     une action de retour arriere, et rien de plus.
+//! 13. `install-windows.ps1` n'invoque le daemon que par `& $Daemon
+//!     @arguments` (plus de `--uninstall-service` avant de reinstaller).
+//! 14. Le daemon (`service/scm.rs`, lu par le lexeur commun): un seul
+//!     `ChangeServiceConfigW`, dans `mettre_a_jour`, type de demarrage
+//!     `SERVICE_NO_CHANGE`, ligne reecrite; `install` y mene sur
+//!     `ERROR_SERVICE_EXISTS`; `CreateServiceW` garde le demarrage de la
+//!     specification; `DeleteService` n'est appele que par `uninstall`.
+//!
 //! # Le MSI de la coquille
 //!
 //! `packaging/msi/bifrost-gui.wxs` n'a pas de script en face: il se compare au
@@ -843,6 +871,624 @@ fn chaque_exigence_mord() {
     assert!(
         e.iter().any(|x| x.contains("BifrostCleanupFirewall")),
         "{e:?}"
+    );
+}
+
+// ======================================== la mise a niveau et le service
+
+const SCM: &str = "crates/bifrost-daemon/src/service/scm.rs";
+
+/// Les attributs d'une balise, en grammaire fermee: une suite de
+/// `nom="valeur"` separes par des blancs, rien d'autre. Une forme que la
+/// lecture ne reconnait pas (guillemet simple, attribut sans valeur, nom en
+/// double, texte colle) est une erreur, pas une absence.
+fn attributs_stricts(brut: &str) -> Result<Vec<(String, String)>, String> {
+    let mut sortie: Vec<(String, String)> = Vec::new();
+    let mut reste = brut.trim_start();
+    while !reste.is_empty() {
+        let egal = reste
+            .find('=')
+            .ok_or_else(|| format!("attribut sans valeur: {reste:?}"))?;
+        let nom = &reste[..egal];
+        if nom.is_empty()
+            || !nom
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b':' || b == b'_')
+        {
+            return Err(format!("nom d'attribut illisible: {nom:?}"));
+        }
+        let corps = reste[egal + 1..]
+            .strip_prefix('"')
+            .ok_or_else(|| format!("{nom}: valeur sans guillemet double"))?;
+        let fin = corps
+            .find('"')
+            .ok_or_else(|| format!("{nom}: valeur non fermee"))?;
+        if sortie.iter().any(|(n, _)| n == nom) {
+            return Err(format!("{nom} deux fois"));
+        }
+        sortie.push((
+            nom.to_string(),
+            corps[..fin].replace("&quot;", "\"").replace("&amp;", "&"),
+        ));
+        let suite = &corps[fin + 1..];
+        if !suite.is_empty() && !suite.starts_with(char::is_whitespace) {
+            return Err(format!("{nom}: texte colle apres la valeur: {suite:?}"));
+        }
+        reste = suite.trim_start();
+    }
+    Ok(sortie)
+}
+
+/// Les attributs stricts, tries par nom: deux balises egales a l'ordre pres
+/// se comparent egales.
+fn attributs_tries(brut: &str) -> Result<Vec<(String, String)>, String> {
+    let mut a = attributs_stricts(brut)?;
+    a.sort();
+    Ok(a)
+}
+
+fn paires(attendu: &[(&str, &str)]) -> Vec<(String, String)> {
+    let mut v: Vec<(String, String)> = attendu
+        .iter()
+        .map(|(n, v)| (n.to_string(), v.to_string()))
+        .collect();
+    v.sort();
+    v
+}
+
+/// La table InstallExecuteSequence du MSI du daemon, action par action:
+/// (Action, After, Condition), dans l'ordre du texte.
+const SEQUENCE: [(&str, &str, &str); 10] = [
+    ("BifrostAclProprietaire", "InstallFiles", "NOT Installed"),
+    (
+        "BifrostAclDonnees",
+        "BifrostAclProprietaire",
+        "NOT Installed",
+    ),
+    ("BifrostAclResolveur", "BifrostAclDonnees", "NOT Installed"),
+    ("BifrostAclEtat", "BifrostAclResolveur", "NOT Installed"),
+    ("BifrostGroupe", "BifrostAclEtat", "NOT Installed"),
+    (
+        "BifrostServiceRollback",
+        "BifrostGroupe",
+        "NOT Installed AND NOT BIFROSTSERVICEEXISTANT",
+    ),
+    (
+        "BifrostServiceInstall",
+        "BifrostServiceRollback",
+        "NOT Installed AND NOT BIFROSTRESOLVEUR",
+    ),
+    (
+        "BifrostServiceInstallResolveur",
+        "BifrostServiceInstall",
+        "NOT Installed AND BIFROSTRESOLVEUR",
+    ),
+    (
+        "BifrostCleanupFirewall",
+        "StopServices",
+        "REMOVE=\"ALL\" AND NOT UPGRADINGPRODUCTCODE",
+    ),
+    (
+        "BifrostServiceUninstall",
+        "BifrostCleanupFirewall",
+        "REMOVE=\"ALL\" AND NOT UPGRADINGPRODUCTCODE",
+    ),
+];
+
+fn ecarts_de_la_mise_a_niveau(wxs: &str, script: &str) -> Vec<String> {
+    let xml = sans_commentaires_xml(wxs);
+    let tout = balises(&xml);
+    let mut ecarts = Vec::new();
+
+    // 10. MajorUpgrade.
+    let majeures: Vec<&(String, String, bool)> = tout
+        .iter()
+        .filter(|(n, _, _)| n == "MajorUpgrade")
+        .collect();
+    match majeures.as_slice() {
+        [(_, a, true)] => match attributs_stricts(a) {
+            Ok(lus) => {
+                for (nom, valeur) in &lus {
+                    match nom.as_str() {
+                        "AllowSameVersionUpgrades" if valeur == "yes" => {}
+                        "Schedule" if valeur == "afterInstallInitialize" => {}
+                        "DowngradeErrorMessage" if !valeur.trim().is_empty() => {}
+                        _ => ecarts.push(format!(
+                            "MajorUpgrade {nom}=\"{valeur}\": hors de la grammaire (AllowSameVersionUpgrades=\"yes\", Schedule=\"afterInstallInitialize\", DowngradeErrorMessage)"
+                        )),
+                    }
+                }
+                for requis in [
+                    "AllowSameVersionUpgrades",
+                    "Schedule",
+                    "DowngradeErrorMessage",
+                ] {
+                    if !lus.iter().any(|(n, _)| n == requis) {
+                        ecarts.push(format!("MajorUpgrade sans {requis}"));
+                    }
+                }
+            }
+            Err(e) => ecarts.push(format!("MajorUpgrade illisible: {e}")),
+        },
+        autre => ecarts.push(format!(
+            "{} element(s) MajorUpgrade vide(s) au lieu d'un",
+            autre.len()
+        )),
+    }
+
+    // 11. La propriete qui dit si le service existait avant l'installation.
+    let nom_service = variables_ps(&lignes_ps(script))
+        .get("NomService")
+        .cloned()
+        .unwrap_or_default();
+    let proprietes: Vec<usize> = tout
+        .iter()
+        .enumerate()
+        .filter(|(_, (n, a, _))| {
+            n == "Property" && attribut(a, "Id").as_deref() == Some("BIFROSTSERVICEEXISTANT")
+        })
+        .map(|(i, _)| i)
+        .collect();
+    match proprietes.as_slice() {
+        [i] => {
+            let (_, a, vide) = &tout[*i];
+            if attributs_tries(a)
+                != Ok(paires(&[
+                    ("Id", "BIFROSTSERVICEEXISTANT"),
+                    ("Secure", "yes"),
+                ]))
+            {
+                ecarts.push(format!(
+                    "Property BIFROSTSERVICEEXISTANT: {:?}, attendu Id et Secure=\"yes\" seuls",
+                    attributs_stricts(a)
+                ));
+            }
+            let enfants: Vec<&(String, String, bool)> = if *vide {
+                Vec::new()
+            } else {
+                tout[i + 1..]
+                    .iter()
+                    .take_while(|(n, _, _)| n != "/Property")
+                    .collect()
+            };
+            let cle = format!("SYSTEM\\CurrentControlSet\\Services\\{nom_service}");
+            let attendu = paires(&[
+                ("Id", "RechercheService"),
+                ("Root", "HKLM"),
+                ("Key", &cle),
+                ("Name", "ImagePath"),
+                ("Type", "raw"),
+                ("Bitness", "always64"),
+            ]);
+            match enfants.as_slice() {
+                [(n, a, true)] if n == "RegistrySearch" => {
+                    if nom_service.is_empty() || attributs_tries(a) != Ok(attendu.clone()) {
+                        ecarts.push(format!(
+                            "RegistrySearch de BIFROSTSERVICEEXISTANT: {:?}, attendu {attendu:?}",
+                            attributs_tries(a)
+                        ));
+                    }
+                }
+                autre => ecarts.push(format!(
+                    "Property BIFROSTSERVICEEXISTANT: enfants {:?}, attendu un seul RegistrySearch",
+                    autre.iter().map(|(n, _, _)| n.as_str()).collect::<Vec<_>>()
+                )),
+            }
+        }
+        autre => ecarts.push(format!(
+            "{} propriete(s) BIFROSTSERVICEEXISTANT au lieu d'une",
+            autre.len()
+        )),
+    }
+
+    // 12. La sequence, action par action, et l'action de retour arriere.
+    let debut = tout
+        .iter()
+        .position(|(n, _, _)| n == "InstallExecuteSequence");
+    let fin = tout
+        .iter()
+        .position(|(n, _, _)| n == "/InstallExecuteSequence");
+    match (debut, fin) {
+        (Some(d), Some(f)) if d < f => {
+            let mut lues: Vec<(String, String, String)> = Vec::new();
+            for (n, a, vide) in &tout[d + 1..f] {
+                let triple = attributs_stricts(a).ok().and_then(|at| {
+                    let noms: Vec<&str> = at.iter().map(|(k, _)| k.as_str()).collect();
+                    (noms == ["Action", "After", "Condition"])
+                        .then(|| (at[0].1.clone(), at[1].1.clone(), at[2].1.clone()))
+                });
+                match (n.as_str(), vide, triple) {
+                    ("Custom", true, Some(t)) => lues.push(t),
+                    _ => ecarts.push(format!(
+                        "sequence: balise hors de la grammaire (Custom Action After Condition): <{n} {a}>"
+                    )),
+                }
+            }
+            let attendues: Vec<(String, String, String)> = SEQUENCE
+                .iter()
+                .map(|(a, b, c)| (a.to_string(), b.to_string(), c.to_string()))
+                .collect();
+            for (i, (lue, attendue)) in lues.iter().zip(&attendues).enumerate() {
+                if lue != attendue {
+                    ecarts.push(format!(
+                        "sequence, action {}: {} lue {lue:?}, attendue {attendue:?}",
+                        i + 1,
+                        attendue.0
+                    ));
+                }
+            }
+            if lues.len() != attendues.len() {
+                ecarts.push(format!(
+                    "sequence: {} action(s) lue(s), {} attendue(s)",
+                    lues.len(),
+                    attendues.len()
+                ));
+            }
+        }
+        _ => ecarts.push("InstallExecuteSequence introuvable".to_string()),
+    }
+    let rollback = element(&xml, "CustomAction", "BifrostServiceRollback").unwrap_or_default();
+    let attendu_rollback = paires(&[
+        ("Id", "BifrostServiceRollback"),
+        ("FileRef", "bifrostdaemon.exe"),
+        ("ExeCommand", "--uninstall-service"),
+        ("Execute", "rollback"),
+        ("Impersonate", "no"),
+        ("Return", "ignore"),
+    ]);
+    if attributs_tries(&rollback) != Ok(attendu_rollback) {
+        ecarts.push(format!(
+            "CustomAction BifrostServiceRollback: {:?}, attendu une action de retour arriere qui lance --uninstall-service, et rien de plus",
+            attributs_stricts(&rollback)
+        ));
+    }
+
+    // 13. Le script n'invoque le daemon que pour l'installer (mise a jour en
+    // place), et jamais --uninstall-service avant.
+    let lignes = lignes_ps(script);
+    let invocations: Vec<&String> = lignes.iter().filter(|l| l.contains("& $Daemon")).collect();
+    if invocations != ["& $Daemon @arguments"] {
+        ecarts.push(format!(
+            "{SCRIPT}: invocations du daemon {invocations:?}, attendu la seule `& $Daemon @arguments`"
+        ));
+    }
+    for l in &lignes {
+        let mut code = String::new();
+        let mut guillemet: Option<char> = None;
+        for c in l.chars() {
+            match guillemet {
+                Some(q) if c == q => guillemet = None,
+                Some(_) => {}
+                None if c == '\'' || c == '"' => guillemet = Some(c),
+                None => code.push(c),
+            }
+        }
+        if code.contains("--uninstall-service") {
+            ecarts.push(format!(
+                "{SCRIPT} retire le service avant de reinstaller: `{l}`"
+            ));
+        }
+    }
+    ecarts
+}
+
+#[test]
+fn la_meme_version_est_une_mise_a_niveau_qui_garde_le_service() {
+    let ecarts = ecarts_de_la_mise_a_niveau(&lire(WXS), &lire(SCRIPT));
+    assert!(
+        ecarts.is_empty(),
+        "{} ecart(s):\n  {}",
+        ecarts.len(),
+        ecarts.join("\n  ")
+    );
+}
+
+// Seul `decouper` sert ici; les lectures par position servent aux voisines.
+#[allow(dead_code)]
+#[path = "commun/lexeur_rust.rs"]
+mod lexeur_rust;
+
+/// Le source sans ses commentaires ni ses litteraux, remplaces par des
+/// espaces (meme lecture que `paquets_linux.rs`): les positions restent
+/// celles du source.
+fn code_seul(src: &str) -> Result<String, String> {
+    let d = lexeur_rust::decouper(src)?;
+    let mut o = src.as_bytes().to_vec();
+    for (a, b) in d.neutres {
+        for x in &mut o[a..b] {
+            if *x != b'\n' {
+                *x = b' ';
+            }
+        }
+    }
+    Ok(String::from_utf8_lossy(&o).into_owned())
+}
+
+fn est_ident(o: u8) -> bool {
+    o == b'_' || o.is_ascii_alphanumeric()
+}
+
+/// Le corps `[accolade ouvrante, accolade fermante]` de la fonction `nom`,
+/// definie exactement une fois dans `code`.
+fn corps_de_fonction(code: &str, nom: &str) -> Result<(usize, usize), String> {
+    let motif = format!("fn {nom}(");
+    let positions: Vec<usize> = code
+        .match_indices(&motif)
+        .map(|(p, _)| p)
+        .filter(|&p| p == 0 || !est_ident(code.as_bytes()[p - 1]))
+        .collect();
+    let [p] = positions.as_slice() else {
+        return Err(format!("fn {nom}: {} definition(s)", positions.len()));
+    };
+    let ouvrante = code[*p..]
+        .find('{')
+        .ok_or_else(|| format!("fn {nom} sans corps"))?
+        + p;
+    let mut profondeur = 0usize;
+    for (k, c) in code[ouvrante..].char_indices() {
+        match c {
+            '{' => profondeur += 1,
+            '}' => {
+                profondeur -= 1;
+                if profondeur == 0 {
+                    return Ok((ouvrante, ouvrante + k));
+                }
+            }
+            _ => {}
+        }
+    }
+    Err(format!("fn {nom}: corps non ferme"))
+}
+
+/// Chaque appel de `nom(...)` dans `code` (pas sa definition): position, et
+/// arguments separes aux virgules de premier niveau, blancs retires.
+fn appels(code: &str, nom: &str) -> Vec<(usize, Vec<String>)> {
+    let motif = format!("{nom}(");
+    let mut sortie = Vec::new();
+    for (p, _) in code.match_indices(&motif) {
+        if p > 0 && est_ident(code.as_bytes()[p - 1]) {
+            continue;
+        }
+        if code[..p].trim_end().ends_with("fn") {
+            continue;
+        }
+        let mut args = Vec::new();
+        let mut courant = String::new();
+        let mut profondeur = 0usize;
+        for c in code[p + motif.len()..].chars() {
+            match c {
+                '(' | '[' | '{' => {
+                    profondeur += 1;
+                    courant.push(c);
+                }
+                ')' | ']' | '}' if profondeur > 0 => {
+                    profondeur -= 1;
+                    courant.push(c);
+                }
+                ')' => break,
+                ',' if profondeur == 0 => args.push(std::mem::take(&mut courant)),
+                _ => courant.push(c),
+            }
+        }
+        args.push(courant);
+        let args: Vec<String> = args
+            .into_iter()
+            .map(|a| a.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|a| !a.is_empty())
+            .collect();
+        sortie.push((p, args));
+    }
+    sortie
+}
+
+fn ecarts_du_service_en_place(scm: &str) -> Vec<String> {
+    let code = match code_seul(scm) {
+        Ok(c) => c,
+        Err(e) => return vec![format!("{SCM} illisible: {e}")],
+    };
+    let (install, maj, retrait) = match (
+        corps_de_fonction(&code, "install"),
+        corps_de_fonction(&code, "mettre_a_jour"),
+        corps_de_fonction(&code, "uninstall"),
+    ) {
+        (Ok(a), Ok(b), Ok(c)) => (a, b, c),
+        autre => return vec![format!("{SCM}: {autre:?}")],
+    };
+    let dans = |p: usize, (a, b): (usize, usize)| a < p && p < b;
+    let mut ecarts = Vec::new();
+    match appels(&code, "ChangeServiceConfigW").as_slice() {
+        [(p, args)] => {
+            if !dans(*p, maj) {
+                ecarts.push("ChangeServiceConfigW appele hors de mettre_a_jour".to_string());
+            }
+            if args.len() != 11 {
+                ecarts.push(format!(
+                    "ChangeServiceConfigW: {} argument(s): {args:?}",
+                    args.len()
+                ));
+            } else {
+                if args[1] != "SERVICE_WIN32_OWN_PROCESS" {
+                    ecarts.push(format!(
+                        "ChangeServiceConfigW: type de service {:?}",
+                        args[1]
+                    ));
+                }
+                if args[2] != "SERVICE_NO_CHANGE" {
+                    ecarts.push(format!(
+                        "ChangeServiceConfigW: type de demarrage {:?} au lieu de SERVICE_NO_CHANGE",
+                        args[2]
+                    ));
+                }
+                if args[4].contains("null") {
+                    ecarts.push(format!(
+                        "ChangeServiceConfigW ne reecrit pas la ligne: {:?}",
+                        args[4]
+                    ));
+                }
+            }
+        }
+        autre => ecarts.push(format!(
+            "{} appel(s) de ChangeServiceConfigW au lieu d'un",
+            autre.len()
+        )),
+    }
+    match appels(&code, "CreateServiceW").as_slice() {
+        [(p, args)] if dans(*p, install) && args.len() == 13 => {
+            if args[5] != "code_demarrage(s.demarrage)" {
+                ecarts.push(format!(
+                    "CreateServiceW: demarrage {:?} au lieu de celui de la specification",
+                    args[5]
+                ));
+            }
+        }
+        autre => ecarts.push(format!(
+            "CreateServiceW: {autre:?}, attendu un appel dans install"
+        )),
+    }
+    let corps_install = &code[install.0..install.1];
+    if appels(corps_install, "mettre_a_jour").len() != 1
+        || !corps_install.contains("ERROR_SERVICE_EXISTS")
+    {
+        ecarts.push(
+            "install ne mene pas un service existant (ERROR_SERVICE_EXISTS) a mettre_a_jour"
+                .to_string(),
+        );
+    }
+    for (p, _) in appels(&code, "DeleteService") {
+        if !dans(p, retrait) {
+            ecarts.push(format!(
+                "DeleteService appele hors de uninstall (octet {p})"
+            ));
+        }
+    }
+    ecarts
+}
+
+#[test]
+fn le_daemon_met_a_jour_un_service_existant_sans_toucher_au_demarrage() {
+    let ecarts = ecarts_du_service_en_place(&lire(SCM));
+    assert!(
+        ecarts.is_empty(),
+        "{} ecart(s):\n  {}",
+        ecarts.len(),
+        ecarts.join("\n  ")
+    );
+}
+
+/// Chaque exigence de la mise a niveau mord sur une mutation du texte reel.
+#[test]
+fn chaque_exigence_de_la_mise_a_niveau_mord() {
+    let wxs = lire(WXS);
+    let script = lire(SCRIPT);
+    let scm = lire(SCM);
+    assert!(ecarts_de_la_mise_a_niveau(&wxs, &script).is_empty());
+    assert!(ecarts_du_service_en_place(&scm).is_empty());
+    let remplacer = |texte: &str, avant: &str, apres: &str| -> String {
+        assert_eq!(
+            texte.matches(avant).count(),
+            1,
+            "`{avant}` doit etre unique"
+        );
+        texte.replacen(avant, apres, 1)
+    };
+    let mord = |e: Vec<String>, motif: &str| {
+        assert!(
+            e.iter().any(|x| x.contains(motif)),
+            "`{motif}` attendu dans {e:?}"
+        );
+    };
+    for (avant, apres, motif) in [
+        (
+            "AllowSameVersionUpgrades=\"yes\" ",
+            "",
+            "MajorUpgrade sans AllowSameVersionUpgrades",
+        ),
+        (
+            "AllowSameVersionUpgrades=\"yes\" Schedule=\"afterInstallInitialize\"",
+            "AllowSameVersionUpgrades=\"yes\" Schedule=\"afterInstallValidate\"",
+            "hors de la grammaire",
+        ),
+        (
+            "<MajorUpgrade ",
+            "<MajorUpgrade AllowDowngrades=\"yes\" ",
+            "hors de la grammaire",
+        ),
+        (
+            "Condition=\"NOT Installed AND NOT BIFROSTSERVICEEXISTANT\"",
+            "Condition=\"NOT Installed\"",
+            "BifrostServiceRollback lue",
+        ),
+        (
+            "After=\"BifrostCleanupFirewall\" Condition=\"REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE\"",
+            "After=\"BifrostCleanupFirewall\" Condition=\"REMOVE=&quot;ALL&quot;\"",
+            "BifrostServiceUninstall lue",
+        ),
+        (
+            "<Property Id=\"BIFROSTSERVICEEXISTANT\" Secure=\"yes\">",
+            "<Property Id=\"BIFROSTSERVICEEXISTANT\">",
+            "Property BIFROSTSERVICEEXISTANT",
+        ),
+        (
+            "Services\\BifrostDaemon\"",
+            "Services\\BFE\"",
+            "RegistrySearch de BIFROSTSERVICEEXISTANT",
+        ),
+        (
+            "      <Custom Action=\"BifrostServiceInstall\" ",
+            "      <Custom Action=\"BifrostServiceRollback\" After=\"InstallFiles\" Condition=\"1\" />\n      <Custom Action=\"BifrostServiceInstall\" ",
+            "sequence",
+        ),
+        (
+            "Execute=\"rollback\"",
+            "Execute=\"deferred\"",
+            "CustomAction BifrostServiceRollback",
+        ),
+    ] {
+        mord(
+            ecarts_de_la_mise_a_niveau(&remplacer(&wxs, avant, apres), &script),
+            motif,
+        );
+    }
+    mord(
+        ecarts_de_la_mise_a_niveau(
+            &wxs,
+            &remplacer(
+                &script,
+                "$arguments = @('--install-service')",
+                "& $Daemon --uninstall-service | Out-Null\n$arguments = @('--install-service')",
+            ),
+        ),
+        "retire le service avant de reinstaller",
+    );
+    for (avant, apres, motif) in [
+        (
+            "            SERVICE_NO_CHANGE,\n            SERVICE_ERROR_NORMAL,",
+            "            code_demarrage(s.demarrage),\n            SERVICE_ERROR_NORMAL,",
+            "au lieu de SERVICE_NO_CHANGE",
+        ),
+        (
+            "let service = mettre_a_jour(&scm, &s, &nom, &affiche, &ligne_w)?;",
+            "let service: Poignee = bail!(\"le service existe deja\");",
+            "a mettre_a_jour",
+        ),
+        (
+            "    let service = Poignee(h);\n    // Une liste vide",
+            "    let service = Poignee(h);\n    unsafe { DeleteService(service.0) };\n    // Une liste vide",
+            "DeleteService appele hors de uninstall",
+        ),
+    ] {
+        mord(
+            ecarts_du_service_en_place(&remplacer(&scm, avant, apres)),
+            motif,
+        );
+    }
+    // La grammaire stricte des attributs refuse ce qu'elle ne sait pas lire.
+    assert!(attributs_stricts("Id='x'").is_err());
+    assert!(attributs_stricts("Id=\"x\" Id=\"y\"").is_err());
+    assert!(attributs_stricts("Secure").is_err());
+    assert_eq!(
+        attributs_stricts(" Id=\"a&quot;b\"\n  Secure=\"yes\" "),
+        Ok(paires(&[("Id", "a\"b"), ("Secure", "yes")]))
     );
 }
 

@@ -562,10 +562,14 @@ code de mise a niveau distinct de celui du daemon; `paquets_linux.rs` et `paquet
 gardent, et `audit_planifie.rs` borne leurs jobs comme ceux du daemon.
 
 Limites, lues dans le code:
-- Un retour arriere de l'installation du MSI retire le service, mais laisse le groupe `Bifrost` s'il
-  l'a cree. Une reparation ne rejoue pas les actions, qui ne tournent qu'a la premiere
-  installation. Une mise a niveau desinstalle l'ancienne version sans retirer les filtres, puis
-  installe la nouvelle sans demarrer le service.
+- Un retour arriere de l'installation du MSI retire le service s'il ne l'a pas trouve en place,
+  mais laisse le groupe `Bifrost` s'il l'a cree. Une reparation ne rejoue pas les actions, qui ne
+  tournent qu'a la premiere installation. Une mise a niveau, meme version comprise, retire
+  l'ancienne version dans la transaction de la nouvelle, sans retirer ni les filtres ni le
+  service; la nouvelle met le service a jour en place (ligne reecrite, type de demarrage garde)
+  sans le demarrer, et un echec remet l'ancienne (mesure le 18/10/2026 en machine virtuelle).
+  Depuis un MSI anterieur a cette correction, l'ancien paquet retire encore le service: la
+  nouvelle version le recree en demarrage automatique.
 - Un utilisateur local nomme `Bifrost` fait echouer l'installation du MSI a `--install-service`, ou
   le daemon refuse un compte; `install-windows.ps1` le refuse plus tot.
 - `dnscrypt-proxy` et `wireguard.dll` ne sont dans aucun paquet.

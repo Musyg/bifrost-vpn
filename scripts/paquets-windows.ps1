@@ -20,7 +20,11 @@ Dans l'ordre:
      proprietes, les actions personnalisees (la ligne qui enregistre le service
      et celle qui cree le groupe d'acces, les memes que
      packaging/install-windows.ps1), et l'absence de ServiceInstall;
-  7. ecrit l'empreinte SHA256 du MSI a cote.
+  7. lit aussi ce qui regit la mise a niveau: la table Upgrade (meme version
+     comprise, plus recente refusee), RemoveExistingProducts dans la
+     transaction de la nouvelle version, et les conditions qui gardent le
+     service existant;
+  8. ecrit l'empreinte SHA256 du MSI a cote.
 
 Le MSI n'est pas signe: aucun certificat n'existe, et l'installation de
 l'etape suivante (scripts/paquets-windows-installer.ps1) verifie qu'il ne l'est
@@ -253,6 +257,78 @@ if ($groupe.Count -eq 1 -and $groupe[0][3].EndsWith($commentaire)) {
 } else {
     Fail "aucune action unique ne cree le groupe local Bifrost avec le commentaire attendu ($($groupe.Count) trouvee(s))"
 }
+
+Etape 'Mise a niveau: meme version comprise, service garde'
+# Ce que WiX a ecrit, pas ce que le .wxs demande. Deux lignes Upgrade et pas
+# d'autre: la premiere retire toute version anterieure OU EGALE (Attributes
+# 513 = VersionMaxInclusive 0x200 + MigrateFeatures 0x1, que l'ICE61 signale
+# en avertissement), la seconde detecte une version plus recente, que la
+# condition de lancement refuse.
+$attenduesUpgrade = @(
+    ('{{{0}}}||{1}|513|WIX_UPGRADE_DETECTED' -f $upgrade, $Version).ToUpperInvariant(),
+    ('{{{0}}}|{1}||2|WIX_DOWNGRADE_DETECTED' -f $upgrade, $Version).ToUpperInvariant()
+) | Sort-Object
+$luesUpgrade = @()
+foreach ($l in (Lignes-Msi $Msi 'SELECT `UpgradeCode`, `VersionMin`, `VersionMax`, `Attributes`, `ActionProperty` FROM `Upgrade`' 5)) {
+    $luesUpgrade += ($l -join '|').ToUpperInvariant()
+}
+$luesUpgrade = @($luesUpgrade | Sort-Object)
+if (($luesUpgrade -join ';') -ceq ($attenduesUpgrade -join ';')) {
+    Ok 'table Upgrade: version anterieure ou egale retiree (513), plus recente refusee (2)'
+} else {
+    Fail "table Upgrade: [$($luesUpgrade -join '; ')] au lieu de [$($attenduesUpgrade -join '; ')]"
+}
+# L'ancienne version est retiree dans la transaction de la nouvelle
+# (afterInstallInitialize): un echec de la nouvelle la restaure.
+$sequence = @{}
+foreach ($l in (Lignes-Msi $Msi 'SELECT `Action`, `Sequence`, `Condition` FROM `InstallExecuteSequence`' 3)) {
+    $sequence[$l[0]] = $l
+}
+$rep = $sequence['RemoveExistingProducts']
+if ($null -ne $rep -and
+    [int]$sequence['InstallInitialize'][1] -lt [int]$rep[1] -and
+    [int]$rep[1] -lt [int]$sequence['ProcessComponents'][1]) {
+    Ok "RemoveExistingProducts ($($rep[1])) entre InstallInitialize et ProcessComponents"
+} else {
+    Fail "RemoveExistingProducts hors de la transaction de la nouvelle version: $($rep -join ' | ')"
+}
+# Le service de l'ancienne version n'est ni retire par sa desinstallation
+# pendant une mise a niveau, ni par le retour arriere s'il existait avant.
+$conditions = [ordered]@{
+    'BifrostServiceRollback'  = 'NOT Installed AND NOT BIFROSTSERVICEEXISTANT'
+    'BifrostCleanupFirewall'  = 'REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE'
+    'BifrostServiceUninstall' = 'REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE'
+}
+foreach ($nom in $conditions.Keys) {
+    if (-not $sequence.ContainsKey($nom)) { Fail "action $nom absente de la sequence"; continue }
+    if ($sequence[$nom][2] -ceq $conditions[$nom]) { Ok "$nom sous << $($conditions[$nom]) >>" }
+    else { Fail "${nom}: condition << $($sequence[$nom][2]) >> au lieu de << $($conditions[$nom]) >>" }
+}
+# BIFROSTSERVICEEXISTANT vient de la cle du service (ImagePath, vue 64 bits,
+# brute) et passe a la phase serveur (SecureCustomProperties).
+$recherche = @()
+if (Table-Existe $Msi 'RegLocator') {
+    foreach ($l in (Lignes-Msi $Msi 'SELECT `Signature_`, `Root`, `Key`, `Name`, `Type` FROM `RegLocator`' 5)) {
+        if ($l[0] -ceq 'RechercheService') { $recherche += ($l -join '|') }
+    }
+}
+$appSearch = @()
+foreach ($l in (Lignes-Msi $Msi 'SELECT `Property`, `Signature_` FROM `AppSearch`' 2)) {
+    if ($l[0] -ceq 'BIFROSTSERVICEEXISTANT') { $appSearch += ($l -join '|') }
+}
+$attendueRecherche = 'RechercheService|2|SYSTEM\CurrentControlSet\Services\BifrostDaemon|ImagePath|18'
+if ($recherche.Count -eq 1 -and $recherche[0] -ceq $attendueRecherche -and
+    $appSearch.Count -eq 1 -and $appSearch[0] -ceq 'BIFROSTSERVICEEXISTANT|RechercheService') {
+    Ok 'BIFROSTSERVICEEXISTANT lit la cle du service (RegLocator 64 bits, brut)'
+} else {
+    Fail "recherche de BIFROSTSERVICEEXISTANT: RegLocator [$($recherche -join '; ')], AppSearch [$($appSearch -join '; ')]"
+}
+$securisees = @()
+foreach ($l in (Lignes-Msi $Msi "SELECT ``Value`` FROM ``Property`` WHERE ``Property`` = 'SecureCustomProperties'" 1)) {
+    $securisees += $l[0].Split(';')
+}
+if ($securisees -ccontains 'BIFROSTSERVICEEXISTANT') { Ok 'BIFROSTSERVICEEXISTANT est dans SecureCustomProperties' }
+else { Fail "SecureCustomProperties sans BIFROSTSERVICEEXISTANT: $($securisees -join ';')" }
 
 Etape 'Empreinte SHA256 du MSI'
 $hash = (Get-FileHash -LiteralPath $Msi -Algorithm SHA256).Hash.ToLowerInvariant()
