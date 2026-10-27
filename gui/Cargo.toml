@@ -33,7 +33,7 @@ tauri = { version = "2.12", features = ["tray-icon"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 # time pour l'attente de la boucle de fond; le reste du reseau est dans l'IPC.
-tokio = { version = "1.53", features = ["time"] }
+tokio = { version = "1.53.3", features = ["time"] }
 # La logique testable vit ici, hors Tauri. bifrost-ipc et bifrost-core sont
 # tires transitivement par bifrost-coquille; on les nomme quand meme, pour que
 # le lock et l'audit de licences de gui/ les portent explicitement.

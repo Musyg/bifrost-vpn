@@ -96,7 +96,10 @@ impl Tun {
     /// en cours - dont le kill switch.
     pub fn nouveau(tun: TunBrut) -> io::Result<Self> {
         tun.mettre_non_bloquant()?;
-        Ok(Self(AsyncFd::new(tun)?))
+        // SAFETY: TunBrut owns its private OwnedFd and is moved into AsyncFd.
+        // Neither Tun nor TunBrut exposes a way to close or replace that fd;
+        // it remains valid until AsyncFd deregisters it before dropping TunBrut.
+        Ok(Self(unsafe { AsyncFd::register(tun)? }))
     }
 
     pub fn nom(&self) -> &str {
