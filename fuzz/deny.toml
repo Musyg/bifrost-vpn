@@ -57,3 +57,6 @@ deny = []
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
+# Sources amont epinglees par revision, comme le workspace racine.
+allow-git = ["https://github.com/kellpossible/cargo-i18n", "https://github.com/str4d/rage"]
+required-git-spec = "rev"
