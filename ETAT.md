@@ -1,5 +1,36 @@
 # Etat de Bifrost
 
+## Maintenance des dependances, 31 octobre 2026
+
+L'audit planifie 41193202970 echouait sur RUSTSEC-2026-0387
+(crypto-bigint 0.5.5) et RUSTSEC-2026-0374 (basic-toml 0.1.10).
+Le workspace et le harnais de fuzzing emploient maintenant la revision amont
+[age b5b68c4](https://github.com/str4d/rage/commit/b5b68c4f4f7ea5c368bc060f6fe0237549c3a13f),
+avec crypto-bigint 0.7.10, et le correctif
+[i18n-config 2ce7b1d](https://github.com/kellpossible/cargo-i18n/commit/2ce7b1dfe9a8cc224288bf50cbc2a67a6de863c4),
+qui remplace basic-toml par toml. Aucun nouvel avis RustSec n'est ignore.
+Les deux sources sont autorisees nommement par cargo-deny et epinglees a leur
+revision complete. Ces choix temporaires doivent revenir au registre apres
+publication des correctifs.
+
+Le registre cargo-vet suit les nouvelles versions, y compris Tokio deja
+mis a jour dans les verrous racine et GUI. Il reste un registre d'exemptions,
+pas une preuve d'audit du code tiers. Les trois paquets Git ont des exceptions
+explicites a revision exacte; revisions_amont.rs refuse toute discordance
+avec les verrous racine et fuzz, une revision flottante ou une exception
+perimee. Les cas negatifs ont ete joues. Les jobs Windows restent manuels.
+
+Sur essai-linux sans privileges: audits RustSec racine et GUI, cargo-deny
+racine/fuzz/GUI et cargo-vet racine/GUI passent. Le format et clippy du
+workspace passent. recettes-strict mesure 79 binaires, 1908 vertes annoncees,
+23 abstentions, 2 ignorees et 0 rouge: 1885 mesures reelles sur essai-linux.
+Les abstentions concernent les privileges et moyens externes indisponibles,
+ainsi que les controles d'index Git dans l'archive. Un banc externe compare les formats age avant/apres:
+chiffrement et dechiffrement dans les deux sens pour 0, 41 et 65537 octets,
+avec refus d'une mauvaise phrase et d'un chiffre altere. Les deux controles
+de revisions Git passent. La CI publiee reste le juge des runners privilegies.
+
+
 Bifrost est un VPN auto-heberge pour Windows 11 et Linux. Trois objectifs, dans
 cet ordre: ne pas fuir (kill switch de niveau noyau, fail-closed), ne pas etre
 bloque (resistance active au DPI et a la censure), ne pas laisser le systeme

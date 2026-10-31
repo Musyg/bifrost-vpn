@@ -8,7 +8,8 @@ repository.workspace = true
 description = "Recuperation multi-canal des profils signes"
 
 [dependencies]
-age = "0.12"
+# Revision amont avec RustCrypto corrige; conserver le format age existant.
+age = { git = "https://github.com/str4d/rage", rev = "b5b68c4f4f7ea5c368bc060f6fe0237549c3a13f", default-features = false }
 base64.workspace = true
 getrandom = "0.4"
 bifrost-coffre.workspace = true

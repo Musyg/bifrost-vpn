@@ -173,3 +173,7 @@ path = "fuzz_targets/trames_dbus.rs"
 test = false
 doc = false
 bench = false
+
+# Meme correctif amont que le workspace racine.
+[patch.crates-io]
+i18n-config = { git = "https://github.com/kellpossible/cargo-i18n", rev = "2ce7b1dfe9a8cc224288bf50cbc2a67a6de863c4" }

@@ -150,3 +150,6 @@ deny = []
 # exactement la forme que prend une attaque sur la chaine d'approvisionnement.
 unknown-registry = "deny"
 unknown-git = "deny"
+# Sources amont autorisees, epinglees par revision dans les manifestes.
+allow-git = ["https://github.com/kellpossible/cargo-i18n", "https://github.com/str4d/rage"]
+required-git-spec = "rev"

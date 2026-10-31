@@ -73,3 +73,8 @@ missing_safety_doc = "deny"
 lto = "thin"
 codegen-units = 1
 strip = "debuginfo"
+
+# Correction amont non encore publiee: remplace basic-toml non maintenu.
+# Un seul crate remplace, revision complete; retirer apres sa publication.
+[patch.crates-io]
+i18n-config = { git = "https://github.com/kellpossible/cargo-i18n", rev = "2ce7b1dfe9a8cc224288bf50cbc2a67a6de863c4" }
