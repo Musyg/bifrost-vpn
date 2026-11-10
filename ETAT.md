@@ -1,5 +1,44 @@
 # Etat de Bifrost
 
+## Maintenance des audits du 10 novembre 2026
+
+L'audit planifie est rouge depuis le 5 novembre 2026 (dernier run
+42819785002), sans changement de code: la base RustSec a recu ce jour-la
+RUSTSEC-2026-0441, `pin-utils` 0.1.0 non maintenu. Type INFO, pas une
+vulnerabilite, aucune version corrigee. Il arrive par `nix` 0.25.1, sous
+`netlink-request` 2.0.0, sous `wireguard-control` 2.0.0, la meme pile que
+`paste`, et seulement pour Linux. `nix` ne s'en sert que pour deux macros de
+`sys/aio.rs`.
+
+Aucun nouveau verrou: la branche principale d'innernet au 10/11/2026 (1ba6154)
+demande toujours `nix` 0.25 dans `netlink-request`. L'avis est donc ignore
+nommement dans `deny.toml`, `fuzz/deny.toml` et `.cargo/audit.toml`, avec son
+raisonnement date dans `deny.toml`. Une correction amont qui passe
+`netlink-request` a `nix` 0.30.1 est preparee; a sa publication l'entree tombe
+des listes, et `unused-ignored-advisory = "deny"` le rappellera.
+
+La recette `audit_planifie.rs` fige la section `[advisories]` de `deny.toml`
+et de `fuzz/deny.toml`: sa constante porte la nouvelle entree dans le meme
+commit, comme pour la coquille.
+
+Mesures dans un worktree de HEAD plus les fichiers de la tranche, dans un
+conteneur Linux jetable, cargo-audit 0.22.2 et cargo-deny 0.20.2 comme en CI:
+`cargo audit -D warnings` et `cargo deny check` a la racine, `cargo deny
+check` dans `fuzz/` et les deux juges de la coquille passent; avant la
+correction, les trois premiers rendaient RUSTSEC-2026-0441. `cargo fmt --all
+--check` et `cargo clippy --workspace --all-targets -- -D warnings` passent,
+ainsi que les recettes `avis_ignores`, `audit_planifie`, `sources_ascii`,
+`caracteres_de_controle` et `revisions_amont`. Falsifie: l'identifiant retire
+d'une seule des deux listes rend `avis_ignores` rouge; la raison changee d'un
+caractere, ou l'entree retiree, dans `deny.toml` ou `fuzz/deny.toml`, rend
+`audit_planifie` rouge; restaurees, elles repassent. recettes-strict: 79
+binaires, 1892 vertes annoncees, 19 abstentions, 2 ignorees et 16 rouges, soit
+1873 mesures reelles, les memes nombres et les memes recettes rouges que sur
+HEAD seul. Ces rouges tiennent au conteneur, pas a la tranche: onze faute du
+binaire `ip` (iproute2 absent), trois sur une lecture rtnetlink en erreur, une
+faute d'IPv6, une parce que le dossier de construction est sous un repertoire
+que seul root traverse. Elles restent a lire sur essai-linux et en CI.
+
 ## Maintenance des dependances, 31 octobre 2026
 
 L'audit planifie 41193202970 echouait sur RUSTSEC-2026-0387

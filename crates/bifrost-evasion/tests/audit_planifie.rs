@@ -132,8 +132,10 @@
 //!    choisit la base de cargo-deny et dit comment la prendre (`db-urls`,
 //!    `db-path`, `git-fetch-with-cli`, `maximum-db-staleness`). Fige par
 //!    decision du 15/10/2026; la recette lit ces deux fichiers, elle ne les
-//!    change pas. La section `[advisories]` de `gui/deny.toml` est figee de
-//!    la meme facon, sous les memes regles, a `ADVISORIES_DE_LA_COQUILLE`:
+//!    change pas. Seule la liste des avis ignores bouge, avec la constante et
+//!    dans le meme commit: RUSTSEC-2026-0441 s'y est ajoute le 10/11/2026.
+//!    La section `[advisories]` de `gui/deny.toml` est figee de la meme
+//!    facon, sous les memes regles, a `ADVISORIES_DE_LA_COQUILLE`:
 //!    les cinq reglages de la racine, puis la liste des avis que la coquille
 //!    ignore. Changer cette liste, c'est changer cette constante dans le meme
 //!    commit.
@@ -283,8 +285,11 @@ const CONFIG_DENY_FUZZ: &str = "fuzz/deny.toml";
 
 /// Les lignes actives (ni vides, ni commentaires) de `[advisories]` dans
 /// `deny.toml` et dans `fuzz/deny.toml` a `69d846f`: les memes dans les deux,
-/// figees (regle 9).
-const ADVISORIES_A_69D846F: [&str; 8] = [
+/// figees (regle 9). Une seule entree s'y est ajoutee depuis, le 10/11/2026:
+/// RUSTSEC-2026-0441 (`pin-utils`), dans le meme commit que les deux fichiers.
+/// Comme pour la coquille, changer la liste des avis ignores, c'est changer
+/// cette constante dans le meme commit.
+const ADVISORIES_A_69D846F: [&str; 9] = [
     "db-urls = [\"https://github.com/rustsec/advisory-db\"]",
     "yanked = \"deny\"",
     "unmaintained = \"all\"",
@@ -293,6 +298,9 @@ const ADVISORIES_A_69D846F: [&str; 8] = [
     "ignore = [",
     "    { id = \"RUSTSEC-2024-0436\", reason = \"paste archive, proc-macro donc absent du \
      binaire livre, transitif sous wireguard-control, aucune version corrigee\" },",
+    "    { id = \"RUSTSEC-2026-0441\", reason = \"pin-utils non maintenu, trois macro_rules \
+     sans fonction, transitif sous nix 0.25 et wireguard-control, Linux seulement, aucune \
+     version corrigee, releve le 2026-11-10\" },",
     "]",
 ];
 

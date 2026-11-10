@@ -23,10 +23,11 @@ yanked = "deny"
 unmaintained = "all"
 unsound = "all"
 unused-ignored-advisory = "deny"
-# Le meme avis qu'a la racine: `paste` arrive ici par la meme pile netlink,
-# sous `bifrost-daemon`.
+# Les memes avis qu'a la racine: `paste` et `pin-utils` arrivent ici par la
+# meme pile netlink, sous `bifrost-daemon`.
 ignore = [
     { id = "RUSTSEC-2024-0436", reason = "paste archive, proc-macro donc absent du binaire livre, transitif sous wireguard-control, aucune version corrigee" },
+    { id = "RUSTSEC-2026-0441", reason = "pin-utils non maintenu, trois macro_rules sans fonction, transitif sous nix 0.25 et wireguard-control, Linux seulement, aucune version corrigee, releve le 2026-11-10" },
 ]
 
 [licenses]

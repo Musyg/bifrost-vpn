@@ -234,8 +234,8 @@ fn l_extraction_trouve_reellement_quelque_chose() {
     }
 }
 
-/// Et le temoin que les commentaires sont bien ecartes. `deny.toml` nomme son
-/// avis en prose plusieurs fois avant de l'ignorer une seule; si les
+/// Et le temoin que les commentaires sont bien ecartes. `deny.toml` nomme ses
+/// avis en prose plusieurs fois avant d'ignorer chacun une seule fois; si les
 /// commentaires comptaient, l'egalite ci-dessus tomberait pour une raison qui
 /// n'a rien a voir avec une divergence reelle.
 #[test]
@@ -253,8 +253,9 @@ fn les_commentaires_ne_comptent_pas() {
     );
     assert_eq!(
         avis_actifs(&deny).len(),
-        1,
-        "un seul avis est ignore aujourd'hui, et il l'est sur une ligne active"
+        2,
+        "deux avis sont ignores depuis le 10/11/2026 (paste et pin-utils), chacun \
+         sur une ligne active"
     );
 }
 
