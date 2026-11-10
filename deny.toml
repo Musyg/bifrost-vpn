@@ -92,8 +92,35 @@ unused-ignored-advisory = "deny"
 # inutile et `unused-ignored-advisory = "deny"` (ci-dessus) fera rougir
 # `cargo deny check advisories`: l'entree tombe alors des DEUX listes, ici et
 # dans `.cargo/audit.toml`, que la recette `avis_ignores.rs` tient d'accord.
+#
+# RUSTSEC-2026-0441, date du 1er octobre 2026 mais entre dans la base RustSec
+# le 5 novembre 2026, jour ou l'audit planifie a rougi: `pin-utils` n'est plus
+# maintenu. Type INFO, non maintenu - ce n'est pas une vulnerabilite, aucune
+# version corrigee n'existe.
+#
+# Trois faits qui portent la decision, verifies le 10 novembre 2026:
+#
+# 1. `pin-utils` 0.1.0 ne porte que trois `macro_rules!` (`pin_mut!`,
+#    `unsafe_pinned!`, `unsafe_unpinned!`) et aucune fonction. `nix` 0.25.1
+#    ne s'en sert que dans `sys/aio.rs`: deux macros, six appels. Ce qui
+#    entre dans le binaire est le code deplie dans `nix`, pas une bibliotheque
+#    qui vit a cote.
+# 2. Il est **transitif et non choisi**: `nix` 0.25.1 le tire, sous
+#    `netlink-request` 2.0.0, sous `wireguard-control` 2.0.0, la meme pile que
+#    `paste` ci-dessus.
+# 3. `cargo tree -i pin-utils --target` ne le trouve que pour Linux: Windows
+#    et macOS ne le tirent pas.
+#
+# Ce qu'il faudrait pour le retirer: que `netlink-request` passe a un `nix`
+# recent (`wireguard-control` 2.0.0 ne demande `nix` 0.30.1 que pour OpenBSD,
+# et le `nix` 0.25 de Linux vient de `netlink-request`). Sur la branche
+# principale d'innernet au 10 novembre 2026 (commit 1ba6154 du 28 juillet), il
+# demande encore `nix` 0.25. Une correction amont est en preparation; a sa
+# publication, `unused-ignored-advisory` fera rougir cette ligne et l'entree
+# tombera des trois listes (ici, `fuzz/deny.toml` et `.cargo/audit.toml`).
 ignore = [
     { id = "RUSTSEC-2024-0436", reason = "paste archive, proc-macro donc absent du binaire livre, transitif sous wireguard-control, aucune version corrigee" },
+    { id = "RUSTSEC-2026-0441", reason = "pin-utils non maintenu, trois macro_rules sans fonction, transitif sous nix 0.25 et wireguard-control, Linux seulement, aucune version corrigee, releve le 2026-11-10" },
 ]
 
 [licenses]
